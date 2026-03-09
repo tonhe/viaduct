@@ -49,19 +49,29 @@ jobs:
           repository: tonhe/homebrew-tap
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Update via formula
+      - name: Update viaduct formula
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          SHA256=$(curl -sL "https://github.com/tonhe/viaduct/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+          TARBALL_URL="https://github.com/tonhe/viaduct/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
 
-          cat > Formula/via.rb << 'FORMULA'
-          class Via < Formula
+          # Download tarball with retry to avoid race with release job
+          for i in 1 2 3; do
+            curl -fsSL -o tarball.tar.gz "$TARBALL_URL" && break
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+
+          SHA256=$(shasum -a 256 tarball.tar.gz | cut -d' ' -f1)
+          rm -f tarball.tar.gz
+
+          cat > Formula/viaduct.rb << FORMULA
+          class Viaduct < Formula
             desc "Modern traceroute with real-time terminal UI"
             homepage "https://github.com/tonhe/viaduct"
-            url "https://github.com/tonhe/viaduct/archive/refs/tags/vVERSION_PLACEHOLDER.tar.gz"
-            sha256 "SHA256_PLACEHOLDER"
+            url "$TARBALL_URL"
+            sha256 "$SHA256"
             license "MIT"
 
             depends_on "go" => :build
@@ -72,7 +82,7 @@ jobs:
                 -X main.version=#{version}
                 -X main.buildVersion=#{tap.user}
               ]
-              system "go", "build", *std_go_args(ldflags:), "./cmd/via"
+              system "go", "build", *std_go_args(ldflags:, output: bin/"via"), "./cmd/via"
             end
 
             test do
@@ -81,14 +91,11 @@ jobs:
           end
           FORMULA
 
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/via.rb
-          sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" Formula/via.rb
-
           # Remove leading whitespace from heredoc
-          sed -i 's/^          //' Formula/via.rb
+          sed -i 's/^          //' Formula/viaduct.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/via.rb
-          git commit -m "via: update to ${VERSION}"
+          git add Formula/viaduct.rb
+          git commit -m "viaduct: update to ${VERSION}"
           git push
