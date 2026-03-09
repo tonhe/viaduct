@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: tonhe
+          repositories: homebrew-tap
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: tonhe/homebrew-tap
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Update via formula
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256=$(curl -sL "https://github.com/tonhe/viaduct/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+
+          cat > Formula/via.rb << 'FORMULA'
+          class Via < Formula
+            desc "Modern traceroute with real-time terminal UI"
+            homepage "https://github.com/tonhe/viaduct"
+            url "https://github.com/tonhe/viaduct/archive/refs/tags/vVERSION_PLACEHOLDER.tar.gz"
+            sha256 "SHA256_PLACEHOLDER"
+            license "MIT"
+
+            depends_on "go" => :build
+
+            def install
+              ldflags = %W[
+                -s -w
+                -X main.version=#{version}
+                -X main.buildVersion=#{tap.user}
+              ]
+              system "go", "build", *std_go_args(ldflags:), "./cmd/via"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/via --version")
+            end
+          end
+          FORMULA
+
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/via.rb
+          sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" Formula/via.rb
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' Formula/via.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/via.rb
+          git commit -m "via: update to ${VERSION}"
+          git push

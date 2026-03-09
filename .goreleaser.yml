@@ -1,0 +1,67 @@
+version: 2
+
+env:
+  - CGO_ENABLED=0
+
+builds:
+  - binary: via
+    main: ./cmd/via
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.buildVersion={{.ShortCommit}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^Merge pull request"
+
+nfpms:
+  - package_name: via
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: tonhe
+    homepage: https://github.com/tonhe/viaduct
+    maintainer: tonhe
+    description: Modern traceroute with real-time terminal UI
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+
+release:
+  github:
+    owner: tonhe
+    name: viaduct
+  name_template: "v{{.Version}}"
+  draft: false
+  prerelease: auto
