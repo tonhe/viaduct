@@ -42,8 +42,11 @@ func TestDefaultConfigECMP(t *testing.T) {
 	if cfg.BasePort != 44000 {
 		t.Fatalf("expected BasePort 44000, got %d", cfg.BasePort)
 	}
-	if cfg.DestPort != 33434 {
-		t.Fatalf("expected DestPort 33434, got %d", cfg.DestPort)
+	if cfg.Protocol == nil {
+		t.Fatal("expected Protocol to be set")
+	}
+	if cfg.Protocol.Name() != "udp" {
+		t.Fatalf("expected Protocol name 'udp', got %q", cfg.Protocol.Name())
 	}
 }
 

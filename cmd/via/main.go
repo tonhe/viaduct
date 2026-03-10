@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -14,14 +15,16 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/net/icmp"
 
+	"github.com/tonhe/viaduct/internal/asn"
 	"github.com/tonhe/viaduct/internal/hop"
+	"github.com/tonhe/viaduct/internal/ping"
 	"github.com/tonhe/viaduct/internal/probe"
 	"github.com/tonhe/viaduct/internal/resolve"
 	"github.com/tonhe/viaduct/internal/tui"
 )
 
 var (
-	version      = "0.0.1"
+	version      = "0.0.2"
 	buildVersion = "dev" // injected at build time via -ldflags
 )
 
@@ -46,6 +49,10 @@ func main() {
 	rootCmd.Flags().BoolP("no-dns", "n", false, "skip reverse DNS lookups")
 	rootCmd.Flags().Int("paths", 6, "number of ECMP flow variations (1 = disable multipath)")
 	rootCmd.Flags().Bool("no-paths", false, "disable ECMP multipath (shorthand for --paths 1)")
+	rootCmd.Flags().StringP("protocol", "P", "udp", "probe protocol: udp, icmp, tcp, auto")
+	rootCmd.Flags().IntP("port", "p", 0, "destination port override (default: protocol-specific)")
+	rootCmd.Flags().Bool("no-asn", false, "skip ASN lookups")
+	rootCmd.Flags().Bool("no-ping", false, "skip ping supplement for rate-limited hops")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -98,9 +105,19 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	if noPaths {
 		numPaths = 1
 	}
+	protocolName, _ := cmd.Flags().GetString("protocol")
+	dstPort, _ := cmd.Flags().GetInt("port")
+	noASN, _ := cmd.Flags().GetBool("no-asn")
+	noPing, _ := cmd.Flags().GetBool("no-ping")
 
 	if reportMode && count == 0 {
 		count = 10
+	}
+
+	// Build protocol before constructing config
+	proto, err := buildProtocol(protocolName, dstPort, &numPaths)
+	if err != nil {
+		return err
 	}
 
 	cfg := probe.Config{
@@ -115,20 +132,33 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		ReportMode:  reportMode,
 		NumPaths:    numPaths,
 		BasePort:    44000,
-		DestPort:    33434,
+		Protocol:    proto,
 	}
+
+	// Determine source IP
+	srcConn, err := net.Dial("udp4", targetIP.String()+":1")
+	if err == nil {
+		cfg.SourceIP = srcConn.LocalAddr().(*net.UDPAddr).IP
+		srcConn.Close()
+	}
+	cfg.TargetIP = targetIP
 
 	// Report mode: bypass TUI, run N rounds, print table, exit
 	if cfg.ReportMode {
-		return runReport(target, targetIP, cfg)
+		return runReport(target, targetIP, cfg, protocolName, noASN, noPing)
 	}
 
 	// Create TUI model
 	versionStr := "v" + version + " (" + buildVersion + ")"
-	model := tui.New(target, targetIP, cfg, versionStr)
+	model := tui.New(target, targetIP, cfg, versionStr, protocolName, noASN, noPing)
 
 	// Create bubbletea program
 	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	// Wire auto-mode protocol switch callback
+	cfg.OnProtocolSwitch = func(newProto string) {
+		p.Send(tui.ProtocolSwitchMsg{NewProtocol: newProto})
+	}
 
 	// Create context for background goroutines
 	ctx, cancel := context.WithCancel(context.Background())
@@ -141,8 +171,36 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Start probe tracer in background
 	tracer := probe.NewTracer(targetIP, cfg)
 	tracer.OnSent = model.Table()
+	// Start ping supplementer
+	var supplementer *ping.Supplementer
+	pingResults := make(chan ping.Result, 64)
+	if !noPing {
+		supplementer = ping.New(time.Second)
+		go func() {
+			if err := supplementer.Run(ctx, pingResults); err != nil {
+				// Ping socket failure is non-fatal
+			}
+		}()
+	}
+
 	tracer.OnRoundEnd = func() {
 		p.Send(tui.RoundEndMsg{})
+		if supplementer != nil {
+			hops := model.Table().Snapshot()
+			maxTTL := model.Table().MaxTTLSeen()
+			rl := hop.DetectRateLimited(hops, maxTTL)
+			hopMap := make(map[int]*hop.Hop, len(hops))
+			for _, h := range hops {
+				hopMap[h.TTL] = h
+			}
+			for ttl := range rl {
+				if h, ok := hopMap[ttl]; ok {
+					if ip := h.GetIP(); ip != nil {
+						supplementer.Submit(ip)
+					}
+				}
+			}
+		}
 	}
 	model.SetTracer(tracer)
 	go func() {
@@ -154,7 +212,13 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Start DNS resolver in background
 	go model.Resolver().Run(ctx, dnsResults)
 
-	// Forwarding goroutine: probe results -> TUI (and submit to resolver)
+	// Start ASN enricher in background
+	asnResults := make(chan asn.Result, 64)
+	if model.Enricher() != nil {
+		go model.Enricher().Run(ctx, asnResults)
+	}
+
+	// Forwarding goroutine: probe results -> TUI (and submit to resolver/enricher)
 	go func() {
 		for {
 			select {
@@ -162,6 +226,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 				return
 			case r := <-probeResults:
 				p.Send(tui.HopUpdateMsg{Result: r})
+				if model.Enricher() != nil {
+					model.Enricher().Submit(r.IP)
+				}
 			}
 		}
 	}()
@@ -178,6 +245,32 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	// Forwarding goroutine: ASN results -> TUI
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-asnResults:
+				p.Send(tui.ASNMsg{IP: r.IP, Number: r.Info.Number, Org: r.Info.Org})
+			}
+		}
+	}()
+
+	// Forwarding goroutine: ping results -> TUI
+	if !noPing {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case r := <-pingResults:
+					p.Send(tui.PingUpdateMsg{IP: r.IP, RTT: r.RTT, Lost: r.Lost})
+				}
+			}
+		}()
+	}
+
 	// Run TUI (blocks until quit)
 	finalModel, err := p.Run()
 	if err != nil {
@@ -193,15 +286,10 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runReport(target string, targetIP net.IP, cfg probe.Config) error {
+func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, noPing bool) error {
 	table := hop.NewTable(cfg.MaxHops)
 	tracer := probe.NewTracer(targetIP, cfg)
 	tracer.OnSent = table
-	tracer.OnRoundEnd = func() {
-		for _, h := range table.Snapshot() {
-			h.MarkRoundEnd()
-		}
-	}
 
 	var resolver *resolve.Resolver
 	if !cfg.NoDNS {
@@ -230,6 +318,78 @@ func runReport(target string, targetIP net.IP, cfg probe.Config) error {
 		}()
 	}
 
+	// Start ASN enricher if enabled
+	var enricher *asn.Enricher
+	if !noASN {
+		enricher = asn.New(4)
+		asnResults := make(chan asn.Result, 64)
+		go enricher.Run(ctx, asnResults)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-asnResults:
+				}
+			}
+		}()
+	}
+
+	// Start ping supplementer
+	var supplementer *ping.Supplementer
+	pingResultsCh := make(chan ping.Result, 64)
+	if !noPing {
+		supplementer = ping.New(time.Second)
+		go func() {
+			supplementer.Run(ctx, pingResultsCh)
+		}()
+	}
+
+	// Collect ping results
+	pingStats := make(map[string]*ping.Stat)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-pingResultsCh:
+				key := r.IP.String()
+				stat, ok := pingStats[key]
+				if !ok {
+					stat = &ping.Stat{}
+					pingStats[key] = stat
+				}
+				if r.Lost {
+					stat.AddLoss()
+				} else {
+					stat.AddSample(r.RTT)
+				}
+			}
+		}
+	}()
+
+	tracer.OnRoundEnd = func() {
+		for _, h := range table.Snapshot() {
+			h.MarkRoundEnd()
+		}
+		if supplementer != nil {
+			hops := table.Snapshot()
+			maxTTL := table.MaxTTLSeen()
+			rl := hop.DetectRateLimited(hops, maxTTL)
+			hopMap := make(map[int]*hop.Hop, len(hops))
+			for _, h := range hops {
+				hopMap[h.TTL] = h
+			}
+			for ttl := range rl {
+				if h, ok := hopMap[ttl]; ok {
+					if ip := h.GetIP(); ip != nil {
+						supplementer.Submit(ip)
+					}
+				}
+			}
+		}
+	}
+
 	// Track target hit for display (atomic for cross-goroutine safety)
 	var maxTTLHit int32
 
@@ -253,6 +413,9 @@ func runReport(target string, targetIP net.IP, cfg probe.Config) error {
 				if resolver != nil {
 					resolver.Submit(r.IP)
 				}
+				if enricher != nil {
+					enricher.Submit(r.IP)
+				}
 			}
 		}
 	}()
@@ -268,27 +431,31 @@ func runReport(target string, targetIP net.IP, cfg probe.Config) error {
 	cancel()
 	<-collectorDone // wait for collector goroutine to exit
 
-	printReport(target, targetIP, table, resolver, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths)
+	printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName, pingStats)
 	return nil
 }
 
-func printReport(target string, targetIP net.IP, table *hop.Table, resolver *resolve.Resolver, maxTTLHit int, numPaths int) {
+func printReport(target string, targetIP net.IP, table *hop.Table, resolver *resolve.Resolver, enricher *asn.Enricher, maxTTLHit int, numPaths int, protocolName string, pingStats map[string]*ping.Stat) {
 	multipath := numPaths > 1
 
 	// Header
+	protoLabel := strings.ToUpper(protocolName)
+	if protocolName != "icmp" && numPaths > 1 {
+		protoLabel += "/ECMP"
+	}
 	if multipath {
-		fmt.Printf("via — %s (%s) — %d flows\n", target, targetIP.String(), numPaths)
+		fmt.Printf("via — %s (%s) — %s — %d flows\n", target, targetIP.String(), protoLabel, numPaths)
 	} else {
-		fmt.Printf("via — %s (%s)\n", target, targetIP.String())
+		fmt.Printf("via — %s (%s) — %s\n", target, targetIP.String(), protoLabel)
 	}
 
 	// Column headers
 	if multipath {
-		fmt.Printf("%-4s %-18s %-22s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
-			"#", "IP", "Hostname", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab")
+		fmt.Printf("%-4s %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab")
 	} else {
-		fmt.Printf("%-4s %-18s %-22s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
-			"#", "IP", "Hostname", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last")
+		fmt.Printf("%-4s %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last")
 	}
 
 	// Determine max TTL to display
@@ -304,22 +471,9 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 		hopMap[h.TTL] = h
 	}
 
-	// Detect ICMP rate-limiting: loss at hop N with no loss downstream
-	rateLimited := make(map[int]bool)
-	minDownstream := 100.0
-	for ttl := maxTTL; ttl >= 1; ttl-- {
-		h, ok := hopMap[ttl]
-		if !ok || h.GetIP() == nil {
-			continue
-		}
-		loss := h.LossPercent()
-		if ttl < maxTTL && loss > 1.0 && minDownstream < loss-5.0 {
-			rateLimited[ttl] = true
-		}
-		if loss < minDownstream {
-			minDownstream = loss
-		}
-	}
+	rateLimited := hop.DetectRateLimited(hops, maxTTL)
+
+	prevASN := 0
 
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		h, ok := hopMap[ttl]
@@ -353,29 +507,64 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					hostname = hostname[:20]
 				}
 
+				asnLabel := ""
+				currentASN := 0
+				if enricher != nil {
+					if info, ok := enricher.Lookup(ip); ok {
+						currentASN = info.Number
+						asnLabel = asn.FormatASN(info.Number, info.Org)
+					}
+				}
+				if len(asnLabel) > 20 {
+					asnLabel = asnLabel[:20]
+				}
+
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
-					if rateLimited[ttl] {
+					// Check for ping supplement data
+					if ps, ok := pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
+						lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
+						sntStr = fmt.Sprintf("%d", ps.Sent)
+					} else if rateLimited[ttl] {
 						lossStr = fmt.Sprintf("~%.0f%%", hopLoss)
+						sntStr = fmt.Sprintf("%d", sent)
 					} else {
 						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
+						sntStr = fmt.Sprintf("%d", sent)
 					}
-					sntStr = fmt.Sprintf("%d", sent)
 				}
 
-				avg := float64(node.AvgRTT().Microseconds()) / 1000.0
-				minRTT := float64(node.GetMinRTT().Microseconds()) / 1000.0
-				maxRTT := float64(node.GetMaxRTT().Microseconds()) / 1000.0
-				stdev := node.StDev()
-				last := float64(node.GetLastRTT().Microseconds()) / 1000.0
+				var avg, minRTT, maxRTT, stdev, last float64
+				if nodeIdx == 0 {
+					if ps, ok := pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Received > 0 {
+						avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
+						minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
+						maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
+						stdev = ps.StDev()
+						last = float64(ps.LastRTT.Microseconds()) / 1000.0
+					} else {
+						avg = float64(node.AvgRTT().Microseconds()) / 1000.0
+						minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
+						maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
+						stdev = node.StDev()
+						last = float64(node.GetLastRTT().Microseconds()) / 1000.0
+					}
+				} else {
+					avg = float64(node.AvgRTT().Microseconds()) / 1000.0
+					minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
+					maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
+					stdev = node.StDev()
+					last = float64(node.GetLastRTT().Microseconds()) / 1000.0
+				}
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
-				fmt.Printf("%-4d %-18s %-22s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				fmt.Printf("%-4d %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
+					asnLabel,
 					lossStr,
 					sntStr,
 					fmt.Sprintf("%.1f", avg),
@@ -386,6 +575,9 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					flows,
 					stab,
 				)
+				if currentASN != 0 {
+					prevASN = currentASN
+				}
 				nodeIdx++
 			}
 		} else {
@@ -401,16 +593,44 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				hostname = hostname[:20]
 			}
 
-			loss := h.LossPercent()
-			lossStr := fmt.Sprintf("%.1f%%", loss)
-			if rateLimited[ttl] {
-				lossStr = fmt.Sprintf("~%.0f%%", loss)
+			asnLabel := ""
+			currentASN := 0
+			if enricher != nil {
+				if info, ok := enricher.Lookup(ip); ok {
+					currentASN = info.Number
+					asnLabel = asn.FormatASN(info.Number, info.Org)
+				}
 			}
-			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
-			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0
-			maxRTT := float64(h.GetMaxRTT().Microseconds()) / 1000.0
-			stdev := h.StDev()
-			last := float64(h.GetLastRTT().Microseconds()) / 1000.0
+			if len(asnLabel) > 20 {
+				asnLabel = asnLabel[:20]
+			}
+
+			var lossStr string
+			var avg, minRTT, maxRTT, stdev, last float64
+			var sent int
+			if ps, ok := pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
+				lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
+				sent = ps.Sent
+				if ps.Received > 0 {
+					avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
+					minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
+					maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
+					stdev = ps.StDev()
+					last = float64(ps.LastRTT.Microseconds()) / 1000.0
+				}
+			} else {
+				loss := h.LossPercent()
+				lossStr = fmt.Sprintf("%.1f%%", loss)
+				if rateLimited[ttl] {
+					lossStr = fmt.Sprintf("~%.0f%%", loss)
+				}
+				sent = h.GetSent()
+				avg = float64(h.AvgRTT().Microseconds()) / 1000.0
+				minRTT = float64(h.GetMinRTT().Microseconds()) / 1000.0
+				maxRTT = float64(h.GetMaxRTT().Microseconds()) / 1000.0
+				stdev = h.StDev()
+				last = float64(h.GetLastRTT().Microseconds()) / 1000.0
+			}
 
 			if multipath {
 				// Still show Flows and Stab columns for consistency
@@ -421,12 +641,13 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					flows = hop.FormatFlowIDs(nodes[0].GetFlowIDs())
 					stab = fmt.Sprintf("%.0f%%", nodes[0].StabilityPercent())
 				}
-				fmt.Printf("%-4d %-18s %-22s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				fmt.Printf("%-4d %-18s %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
+					asnLabel,
 					lossStr,
-					h.GetSent(),
+					sent,
 					fmt.Sprintf("%.1f", avg),
 					fmt.Sprintf("%.1f", minRTT),
 					fmt.Sprintf("%.1f", maxRTT),
@@ -436,12 +657,13 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					stab,
 				)
 			} else {
-				fmt.Printf("%-4d %-18s %-22s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
+				fmt.Printf("%-4d %-18s %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
 					ttl,
 					ip.String(),
 					hostname,
+					asnLabel,
 					lossStr,
-					h.GetSent(),
+					sent,
 					fmt.Sprintf("%.1f", avg),
 					fmt.Sprintf("%.1f", minRTT),
 					fmt.Sprintf("%.1f", maxRTT),
@@ -449,7 +671,42 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					fmt.Sprintf("%.1f", last),
 				)
 			}
+			if currentASN != 0 {
+				prevASN = currentASN
+			}
 		}
+	}
+	_ = prevASN // report mode doesn't use color
+}
+
+func buildProtocol(protocolName string, dstPort int, numPaths *int) (probe.ProbeProtocol, error) {
+	switch protocolName {
+	case "icmp":
+		if *numPaths > 1 {
+			fmt.Fprintln(os.Stderr, "Warning: ICMP mode does not support multipath discovery, ignoring --paths")
+			*numPaths = 1
+		}
+		return probe.NewICMPProtocol(), nil
+	case "udp":
+		if dstPort == 0 {
+			dstPort = 33434
+		}
+		return probe.NewUDPProtocol(dstPort), nil
+	case "tcp":
+		if dstPort == 0 {
+			dstPort = 443
+		}
+		return probe.NewTCPProtocol(dstPort), nil
+	case "auto":
+		if dstPort == 0 {
+			dstPort = 33434
+		}
+		return probe.NewAutoSelector(
+			probe.NewUDPProtocol(dstPort),
+			probe.NewICMPProtocol(),
+		), nil
+	default:
+		return nil, fmt.Errorf("unknown protocol: %s (valid: udp, icmp, tcp, auto)", protocolName)
 	}
 }
 

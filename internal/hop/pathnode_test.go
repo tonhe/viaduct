@@ -82,6 +82,32 @@ func TestPathNodeStability(t *testing.T) {
 	}
 }
 
+func TestPathNodeASN(t *testing.T) {
+	pn := &PathNode{IP: net.ParseIP("1.1.1.1")}
+	asn, org := pn.GetASN()
+	if asn != 0 || org != "" {
+		t.Fatalf("expected zero ASN, got %d %q", asn, org)
+	}
+	pn.SetASN(13335, "CLOUDFLARENET")
+	asn, org = pn.GetASN()
+	if asn != 13335 {
+		t.Fatalf("expected ASN 13335, got %d", asn)
+	}
+	if org != "CLOUDFLARENET" {
+		t.Fatalf("expected org 'CLOUDFLARENET', got %q", org)
+	}
+}
+
+func TestPathNodeResetClearsASN(t *testing.T) {
+	pn := &PathNode{IP: net.ParseIP("1.1.1.1")}
+	pn.SetASN(13335, "CLOUDFLARENET")
+	pn.Reset()
+	asn, org := pn.GetASN()
+	if asn != 0 || org != "" {
+		t.Fatalf("expected zero ASN after reset, got %d %q", asn, org)
+	}
+}
+
 func TestPathNodeReset(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("10.0.0.1"))
 	pn.AddSample(10*time.Millisecond, 0)

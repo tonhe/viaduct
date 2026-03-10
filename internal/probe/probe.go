@@ -26,7 +26,10 @@ type Config struct {
 	ReportMode  bool
 	NumPaths    int           // number of ECMP flow variations (default 6)
 	BasePort    int           // starting UDP source port for flow variation
-	DestPort    int           // base UDP destination port (+ TTL)
+	Protocol          ProbeProtocol // probe protocol (icmp, udp, tcp)
+	SourceIP          net.IP        // local source IP (needed for TCP checksum)
+	TargetIP          net.IP        // destination IP (needed for TCP checksum)
+	OnProtocolSwitch  func(string)  // called when auto mode switches protocol
 }
 
 // DefaultConfig returns sensible defaults.
@@ -40,7 +43,7 @@ func DefaultConfig() Config {
 		PayloadSize: 64,
 		NumPaths:    6,
 		BasePort:    44000,
-		DestPort:    33434,
+		Protocol:    NewUDPProtocol(33434),
 	}
 }
 
@@ -150,13 +153,14 @@ func buildUDPProbe(srcPort, dstPort, payloadSize int) ([]byte, error) {
 
 // Tracer sends ICMP probes and listens for responses.
 type Tracer struct {
-	cfg       Config
-	target    net.IP
-	pm        *probeMap
-	targetTTL int32 // atomically set when target is reached; 0 = not yet found
-	OnSent     SentCounter
-	OnRoundEnd func() // called at end of each probe round
-	Paused     int32  // atomic: 1 = paused, 0 = running
+	cfg           Config
+	target        net.IP
+	pm            *probeMap
+	targetTTL     int32 // atomically set when target is reached; 0 = not yet found
+	responseCount int32 // atomic: tracks responses received by listen()
+	OnSent        SentCounter
+	OnRoundEnd    func() // called at end of each probe round
+	Paused        int32  // atomic: 1 = paused, 0 = running
 }
 
 // NewTracer creates a tracer for the given target.
@@ -171,110 +175,79 @@ func NewTracer(target net.IP, cfg Config) *Tracer {
 // Run starts sending probes and listening. Results are sent to the results channel.
 // If a SentCounter is set, it is called each time a probe is dispatched.
 // It runs continuously (like mtr) until the context is cancelled.
-// When NumPaths > 1, UDP probes are sent with per-flow source port variation.
-// When NumPaths == 1, ICMP Echo probes are used (original behavior).
+// The protocol is determined by cfg.Protocol (ICMP, UDP, or TCP).
 func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
-	// ICMP listen socket — receives responses to both ICMP and UDP probes
+	// ICMP listen socket — receives responses for all protocol modes
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		return fmt.Errorf("raw socket permission denied: %w", err)
 	}
 	defer conn.Close()
 
-	// Start listener
+	// Start listener (runs for the lifetime of Run, handles all protocol modes)
 	go t.listen(ctx, conn, results)
 
-	if t.cfg.NumPaths > 1 {
-		return t.runUDP(ctx, conn)
-	}
-	return t.runICMP(ctx, conn)
-}
-
-// runICMP sends ICMP Echo probes (single-path mode).
-func (t *Tracer) runICMP(ctx context.Context, conn *icmp.PacketConn) error {
-	pconn := conn.IPv4PacketConn()
-
-	seq := 0
-	icmpID := (int(time.Now().UnixNano()) >> 16) & 0xffff
-
-	round := 0
 	for {
-		maxTTL := t.cfg.MaxHops
-		if reached := int(atomic.LoadInt32(&t.targetTTL)); reached > 0 {
-			maxTTL = reached
+		err := t.run(ctx, conn, results)
+		if err != nil {
+			return err
 		}
-		for ttl := t.cfg.FirstTTL; ttl <= maxTTL; ttl++ {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-			}
-
-			if atomic.LoadInt32(&t.Paused) == 1 {
-				time.Sleep(t.cfg.ProbeDelay)
-				continue
-			}
-
-			seq++
-			pkt, err := buildICMPEchoRequest(icmpID, seq, t.cfg.PayloadSize)
-			if err != nil {
-				continue
-			}
-
-			key := probeKey{SrcPort: icmpID, DstPort: seq, Seq: 0}
-			t.pm.add(key, ttl, 0, time.Now())
-
-			if err := pconn.SetTTL(ttl); err != nil {
-				continue
-			}
-
-			dst := &net.IPAddr{IP: t.target}
-			if _, err := conn.WriteTo(pkt, dst); err != nil {
-				continue
-			}
-
-			if t.OnSent != nil {
-				t.OnSent.IncrementSent(ttl)
-			}
-
-			time.Sleep(t.cfg.ProbeDelay)
-		}
-
-		if t.OnRoundEnd != nil {
-			t.OnRoundEnd()
-		}
-
-		// Sweep stale probe entries that never received a response
-		t.pm.sweep(2 * t.cfg.Timeout)
-
-		round++
-		if t.cfg.MaxRounds > 0 && round >= t.cfg.MaxRounds {
-			return nil
-		}
-
-		// Pause between rounds
+		// Check if we returned due to context cancellation
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(t.cfg.RoundDelay):
+		default:
 		}
+		// If auto-fallback happened, run() returned nil to signal restart.
+		// The listen goroutine continues on the same ICMP socket.
+		// run() will open new send sockets for the fallback protocol.
+		auto, ok := t.cfg.Protocol.(*AutoSelector)
+		if !ok || !auto.HasSwitched() {
+			return nil // Normal completion
+		}
+		// Continue loop — run() will re-enter with ICMP send sockets
 	}
 }
 
-// runUDP sends UDP probes with per-flow source port variation (ECMP multipath mode).
-func (t *Tracer) runUDP(ctx context.Context, _ *icmp.PacketConn) error {
-	// Raw UDP send socket for TTL control
-	udpConn, err := net.ListenPacket("ip4:udp", "0.0.0.0")
-	if err != nil {
-		return fmt.Errorf("raw UDP socket: %w", err)
-	}
-	defer udpConn.Close()
+// run is the protocol-agnostic send loop.
+func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- Result) error {
+	proto := t.cfg.Protocol
 
-	udpPConn := ipv4.NewPacketConn(udpConn)
+	// Determine send socket based on protocol.
+	// For ICMP: send via the ICMP listener socket itself.
+	// For UDP/TCP: open a separate raw socket for sending.
+	type sender interface {
+		SetTTL(ttl int) error
+		WriteTo(b []byte, dst net.Addr) (int, error)
+	}
+
+	var snd sender
+	switch proto.Name() {
+	case "icmp":
+		pconn := conn.IPv4PacketConn()
+		snd = &icmpSender{pconn: pconn, conn: conn}
+	default:
+		// UDP (and future TCP) use a raw IP socket for the protocol
+		rawProto := "ip4:udp"
+		if proto.Name() == "tcp" {
+			rawProto = "ip4:tcp"
+		}
+		rawConn, err := net.ListenPacket(rawProto, "0.0.0.0")
+		if err != nil {
+			return fmt.Errorf("raw %s socket: %w", proto.Name(), err)
+		}
+		defer rawConn.Close()
+		// For TCP, also start a listener for SYN-ACK/RST responses
+		if proto.Name() == "tcp" {
+			go t.listenTCP(ctx, rawConn, t.pm, results)
+		}
+		snd = &rawSender{pconn: ipv4.NewPacketConn(rawConn), conn: rawConn}
+	}
 
 	dst := &net.IPAddr{IP: t.target}
-
+	seq := 0
 	round := 0
+
 	for {
 		maxTTL := t.cfg.MaxHops
 		if reached := int(atomic.LoadInt32(&t.targetTTL)); reached > 0 {
@@ -282,7 +255,11 @@ func (t *Tracer) runUDP(ctx context.Context, _ *icmp.PacketConn) error {
 		}
 
 		for ttl := t.cfg.FirstTTL; ttl <= maxTTL; ttl++ {
-			for flow := 0; flow < t.cfg.NumPaths; flow++ {
+			numPaths := t.cfg.NumPaths
+			if !proto.SupportsMultipath() {
+				numPaths = 1
+			}
+			for flow := 0; flow < numPaths; flow++ {
 				select {
 				case <-ctx.Done():
 					return nil
@@ -294,22 +271,19 @@ func (t *Tracer) runUDP(ctx context.Context, _ *icmp.PacketConn) error {
 					continue
 				}
 
-				srcPort := t.cfg.BasePort + flow
-				dstPort := t.cfg.DestPort + ttl
-
-				pkt, err := buildUDPProbe(srcPort, dstPort, t.cfg.PayloadSize)
+				seq++
+				pkt, key, err := proto.BuildProbe(flow, ttl, seq, t.cfg)
 				if err != nil {
 					continue
 				}
 
-				key := probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
 				t.pm.add(key, ttl, flow, time.Now())
 
-				if err := udpPConn.SetTTL(ttl); err != nil {
+				if err := snd.SetTTL(ttl); err != nil {
 					continue
 				}
 
-				if _, err := udpConn.WriteTo(pkt, dst); err != nil {
+				if _, err := snd.WriteTo(pkt, dst); err != nil {
 					continue
 				}
 
@@ -328,6 +302,17 @@ func (t *Tracer) runUDP(ctx context.Context, _ *icmp.PacketConn) error {
 		// Sweep stale probe entries that never received a response
 		t.pm.sweep(2 * t.cfg.Timeout)
 
+		// Auto-fallback: after 3 rounds with no responses, switch to ICMP
+		if round >= 2 { // 0-indexed, so round 2 = 3rd round
+			t.checkAutoFallback()
+		}
+
+		// If auto-fallback triggered, return nil to signal Run() to restart
+		// with new sockets for the fallback protocol
+		if auto, ok := t.cfg.Protocol.(*AutoSelector); ok && auto.HasSwitched() {
+			return nil
+		}
+
 		round++
 		if t.cfg.MaxRounds > 0 && round >= t.cfg.MaxRounds {
 			return nil
@@ -342,12 +327,48 @@ func (t *Tracer) runUDP(ctx context.Context, _ *icmp.PacketConn) error {
 	}
 }
 
+// icmpSender wraps an ICMP PacketConn for the sender interface.
+type icmpSender struct {
+	pconn *ipv4.PacketConn
+	conn  *icmp.PacketConn
+}
+
+func (s *icmpSender) SetTTL(ttl int) error             { return s.pconn.SetTTL(ttl) }
+func (s *icmpSender) WriteTo(b []byte, dst net.Addr) (int, error) { return s.conn.WriteTo(b, dst) }
+
+// rawSender wraps a raw IP PacketConn for the sender interface.
+type rawSender struct {
+	pconn *ipv4.PacketConn
+	conn  net.PacketConn
+}
+
+func (s *rawSender) SetTTL(ttl int) error             { return s.pconn.SetTTL(ttl) }
+func (s *rawSender) WriteTo(b []byte, dst net.Addr) (int, error) { return s.conn.WriteTo(b, dst) }
+
+// checkAutoFallback switches from UDP to ICMP if no responses have been received.
+func (t *Tracer) checkAutoFallback() {
+	auto, ok := t.cfg.Protocol.(*AutoSelector)
+	if !ok || auto.HasSwitched() {
+		return
+	}
+	if atomic.LoadInt32(&t.responseCount) > 0 {
+		return // got responses, no need to switch
+	}
+	// No responses — fallback to ICMP
+	auto.Fallback()
+	atomic.StoreInt32(&t.targetTTL, 0)
+	if t.cfg.OnProtocolSwitch != nil {
+		t.cfg.OnProtocolSwitch("icmp")
+	}
+}
+
 // listen reads ICMP responses and matches them to outstanding probes.
-// It handles responses to both ICMP Echo probes and UDP probes:
-//   - ICMP Echo Reply: destination reached (ICMP mode)
-//   - ICMP Time Exceeded: intermediate hop (both modes)
-//   - ICMP Destination Unreachable (Port Unreachable): destination reached (UDP mode)
+// It handles responses for all protocol modes:
+//   - ICMP Echo Reply: destination reached (ICMP mode only)
+//   - ICMP Time Exceeded: intermediate hop (all modes) — uses Protocol.IdentifyResponse
+//   - ICMP Destination Unreachable: destination reached (UDP/TCP) — uses Protocol.IdentifyResponse
 func (t *Tracer) listen(ctx context.Context, conn *icmp.PacketConn, results chan<- Result) {
+	proto := t.cfg.Protocol
 	buf := make([]byte, 1500)
 	for {
 		select {
@@ -376,45 +397,30 @@ func (t *Tracer) listen(ctx context.Context, conn *icmp.PacketConn, results chan
 			if !ok || len(body.Data) < 28 {
 				continue
 			}
-			// Check the protocol field of the embedded IP header (byte 9)
-			proto := body.Data[9]
-			if proto == 17 {
-				// UDP probe response — extract ports from embedded UDP header
-				// IP header (20 bytes) + UDP src port (2) + dst port (2)
-				srcPort := int(body.Data[20])<<8 | int(body.Data[21])
-				dstPort := int(body.Data[22])<<8 | int(body.Data[23])
-				key = probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
-			} else {
-				// ICMP probe response — parse embedded ICMP echo
-				inner, err := icmp.ParseMessage(ipv4.ICMPTypeEcho.Protocol(), body.Data[20:])
-				if err != nil {
-					continue
-				}
-				echo, ok := inner.Body.(*icmp.Echo)
-				if !ok {
-					continue
-				}
-				key = probeKey{SrcPort: echo.ID, DstPort: echo.Seq, Seq: 0}
+			k, err := proto.IdentifyResponse(body.Data)
+			if err != nil || k == nil {
+				continue
 			}
+			key = *k
 			isTarget = false
 
 		case ipv4.ICMPTypeDestinationUnreachable:
-			// Port Unreachable = destination reached for UDP probes
 			body, ok := msg.Body.(*icmp.DstUnreach)
 			if !ok || len(body.Data) < 28 {
 				continue
 			}
-			// Extract UDP ports from embedded packet
-			proto := body.Data[9]
-			if proto != 17 {
-				continue // not a UDP response, ignore
+			k, err := proto.IdentifyResponse(body.Data)
+			if err != nil || k == nil {
+				continue
 			}
-			srcPort := int(body.Data[20])<<8 | int(body.Data[21])
-			dstPort := int(body.Data[22])<<8 | int(body.Data[23])
-			key = probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
-			isTarget = true
+			key = *k
+			isTarget = proto.IsDestReachedICMP(int(ipv4.ICMPTypeDestinationUnreachable), msg.Code)
 
 		case ipv4.ICMPTypeEchoReply:
+			// Echo Reply is only meaningful for ICMP protocol
+			if !proto.IsDestReachedICMP(int(ipv4.ICMPTypeEchoReply), 0) {
+				continue
+			}
 			echo, ok := msg.Body.(*icmp.Echo)
 			if !ok {
 				continue
@@ -430,6 +436,8 @@ func (t *Tracer) listen(ctx context.Context, conn *icmp.PacketConn, results chan
 		if !ok {
 			continue
 		}
+
+		atomic.AddInt32(&t.responseCount, 1)
 
 		// If this is the target, record the TTL so the sender can cap its range
 		if isTarget {

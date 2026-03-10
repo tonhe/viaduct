@@ -28,3 +28,22 @@ type RoundEndMsg struct{}
 type ProbeErrorMsg struct {
 	Err error
 }
+
+// ProtocolSwitchMsg is sent when auto mode switches to a different protocol.
+type ProtocolSwitchMsg struct {
+	NewProtocol string
+}
+
+// ASNMsg is sent when an ASN lookup completes.
+type ASNMsg struct {
+	IP     net.IP
+	Number int
+	Org    string
+}
+
+// PingUpdateMsg is sent when a ping supplement result arrives.
+type PingUpdateMsg struct {
+	IP   net.IP
+	RTT  time.Duration
+	Lost bool
+}

@@ -25,6 +25,9 @@ type PathNode struct {
 	mean     float64 // running mean in ms (Welford's)
 	m2       float64 // running sum of squared differences in ms² (Welford's)
 
+	asnNum int    // Autonomous System Number (0 = unknown)
+	asnOrg string // AS organization name
+
 	flowIDs   map[int]struct{}
 	stability [stabilityWindowSize]bool
 	stabIdx   int
@@ -182,6 +185,21 @@ func (pn *PathNode) SetHostname(name string) {
 	pn.Hostname = name
 }
 
+// GetASN returns the Autonomous System Number and organization name.
+func (pn *PathNode) GetASN() (int, string) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.asnNum, pn.asnOrg
+}
+
+// SetASN sets the Autonomous System Number and organization name.
+func (pn *PathNode) SetASN(number int, org string) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.asnNum = number
+	pn.asnOrg = org
+}
+
 // GetSent returns the sent count.
 func (pn *PathNode) GetSent() int {
 	pn.mu.Lock()
@@ -223,6 +241,8 @@ func (pn *PathNode) Reset() {
 	defer pn.mu.Unlock()
 
 	pn.Hostname = ""
+	pn.asnNum = 0
+	pn.asnOrg = ""
 	pn.sent = 0
 	pn.received = 0
 	pn.minRTT = 0

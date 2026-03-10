@@ -12,7 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/tonhe/viaduct/internal/asn"
 	"github.com/tonhe/viaduct/internal/hop"
+	"github.com/tonhe/viaduct/internal/ping"
 	"github.com/tonhe/viaduct/internal/probe"
 	"github.com/tonhe/viaduct/internal/resolve"
 )
@@ -30,7 +32,10 @@ var (
 	treeStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))  // muted for tree connectors
 	flowStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))   // blue for divergence TTL number
 	stabStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))  // dim for stability badge
-	rateLimitStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")) // dim gray for ICMP rate-limited loss
+	rateLimitStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("243")) // dim gray for ICMP rate-limited loss
+	asnStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	asnBoundaryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("179")) // muted gold for AS boundary
+	pingBadgeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("44")) // cyan
 )
 
 // Model is the bubbletea model for the TUI.
@@ -40,6 +45,7 @@ type Model struct {
 	version    string
 	table      *hop.Table
 	resolver   *resolve.Resolver
+	enricher   *asn.Enricher
 	probeCfg   probe.Config
 	probeCount int
 	startTime  time.Time
@@ -51,23 +57,40 @@ type Model struct {
 	paused       bool
 	dnsEnabled   bool
 	compactMode  bool
-	tracer       *probe.Tracer
-	scrollOffset int  // number of lines scrolled from bottom (0 = bottom)
-	autoScroll   bool // true = follow latest data
+	tracer           *probe.Tracer
+	scrollOffset     int       // number of lines scrolled from bottom (0 = bottom)
+	autoScroll       bool      // true = follow latest data
+	protocolName     string    // "icmp", "udp", "tcp", "auto"
+	switchStatusMsg  string    // transient status for auto mode switch
+	switchStatusTime time.Time // when switch status was set
+	pingStats        map[string]*ping.Stat
 }
 
 // New creates a new TUI model.
-func New(target string, targetIP net.IP, cfg probe.Config, version string) Model {
+func New(target string, targetIP net.IP, cfg probe.Config, version string, protocolName string, noASN bool, noPing bool) Model {
 	return Model{
-		target:     target,
-		targetIP:   targetIP,
-		version:    version,
-		table:      hop.NewTable(cfg.MaxHops),
-		resolver:   resolve.New(4),
-		probeCfg:   cfg,
-		startTime:  time.Now(),
-		dnsEnabled: !cfg.NoDNS,
-		autoScroll: true,
+		target:       target,
+		targetIP:     targetIP,
+		version:      version,
+		table:        hop.NewTable(cfg.MaxHops),
+		resolver: resolve.New(4),
+		enricher: func() *asn.Enricher {
+			if noASN {
+				return nil
+			}
+			return asn.New(4)
+		}(),
+		probeCfg: cfg,
+		startTime:    time.Now(),
+		dnsEnabled:   !cfg.NoDNS,
+		autoScroll:   true,
+		protocolName: protocolName,
+		pingStats: func() map[string]*ping.Stat {
+			if noPing {
+				return nil
+			}
+			return make(map[string]*ping.Stat)
+		}(),
 	}
 }
 
@@ -85,6 +108,9 @@ func (m *Model) Table() *hop.Table {
 func (m *Model) SetTracer(t *probe.Tracer) {
 	m.tracer = t
 }
+
+// Enricher returns the ASN enricher so main.go can start it and submit IPs.
+func (m Model) Enricher() *asn.Enricher { return m.enricher }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
@@ -170,6 +196,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case ASNMsg:
+		if m.enricher != nil {
+			for _, h := range m.table.Snapshot() {
+				for _, node := range h.GetNodes() {
+					if ip := node.GetIP(); ip != nil && ip.Equal(msg.IP) {
+						node.SetASN(msg.Number, msg.Org)
+					}
+				}
+			}
+		}
+
+	case PingUpdateMsg:
+		if m.pingStats == nil {
+			return m, nil
+		}
+		key := msg.IP.String()
+		stat, ok := m.pingStats[key]
+		if !ok {
+			stat = &ping.Stat{}
+			m.pingStats[key] = stat
+		}
+		if msg.Lost {
+			stat.AddLoss()
+		} else {
+			stat.AddSample(msg.RTT)
+		}
+		return m, nil
+
 	case RoundEndMsg:
 		for _, h := range m.table.Snapshot() {
 			h.MarkRoundEnd()
@@ -177,6 +231,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case TickMsg:
 		return m, tickCmd()
+
+	case ProtocolSwitchMsg:
+		m.switchStatusMsg = fmt.Sprintf("No UDP responses, switching to %s...", strings.ToUpper(msg.NewProtocol))
+		m.switchStatusTime = time.Now()
 
 	case ProbeErrorMsg:
 		m.err = msg.Err
@@ -195,9 +253,12 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// Header bar
-	protoLabel := "ICMP"
-	if m.probeCfg.NumPaths > 1 {
-		protoLabel = "UDP/ECMP"
+	protoLabel := strings.ToUpper(m.protocolName)
+	if m.protocolName == "auto" {
+		protoLabel = "Auto → " + strings.ToUpper(m.probeCfg.Protocol.Name())
+	}
+	if m.protocolName != "icmp" && m.probeCfg.NumPaths > 1 {
+		protoLabel += "/ECMP"
 	}
 	header := fmt.Sprintf("via %s   Target: %s (%s)    Proto: %s    Probes: %d",
 		m.version, m.target, m.targetIP.String(), protoLabel, m.probeCount)
@@ -225,25 +286,7 @@ func (m Model) View() string {
 		maxTTL = m.maxTTLHit
 	}
 
-	// Detect ICMP rate-limiting: if hop N has loss but downstream hops don't,
-	// the loss is from the router dropping ICMP TTL Exceeded replies, not real packet loss.
-	rateLimited := make(map[int]bool)
-	// Walk backwards to find the minimum downstream loss for each hop
-	minDownstream := 100.0
-	for ttl := maxTTL; ttl >= 1; ttl-- {
-		h, ok := hopMap[ttl]
-		if !ok || h.GetIP() == nil {
-			continue
-		}
-		loss := h.LossPercent()
-		if ttl < maxTTL && loss > 1.0 && minDownstream < loss-5.0 {
-			// This hop has significant loss but downstream hops are fine — rate-limited
-			rateLimited[ttl] = true
-		}
-		if loss < minDownstream {
-			minDownstream = loss
-		}
-	}
+	rateLimited := hop.DetectRateLimited(hops, maxTTL)
 
 	// Build all hop lines first
 	var hopLines []string
@@ -329,12 +372,16 @@ func (m Model) View() string {
 	if m.probeCfg.NumPaths > 1 {
 		flowLabel = fmt.Sprintf("    %d flows", m.probeCfg.NumPaths)
 	}
+	switchHint := ""
+	if m.switchStatusMsg != "" && time.Since(m.switchStatusTime) < 5*time.Second {
+		switchHint = "    " + m.switchStatusMsg
+	}
 	scrollHint := ""
 	if !m.autoScroll && len(hopLines) > availableRows {
 		scrollHint = " [scrolled] G:bottom g:top"
 	}
-	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s    j/k:scroll p:pause r:reset n:dns d:compact q:quit%s",
-		traceStatus, elapsed, dnsLabel, flowLabel, scrollHint)
+	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset n:dns d:compact q:quit%s",
+		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, scrollHint)
 	b.WriteString(statusStyle.Render(status))
 
 	return b.String()
@@ -352,6 +399,8 @@ type columnLayout struct {
 	showStDev     bool
 	showLast      bool
 	showStab      bool // for ECMP divergent hops
+	showASN       bool
+	asnWidth      int
 }
 
 func (m Model) getLayout() columnLayout {
@@ -377,6 +426,10 @@ func (m Model) getLayout() columnLayout {
 		layout.hostnameWidth = 20
 		layout.showSnt = true
 		layout.showLast = true
+		if m.enricher != nil {
+			layout.showASN = true
+			layout.asnWidth = 20
+		}
 	}
 	if w >= 120 {
 		layout.hostnameWidth = 22
@@ -387,6 +440,9 @@ func (m Model) getLayout() columnLayout {
 	if w >= 140 {
 		layout.hostnameWidth = 30
 		layout.showStab = true
+		if m.enricher != nil {
+			layout.asnWidth = 25
+		}
 	}
 	if w >= 160 {
 		layout.hostnameWidth = 40
@@ -405,6 +461,9 @@ func (m Model) renderColumnHeader(layout columnLayout) string {
 	parts = append(parts, fmt.Sprintf("%-*s", layout.ipWidth, "IP"))
 	if layout.showHostname {
 		parts = append(parts, fmt.Sprintf("%-*s", layout.hostnameWidth+2, "Hostname"))
+	}
+	if layout.showASN {
+		parts = append(parts, fmt.Sprintf("%-*s", layout.asnWidth, "ASN"))
 	}
 	parts = append(parts, fmt.Sprintf("%-8s", "Loss%"))
 	if layout.showSnt {
@@ -464,48 +523,83 @@ func (m Model) renderHop(h *hop.Hop, isRateLimited bool) string {
 		parts = append(parts, hostStyle.Render(fmt.Sprintf("%-*s", layout.hostnameWidth+2, hostname)))
 	}
 
-	// Loss — dim if ICMP rate-limited (not real packet loss)
-	loss := h.LossPercent()
-	lossStr := fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))
-	if loss == 0 {
-		parts = append(parts, okStyle.Render(fmt.Sprintf("%-8s", "0.0%")))
-	} else if isRateLimited {
-		parts = append(parts, rateLimitStyle.Render(fmt.Sprintf("%-8s", fmt.Sprintf("~%.0f%%", loss))))
-	} else {
-		parts = append(parts, lossStyle.Render(lossStr))
+	if layout.showASN {
+		parts = append(parts, m.renderASNCell(ip, m.prevASNForTTL(h.TTL), layout.asnWidth))
 	}
 
-	// Sent count
-	if layout.showSnt {
-		parts = append(parts, fmt.Sprintf("%-5d", h.GetSent()))
+	// Check for ping supplement data
+	var ps *ping.Stat
+	if isRateLimited && m.pingStats != nil {
+		ps = m.pingStats[ip.String()]
 	}
 
-	// Avg RTT
-	parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.AvgRTT())))
-
-	// Best RTT
-	if layout.showBest {
-		parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.GetMinRTT())))
-	}
-
-	// Worst RTT
-	if layout.showWrst {
-		parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.GetMaxRTT())))
-	}
-
-	// StDev
-	if layout.showStDev {
-		stdev := h.StDev()
-		if stdev == 0 {
-			parts = append(parts, fmt.Sprintf("%-8s", "-"))
+	// Loss — ping indicator "†" fits within the 8-char column
+	if ps != nil && ps.Sent > 0 {
+		loss := ps.LossPercent()
+		lossStr := fmt.Sprintf("%.1f%%", loss)
+		padded := fmt.Sprintf("%-6s", lossStr)
+		if loss == 0 {
+			parts = append(parts, okStyle.Render(padded)+pingBadgeStyle.Render("† "))
 		} else {
-			parts = append(parts, fmt.Sprintf("%-8s", fmt.Sprintf("%.1f", stdev)))
+			parts = append(parts, lossStyle.Render(padded)+pingBadgeStyle.Render("† "))
+		}
+	} else {
+		loss := h.LossPercent()
+		lossStr := fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))
+		if loss == 0 {
+			parts = append(parts, okStyle.Render(fmt.Sprintf("%-8s", "0.0%")))
+		} else if isRateLimited {
+			parts = append(parts, rateLimitStyle.Render(fmt.Sprintf("%-8s", fmt.Sprintf("~%.0f%%", loss))))
+		} else {
+			parts = append(parts, lossStyle.Render(lossStr))
 		}
 	}
 
-	// Last RTT
-	if layout.showLast {
-		parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.GetLastRTT())))
+	// RTT stats — use ping stats when available
+	if ps != nil && ps.Received > 0 {
+		if layout.showSnt {
+			parts = append(parts, fmt.Sprintf("%-5d", ps.Sent))
+		}
+		parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.AvgRTT())))
+		if layout.showBest {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.MinRTT)))
+		}
+		if layout.showWrst {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.MaxRTT)))
+		}
+		if layout.showStDev {
+			stdev := ps.StDev()
+			if stdev == 0 {
+				parts = append(parts, fmt.Sprintf("%-8s", "-"))
+			} else {
+				parts = append(parts, fmt.Sprintf("%-8s", fmt.Sprintf("%.1f", stdev)))
+			}
+		}
+		if layout.showLast {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.LastRTT)))
+		}
+	} else {
+		if layout.showSnt {
+			parts = append(parts, fmt.Sprintf("%-5d", h.GetSent()))
+		}
+		parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.AvgRTT())))
+		if layout.showBest {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.GetMinRTT())))
+		}
+		if layout.showWrst {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.GetMaxRTT())))
+		}
+		if layout.showStDev {
+			stdev := h.StDev()
+			if stdev == 0 {
+				parts = append(parts, fmt.Sprintf("%-8s", "-"))
+			} else {
+				parts = append(parts, fmt.Sprintf("%-8s", fmt.Sprintf("%.1f", stdev)))
+			}
+		}
+		if layout.showLast {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(h.GetLastRTT())))
+		}
 	}
 
 	return strings.Join(parts, " ")
@@ -570,55 +664,94 @@ func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool) []string {
 			parts = append(parts, hostStyle.Render(fmt.Sprintf("%-*s", layout.hostnameWidth+2, hostname)))
 		}
 
+		if layout.showASN {
+			if i == 0 {
+				parts = append(parts, m.renderASNCell(ip, m.prevASNForTTL(h.TTL), layout.asnWidth))
+			} else {
+				parts = append(parts, fmt.Sprintf("%-*s", layout.asnWidth, ""))
+			}
+		}
+
+		// Check for ping supplement data (first node only)
+		var ps *ping.Stat
+		if i == 0 && isRateLimited && m.pingStats != nil {
+			ps = m.pingStats[ip.String()]
+		}
+
 		// Loss: show hop-level aggregate on first node, "-" on subsequent
 		if i == 0 {
-			loss := h.LossPercent()
-			if loss == 0 {
-				parts = append(parts, okStyle.Render(fmt.Sprintf("%-8s", "0.0%")))
-			} else if isRateLimited {
-				parts = append(parts, rateLimitStyle.Render(fmt.Sprintf("%-8s", fmt.Sprintf("~%.0f%%", loss))))
+			if ps != nil && ps.Sent > 0 {
+				loss := ps.LossPercent()
+				lossStr := fmt.Sprintf("%.1f%%", loss)
+				padded := fmt.Sprintf("%-6s", lossStr)
+				if loss == 0 {
+					parts = append(parts, okStyle.Render(padded)+pingBadgeStyle.Render("† "))
+				} else {
+					parts = append(parts, lossStyle.Render(padded)+pingBadgeStyle.Render("† "))
+				}
 			} else {
-				parts = append(parts, lossStyle.Render(fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))))
+				loss := h.LossPercent()
+				if loss == 0 {
+					parts = append(parts, okStyle.Render(fmt.Sprintf("%-8s", "0.0%")))
+				} else if isRateLimited {
+					parts = append(parts, rateLimitStyle.Render(fmt.Sprintf("%-8s", fmt.Sprintf("~%.0f%%", loss))))
+				} else {
+					parts = append(parts, lossStyle.Render(fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))))
+				}
 			}
 		} else {
 			parts = append(parts, dimStyle.Render(fmt.Sprintf("%-8s", "-")))
 		}
 
-		// Sent count
-		if layout.showSnt {
-			if i == 0 {
-				parts = append(parts, fmt.Sprintf("%-5d", h.GetSent()))
-			} else {
-				parts = append(parts, fmt.Sprintf("%-5s", "-"))
+		// Sent count and RTT stats
+		if i == 0 && ps != nil && ps.Received > 0 {
+			if layout.showSnt {
+				parts = append(parts, fmt.Sprintf("%-5d", ps.Sent))
 			}
-		}
-
-		// Avg RTT
-		parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.AvgRTT())))
-
-		// Best RTT
-		if layout.showBest {
-			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GetMinRTT())))
-		}
-
-		// Worst RTT
-		if layout.showWrst {
-			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GetMaxRTT())))
-		}
-
-		// StDev
-		if layout.showStDev {
-			stdev := node.StDev()
-			if stdev == 0 {
-				parts = append(parts, fmt.Sprintf("%-8s", "-"))
-			} else {
-				parts = append(parts, fmt.Sprintf("%-8s", fmt.Sprintf("%.1f", stdev)))
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.AvgRTT())))
+			if layout.showBest {
+				parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.MinRTT)))
 			}
-		}
-
-		// Last RTT
-		if layout.showLast {
-			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GetLastRTT())))
+			if layout.showWrst {
+				parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.MaxRTT)))
+			}
+			if layout.showStDev {
+				stdev := ps.StDev()
+				if stdev == 0 {
+					parts = append(parts, fmt.Sprintf("%-8s", "-"))
+				} else {
+					parts = append(parts, fmt.Sprintf("%-8s", fmt.Sprintf("%.1f", stdev)))
+				}
+			}
+			if layout.showLast {
+				parts = append(parts, fmt.Sprintf("%-8s", formatDuration(ps.LastRTT)))
+			}
+		} else {
+			if layout.showSnt {
+				if i == 0 {
+					parts = append(parts, fmt.Sprintf("%-5d", h.GetSent()))
+				} else {
+					parts = append(parts, fmt.Sprintf("%-5s", "-"))
+				}
+			}
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.AvgRTT())))
+			if layout.showBest {
+				parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GetMinRTT())))
+			}
+			if layout.showWrst {
+				parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GetMaxRTT())))
+			}
+			if layout.showStDev {
+				stdev := node.StDev()
+				if stdev == 0 {
+					parts = append(parts, fmt.Sprintf("%-8s", "-"))
+				} else {
+					parts = append(parts, fmt.Sprintf("%-8s", fmt.Sprintf("%.1f", stdev)))
+				}
+			}
+			if layout.showLast {
+				parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GetLastRTT())))
+			}
 		}
 
 		// Stability badge
@@ -639,6 +772,55 @@ func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool) []string {
 	return lines
 }
 
+// prevASNForTTL returns the ASN of the previous visible hop (skipping unknown).
+func (m Model) prevASNForTTL(ttl int) int {
+	if m.enricher == nil {
+		return 0
+	}
+	hops := m.table.Snapshot()
+	hopMap := make(map[int]*hop.Hop, len(hops))
+	for _, h := range hops {
+		hopMap[h.TTL] = h
+	}
+	for prev := ttl - 1; prev >= 1; prev-- {
+		h, ok := hopMap[prev]
+		if !ok {
+			continue
+		}
+		ip := h.GetIP()
+		if ip == nil {
+			continue
+		}
+		if info, ok := m.enricher.Lookup(ip); ok && info.Number != 0 {
+			return info.Number
+		}
+	}
+	return 0
+}
+
+// renderASNCell formats the ASN column with boundary highlighting.
+func (m Model) renderASNCell(ip net.IP, prevASN int, width int) string {
+	if m.enricher == nil || ip == nil {
+		return fmt.Sprintf("%-*s", width, "")
+	}
+	info, ok := m.enricher.Lookup(ip)
+	if !ok {
+		return dimStyle.Render(fmt.Sprintf("%-*s", width, "..."))
+	}
+	label := asn.FormatASN(info.Number, info.Org)
+	if label == "" {
+		return fmt.Sprintf("%-*s", width, "")
+	}
+	if len(label) > width {
+		label = label[:width]
+	}
+	formatted := fmt.Sprintf("%-*s", width, label)
+	if info.Number != 0 && info.Number != prevASN {
+		return asnBoundaryStyle.Render(formatted)
+	}
+	return asnStyle.Render(formatted)
+}
+
 func formatDuration(d time.Duration) string {
 	if d == 0 {
 		return "-"
@@ -655,19 +837,26 @@ func (m Model) FinalSummary() string {
 	multipath := m.probeCfg.NumPaths > 1
 
 	// Header
+	protoLabel := strings.ToUpper(m.protocolName)
+	if m.protocolName == "auto" {
+		protoLabel = "Auto → " + strings.ToUpper(m.probeCfg.Protocol.Name())
+	}
+	if m.protocolName != "icmp" && m.probeCfg.NumPaths > 1 {
+		protoLabel += "/ECMP"
+	}
 	if multipath {
-		b.WriteString(fmt.Sprintf("via — %s (%s) — %d flows\n", m.target, m.targetIP.String(), m.probeCfg.NumPaths))
+		b.WriteString(fmt.Sprintf("via — %s (%s) — %s — %d flows\n", m.target, m.targetIP.String(), protoLabel, m.probeCfg.NumPaths))
 	} else {
-		b.WriteString(fmt.Sprintf("via — %s (%s)\n", m.target, m.targetIP.String()))
+		b.WriteString(fmt.Sprintf("via — %s (%s) — %s\n", m.target, m.targetIP.String(), protoLabel))
 	}
 
 	// Column headers
 	if multipath {
-		b.WriteString(fmt.Sprintf("%-4s %-18s %-22s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
-			"#", "IP", "Hostname", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab"))
+		b.WriteString(fmt.Sprintf("%-4s %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab"))
 	} else {
-		b.WriteString(fmt.Sprintf("%-4s %-18s %-22s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
-			"#", "IP", "Hostname", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last"))
+		b.WriteString(fmt.Sprintf("%-4s %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last"))
 	}
 
 	// Determine max TTL to display
@@ -683,6 +872,9 @@ func (m Model) FinalSummary() string {
 		hopMap[h.TTL] = h
 	}
 
+	rateLimited := hop.DetectRateLimited(hops, maxTTL)
+	prevASN := 0
+
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		h, ok := hopMap[ttl]
 		if !ok || h.GetIP() == nil {
@@ -691,8 +883,6 @@ func (m Model) FinalSummary() string {
 		}
 
 		if multipath && h.IsDivergent() {
-			// Show one row per unique IP (PathNode)
-			// Hop-level loss on first row, "-" on subsequent (ECMP can't attribute per-node)
 			nodes := h.GetNodes()
 			sort.Slice(nodes, func(i, j int) bool {
 				return nodes[i].GetReceived() > nodes[j].GetReceived()
@@ -715,25 +905,63 @@ func (m Model) FinalSummary() string {
 					hostname = hostname[:20]
 				}
 
+				asnLabel := ""
+				currentASN := 0
+				if m.enricher != nil {
+					if info, ok := m.enricher.Lookup(ip); ok {
+						currentASN = info.Number
+						asnLabel = asn.FormatASN(info.Number, info.Org)
+					}
+				}
+				if len(asnLabel) > 20 {
+					asnLabel = asnLabel[:20]
+				}
+
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
-					lossStr = fmt.Sprintf("%.1f%%", hopLoss)
-					sntStr = fmt.Sprintf("%d", sent)
+					if ps, ok := m.pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
+						lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
+						sntStr = fmt.Sprintf("%d", ps.Sent)
+					} else if rateLimited[ttl] {
+						lossStr = fmt.Sprintf("~%.0f%%", hopLoss)
+						sntStr = fmt.Sprintf("%d", sent)
+					} else {
+						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
+						sntStr = fmt.Sprintf("%d", sent)
+					}
 				}
 
-				avg := float64(node.AvgRTT().Microseconds()) / 1000.0
-				minRTT := float64(node.GetMinRTT().Microseconds()) / 1000.0
-				maxRTT := float64(node.GetMaxRTT().Microseconds()) / 1000.0
-				stdev := node.StDev()
-				last := float64(node.GetLastRTT().Microseconds()) / 1000.0
+				var avg, minRTT, maxRTT, stdev, last float64
+				if nodeIdx == 0 {
+					if ps, ok := m.pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Received > 0 {
+						avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
+						minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
+						maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
+						stdev = ps.StDev()
+						last = float64(ps.LastRTT.Microseconds()) / 1000.0
+					} else {
+						avg = float64(node.AvgRTT().Microseconds()) / 1000.0
+						minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
+						maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
+						stdev = node.StDev()
+						last = float64(node.GetLastRTT().Microseconds()) / 1000.0
+					}
+				} else {
+					avg = float64(node.AvgRTT().Microseconds()) / 1000.0
+					minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
+					maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
+					stdev = node.StDev()
+					last = float64(node.GetLastRTT().Microseconds()) / 1000.0
+				}
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
-				b.WriteString(fmt.Sprintf("%-4d %-18s %-22s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				b.WriteString(fmt.Sprintf("%-4d %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
+					asnLabel,
 					lossStr,
 					sntStr,
 					fmt.Sprintf("%.1f", avg),
@@ -744,6 +972,9 @@ func (m Model) FinalSummary() string {
 					flows,
 					stab,
 				))
+				if currentASN != 0 {
+					prevASN = currentASN
+				}
 				nodeIdx++
 			}
 		} else {
@@ -758,12 +989,48 @@ func (m Model) FinalSummary() string {
 				hostname = hostname[:20]
 			}
 
-			loss := h.LossPercent()
-			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
-			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0
-			maxRTT := float64(h.GetMaxRTT().Microseconds()) / 1000.0
-			stdev := h.StDev()
-			last := float64(h.GetLastRTT().Microseconds()) / 1000.0
+			asnLabel := ""
+			currentASN := 0
+			if m.enricher != nil {
+				if info, ok := m.enricher.Lookup(ip); ok {
+					currentASN = info.Number
+					asnLabel = asn.FormatASN(info.Number, info.Org)
+				}
+			}
+			if len(asnLabel) > 20 {
+				asnLabel = asnLabel[:20]
+			}
+
+			var lossStr string
+			var avg, minRTT, maxRTT, stdev, last float64
+			var sent int
+			if ps, ok := m.pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
+				lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
+				sent = ps.Sent
+				if ps.Received > 0 {
+					avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
+					minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
+					maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
+					stdev = ps.StDev()
+					last = float64(ps.LastRTT.Microseconds()) / 1000.0
+				}
+			} else if rateLimited[ttl] {
+				lossStr = fmt.Sprintf("~%.0f%%", h.LossPercent())
+				sent = h.GetSent()
+				avg = float64(h.AvgRTT().Microseconds()) / 1000.0
+				minRTT = float64(h.GetMinRTT().Microseconds()) / 1000.0
+				maxRTT = float64(h.GetMaxRTT().Microseconds()) / 1000.0
+				stdev = h.StDev()
+				last = float64(h.GetLastRTT().Microseconds()) / 1000.0
+			} else {
+				lossStr = fmt.Sprintf("%.1f%%", h.LossPercent())
+				sent = h.GetSent()
+				avg = float64(h.AvgRTT().Microseconds()) / 1000.0
+				minRTT = float64(h.GetMinRTT().Microseconds()) / 1000.0
+				maxRTT = float64(h.GetMaxRTT().Microseconds()) / 1000.0
+				stdev = h.StDev()
+				last = float64(h.GetLastRTT().Microseconds()) / 1000.0
+			}
 
 			if multipath {
 				nodes := h.GetNodes()
@@ -773,12 +1040,13 @@ func (m Model) FinalSummary() string {
 					flows = hop.FormatFlowIDs(nodes[0].GetFlowIDs())
 					stab = fmt.Sprintf("%.0f%%", nodes[0].StabilityPercent())
 				}
-				b.WriteString(fmt.Sprintf("%-4d %-18s %-22s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				b.WriteString(fmt.Sprintf("%-4d %-18s %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
-					fmt.Sprintf("%.1f%%", loss),
-					h.GetSent(),
+					asnLabel,
+					lossStr,
+					sent,
 					fmt.Sprintf("%.1f", avg),
 					fmt.Sprintf("%.1f", minRTT),
 					fmt.Sprintf("%.1f", maxRTT),
@@ -788,12 +1056,13 @@ func (m Model) FinalSummary() string {
 					stab,
 				))
 			} else {
-				b.WriteString(fmt.Sprintf("%-4d %-18s %-22s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
+				b.WriteString(fmt.Sprintf("%-4d %-18s %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
 					ttl,
 					ip.String(),
 					hostname,
-					fmt.Sprintf("%.1f%%", loss),
-					h.GetSent(),
+					asnLabel,
+					lossStr,
+					sent,
 					fmt.Sprintf("%.1f", avg),
 					fmt.Sprintf("%.1f", minRTT),
 					fmt.Sprintf("%.1f", maxRTT),
@@ -801,8 +1070,12 @@ func (m Model) FinalSummary() string {
 					fmt.Sprintf("%.1f", last),
 				))
 			}
+			if currentASN != 0 {
+				prevASN = currentASN
+			}
 		}
 	}
+	_ = prevASN // FinalSummary is plain text, no boundary highlighting
 
 	return b.String()
 }
