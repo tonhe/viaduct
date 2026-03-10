@@ -174,16 +174,6 @@ The result: probes keep firing at full speed while hostnames resolve in the back
 | `d` | Toggle compact display |
 | `q` | Quit (prints final summary) |
 
-## Roadmap
-
-- **M3a:** ✅ Protocol modes (UDP, TCP SYN, ICMP, Auto with fallback)
-- **M3b:** ✅ ASN enrichment (Team Cymru DNS, AS boundary highlighting)
-- **M3c:** ✅ Ping supplement for rate-limited hops
-- **M4:** Display mode cycling, latency sparklines, multi-target, JSON/CSV/DOT export
-- **M5:** Theme engine with 20 built-in color themes
-- **M6:** MPLS decoding, VPN/tunnel detection
-- **M7:** Bidirectional path analysis with remote agent
-
 ## License
 
 MIT
