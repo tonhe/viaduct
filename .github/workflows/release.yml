@@ -30,6 +30,53 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  windows-installer:
+    needs: release
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            inno_arch: x64compatible
+          - goarch: arm64
+            inno_arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $zip = "viaduct_${version}_windows_${{ matrix.goarch }}.zip"
+          gh release download "${{ github.ref_name }}" --pattern "$zip" --repo "${{ github.repository }}"
+          Expand-Archive -Path "$zip" -DestinationPath staging
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $sourcedir = (Resolve-Path staging).Path
+          $outdir = (Get-Location).Path
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion="$version" `
+            /DMyAppArch="${{ matrix.goarch }}" `
+            /DInnoArch="${{ matrix.inno_arch }}" `
+            /DSourceDir="$sourcedir" `
+            /DOutputPath="$outdir" `
+            ".github\installer\windows\via.iss"
+
+      - name: Upload installer to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $installer = "via_${version}_windows_${{ matrix.goarch }}_installer.exe"
+          gh release upload "${{ github.ref_name }}" "$installer" --repo "${{ github.repository }}"
+
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest

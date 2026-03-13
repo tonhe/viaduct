@@ -36,6 +36,10 @@ var (
 	asnStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	asnBoundaryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("179")) // muted gold for AS boundary
 	pingBadgeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("44")) // cyan
+	amberStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("178")) // amber for largest delta
+	trendDegStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red for degrading
+	trendImpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // green for improving
+	alertStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // red bold for alert
 )
 
 // Model is the bubbletea model for the TUI.
@@ -56,7 +60,7 @@ type Model struct {
 	maxTTLHit    int
 	paused       bool
 	dnsEnabled   bool
-	compactMode  bool
+	viewMode     ViewMode
 	tracer           *probe.Tracer
 	scrollOffset     int       // number of lines scrolled from bottom (0 = bottom)
 	autoScroll       bool      // true = follow latest data
@@ -64,10 +68,15 @@ type Model struct {
 	switchStatusMsg  string    // transient status for auto mode switch
 	switchStatusTime time.Time // when switch status was set
 	pingStats        map[string]*ping.Stat
+	alertEngine      *AlertEngine
 }
 
 // New creates a new TUI model.
-func New(target string, targetIP net.IP, cfg probe.Config, version string, protocolName string, noASN bool, noPing bool) Model {
+func New(target string, targetIP net.IP, cfg probe.Config, version string, protocolName string, noASN bool, noPing bool, alertLoss float64, alertLatency time.Duration, alertRounds int, noAlert bool) Model {
+	var ae *AlertEngine
+	if !noAlert {
+		ae = NewAlertEngine(alertLoss, alertLatency, alertRounds)
+	}
 	return Model{
 		target:       target,
 		targetIP:     targetIP,
@@ -91,6 +100,7 @@ func New(target string, targetIP net.IP, cfg probe.Config, version string, proto
 			}
 			return make(map[string]*ping.Stat)
 		}(),
+		alertEngine: ae,
 	}
 }
 
@@ -143,10 +153,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.table.ResetAll()
 			m.probeCount = 0
 			m.startTime = time.Now()
+			if m.alertEngine != nil {
+				m.alertEngine.Reset()
+			}
 		case "n":
 			m.dnsEnabled = !m.dnsEnabled
 		case "d":
-			m.compactMode = !m.compactMode
+			m.viewMode = m.viewMode.Next()
 		case "j", "down":
 			if m.scrollOffset > 0 {
 				m.scrollOffset--
@@ -218,15 +231,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pingStats[key] = stat
 		}
 		if msg.Lost {
-			stat.AddLoss()
+			stat.MarkSent()
 		} else {
-			stat.AddSample(msg.RTT)
+			stat.AddReply(msg.RTT)
 		}
 		return m, nil
 
 	case RoundEndMsg:
 		for _, h := range m.table.Snapshot() {
 			h.MarkRoundEnd()
+		}
+		// Update alert engine with destination metrics
+		if m.alertEngine != nil {
+			hops := m.table.Snapshot()
+			hopMap := make(map[int]*hop.Hop, len(hops))
+			for _, h := range hops {
+				hopMap[h.TTL] = h
+			}
+			maxTTL := m.table.MaxTTLSeen()
+			if m.maxTTLHit > 0 && m.maxTTLHit < maxTTL {
+				maxTTL = m.maxTTLHit
+			}
+			// Find destination hop
+			var destLoss float64
+			var destLatency time.Duration
+			for i := maxTTL; i >= 1; i-- {
+				h, ok := hopMap[i]
+				if !ok || h == nil {
+					continue
+				}
+				pn := h.PrimaryNode()
+				if pn != nil && pn.GetReceived() > 0 {
+					destLoss = pn.LossPercent()
+					destLatency = pn.AvgRTT()
+					break
+				}
+			}
+			bell := m.alertEngine.Update(destLoss, destLatency)
+			if bell && m.alertEngine.State() == AlertDegraded {
+				deltas := computeDeltas(hopMap, maxTTL)
+				m.alertEngine.FindAffectedHop(hopMap, maxTTL, deltas)
+			}
+			_ = bell // bell sound handled by terminal if needed
 		}
 
 	case TickMsg:
@@ -262,6 +308,9 @@ func (m Model) View() string {
 	}
 	header := fmt.Sprintf("via %s   Target: %s (%s)    Proto: %s    Probes: %d",
 		m.version, m.target, m.targetIP.String(), protoLabel, m.probeCount)
+	if m.viewMode != ViewDefault {
+		header += fmt.Sprintf("    View: %s", m.viewMode.String())
+	}
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
@@ -288,6 +337,10 @@ func (m Model) View() string {
 
 	rateLimited := hop.DetectRateLimited(hops, maxTTL)
 
+	// Compute deltas for Health/Latency views
+	deltas := computeDeltas(hopMap, maxTTL)
+	maxDeltaTTL := largestDeltaTTL(deltas)
+
 	// Build all hop lines first
 	var hopLines []string
 	for ttl := 1; ttl <= maxTTL; ttl++ {
@@ -302,9 +355,9 @@ func (m Model) View() string {
 			continue
 		}
 		if h.IsDivergent() {
-			hopLines = append(hopLines, m.renderDivergentHop(h, rateLimited[ttl])...)
+			hopLines = append(hopLines, m.renderDivergentHop(h, rateLimited[ttl], deltas, maxDeltaTTL)...)
 		} else {
-			hopLines = append(hopLines, m.renderHop(h, rateLimited[ttl]))
+			hopLines = append(hopLines, m.renderHop(h, rateLimited[ttl], deltas, maxDeltaTTL))
 		}
 	}
 
@@ -343,13 +396,28 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 
+	// Alert bar (if degraded)
+	alertLine := ""
+	if m.alertEngine != nil {
+		alertLine = m.alertEngine.Message()
+	}
+
 	// Fill remaining space
 	displayCount := len(displayLines)
-	usedLines := 3 + displayCount + 1
+	extraLines := 0
+	if alertLine != "" {
+		extraLines = 1
+	}
+	usedLines := 3 + displayCount + extraLines + 1
 	if m.height > 0 && usedLines < m.height {
 		for i := 0; i < m.height-usedLines; i++ {
 			b.WriteString("\n")
 		}
+	}
+
+	if alertLine != "" {
+		b.WriteString(alertStyle.Render(alertLine))
+		b.WriteString("\n")
 	}
 
 	// Status bar
@@ -380,8 +448,8 @@ func (m Model) View() string {
 	if !m.autoScroll && len(hopLines) > availableRows {
 		scrollHint = " [scrolled] G:bottom g:top"
 	}
-	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset n:dns d:compact q:quit%s",
-		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, scrollHint)
+	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset n:dns [d] %s q:quit%s",
+		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, m.viewMode.Next().String(), scrollHint)
 	b.WriteString(statusStyle.Render(status))
 
 	return b.String()
@@ -401,54 +469,376 @@ type columnLayout struct {
 	showStab      bool // for ECMP divergent hops
 	showASN       bool
 	asnWidth      int
+	showDelta     bool
+	showGMean     bool
+	showJttr      bool
+	showJavg      bool
+	showSpark     bool
+	showTrend     bool
 }
 
 func (m Model) getLayout() columnLayout {
 	w := m.width
-	if m.compactMode || w < 80 {
-		w = 80
+	if w < 40 {
+		w = 40
 	}
 
 	layout := columnLayout{ipWidth: 18}
 
-	// In ECMP mode, reserve 5 chars (4 + space) for tree connector column
 	if m.probeCfg.NumPaths > 1 {
 		layout.showTree = true
 	}
 
-	// Base: #(4) + IP(18) + Loss(8) + Avg(8) = ~40 chars minimum
-	// At 80+: add hostname
-	if w >= 80 {
-		layout.showHostname = true
-		layout.hostnameWidth = 15
+	// Budget-based layout: start with fixed columns (#, IP, Loss%, Avg, Spark),
+	// then add optional columns in priority order only if there's remaining room.
+	// This guarantees columns never overflow the terminal width.
+	//
+	// Column widths (from renderColumnHeader / renderHopRow):
+	//   # = 4, tree = 4, IP = ipWidth, Hostname = hostnameWidth+2,
+	//   ASN = asnWidth, Loss% = 8, Snt = 5, Avg/Best/Wrst/StDev/Last/Delta/GMean/Jttr/Javg = 8,
+	//   Spark = 14, Trend = 9, Stab = 6
+	// Parts are joined with " " (1 char per gap), so total separators = numParts - 1.
+	//
+	// Fixed parts: #(4) + IP(18) + Loss%(8) + Avg(8) + Spark(14) = 5 parts
+	// Separators between 5 parts = 4
+	base := 4 + layout.ipWidth + 8 + 8 + 14 + 4
+	if layout.showTree {
+		base += 4 + 1 // tree column + its separator
 	}
-	if w >= 100 {
-		layout.hostnameWidth = 20
-		layout.showSnt = true
-		layout.showLast = true
-		if m.enricher != nil {
-			layout.showASN = true
-			layout.asnWidth = 20
-		}
-	}
-	if w >= 120 {
-		layout.hostnameWidth = 22
-		layout.showBest = true
-		layout.showWrst = true
-		layout.showStDev = true
-	}
-	if w >= 140 {
-		layout.hostnameWidth = 30
-		layout.showStab = true
-		if m.enricher != nil {
-			layout.asnWidth = 25
-		}
-	}
-	if w >= 160 {
-		layout.hostnameWidth = 40
+	layout.showSpark = true
+
+	budget := w - base
+	if budget < 0 {
+		budget = 0
 	}
 
+	// tryAdd attempts to allocate 'cost' chars from the budget.
+	// Cost should include +1 for the separator that joins.Join adds.
+	// Returns true if there was room.
+	tryAdd := func(cost int) bool {
+		if budget >= cost {
+			budget -= cost
+			return true
+		}
+		return false
+	}
+
+	hasASN := m.enricher != nil
+
+	// Each view defines its priority order. Columns are added greedily
+	// until the budget runs out. New columns cost width+1 (for the join
+	// separator). Growing an existing column costs just the delta.
+
+	switch m.viewMode {
+	case ViewHealth:
+		// Priority: Hostname, Delta, Trend, short ASN, ASN→20, host grow, ASN→25, host grow
+		if tryAdd(15 + 2 + 1) { // hostnameWidth + 2 padding + separator
+			layout.showHostname = true
+			layout.hostnameWidth = 15
+		}
+		if tryAdd(8 + 1) {
+			layout.showDelta = true
+		}
+		if tryAdd(9 + 1) {
+			layout.showTrend = true
+		}
+		if hasASN && tryAdd(12+1) {
+			layout.showASN = true
+			layout.asnWidth = 12
+		}
+		if layout.showASN && tryAdd(8) {
+			layout.asnWidth = 20
+		}
+		if layout.showHostname && tryAdd(7) {
+			layout.hostnameWidth += 7
+		}
+		if layout.showASN && tryAdd(5) {
+			layout.asnWidth = 25
+		}
+		if layout.showHostname && tryAdd(8) {
+			layout.hostnameWidth += 8
+		}
+
+	case ViewLatency:
+		// Priority: Hostname, Delta, Best, Wrst, short ASN, Last, GMean, ASN→20, host grow, ASN→25
+		if tryAdd(15 + 2 + 1) {
+			layout.showHostname = true
+			layout.hostnameWidth = 15
+		}
+		if tryAdd(8 + 1) {
+			layout.showDelta = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showBest = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showWrst = true
+		}
+		if hasASN && tryAdd(12+1) {
+			layout.showASN = true
+			layout.asnWidth = 12
+		}
+		if tryAdd(8 + 1) {
+			layout.showLast = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showGMean = true
+		}
+		if layout.showASN && tryAdd(8) {
+			layout.asnWidth = 20
+		}
+		if layout.showHostname && tryAdd(7) {
+			layout.hostnameWidth += 7
+		}
+		if layout.showASN && tryAdd(5) {
+			layout.asnWidth = 25
+		}
+		if layout.showHostname && tryAdd(8) {
+			layout.hostnameWidth += 8
+		}
+
+	case ViewVariability:
+		// Priority: Hostname, StDev, Jttr, Javg, Trend, short ASN, ASN→20, host grow, ASN→25
+		if tryAdd(15 + 2 + 1) {
+			layout.showHostname = true
+			layout.hostnameWidth = 15
+		}
+		if tryAdd(8 + 1) {
+			layout.showStDev = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showJttr = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showJavg = true
+		}
+		if tryAdd(9 + 1) {
+			layout.showTrend = true
+		}
+		if hasASN && tryAdd(12+1) {
+			layout.showASN = true
+			layout.asnWidth = 12
+		}
+		if layout.showASN && tryAdd(8) {
+			layout.asnWidth = 20
+		}
+		if layout.showHostname && tryAdd(7) {
+			layout.hostnameWidth += 7
+		}
+		if layout.showASN && tryAdd(5) {
+			layout.asnWidth = 25
+		}
+		if layout.showHostname && tryAdd(8) {
+			layout.hostnameWidth += 8
+		}
+
+	default: // ViewDefault
+		// Priority: Hostname, Snt, Last, short ASN, Best, Wrst, StDev, ASN→20, host grow, Stab, ASN→25, host grow
+		if tryAdd(15 + 2 + 1) {
+			layout.showHostname = true
+			layout.hostnameWidth = 15
+		}
+		if tryAdd(5 + 1) {
+			layout.showSnt = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showLast = true
+		}
+		if hasASN && tryAdd(12+1) {
+			layout.showASN = true
+			layout.asnWidth = 12
+		}
+		if tryAdd(8 + 1) {
+			layout.showBest = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showWrst = true
+		}
+		if tryAdd(8 + 1) {
+			layout.showStDev = true
+		}
+		if layout.showASN && tryAdd(8) {
+			layout.asnWidth = 20
+		}
+		if layout.showHostname && tryAdd(7) {
+			layout.hostnameWidth += 7
+		}
+		if tryAdd(6 + 1) {
+			layout.showStab = true
+		}
+		if layout.showASN && tryAdd(5) {
+			layout.asnWidth = 25
+		}
+		if layout.showHostname && tryAdd(8) {
+			layout.hostnameWidth += 8
+		}
+		if layout.showHostname && tryAdd(10) {
+			layout.hostnameWidth += 10
+		}
+	}
+
+	// Safety valve: compute the exact rendered width and shrink if over budget.
+	// This catches any accounting drift between tryAdd costs and actual column widths.
+	layout.clampToWidth(w)
+
 	return layout
+}
+
+// computeWidth returns the exact display width this layout will render,
+// matching the logic in renderColumnHeader (parts joined with " ").
+func (l *columnLayout) computeWidth() int {
+	w := 4 + l.ipWidth + 8 + 8 // # + IP + Loss% + Avg (always present)
+	parts := 4                  // 4 fixed parts
+	if l.showTree {
+		w += 4
+		parts++
+	}
+	if l.showHostname {
+		w += l.hostnameWidth + 2
+		parts++
+	}
+	if l.showASN {
+		w += l.asnWidth
+		parts++
+	}
+	if l.showSnt {
+		w += 5
+		parts++
+	}
+	if l.showBest {
+		w += 8
+		parts++
+	}
+	if l.showWrst {
+		w += 8
+		parts++
+	}
+	if l.showStDev {
+		w += 8
+		parts++
+	}
+	if l.showLast {
+		w += 8
+		parts++
+	}
+	if l.showDelta {
+		w += 8
+		parts++
+	}
+	if l.showGMean {
+		w += 8
+		parts++
+	}
+	if l.showJttr {
+		w += 8
+		parts++
+	}
+	if l.showJavg {
+		w += 8
+		parts++
+	}
+	if l.showSpark {
+		w += 14
+		parts++
+	}
+	if l.showTrend {
+		w += 9
+		parts++
+	}
+	if l.showStab {
+		w += 6
+		parts++
+	}
+	w += parts - 1 // separators from strings.Join(" ")
+	return w
+}
+
+// clampToWidth drops optional columns (right to left) until the layout fits.
+func (l *columnLayout) clampToWidth(maxWidth int) {
+	// Drop order: least important first. Each iteration removes the widest
+	// dispensable column. We loop until it fits or only fixed columns remain.
+	for l.computeWidth() > maxWidth {
+		// Try shrinking hostname first (cheap, no column removal)
+		if l.showHostname && l.hostnameWidth > 10 {
+			excess := l.computeWidth() - maxWidth
+			shrink := excess
+			if shrink > l.hostnameWidth-10 {
+				shrink = l.hostnameWidth - 10
+			}
+			l.hostnameWidth -= shrink
+			continue
+		}
+		// Try shrinking ASN
+		if l.showASN && l.asnWidth > 12 {
+			excess := l.computeWidth() - maxWidth
+			shrink := excess
+			if shrink > l.asnWidth-12 {
+				shrink = l.asnWidth - 12
+			}
+			l.asnWidth -= shrink
+			continue
+		}
+		// Drop columns in reverse priority
+		if l.showStab {
+			l.showStab = false
+			continue
+		}
+		if l.showTrend {
+			l.showTrend = false
+			continue
+		}
+		if l.showJavg {
+			l.showJavg = false
+			continue
+		}
+		if l.showJttr {
+			l.showJttr = false
+			continue
+		}
+		if l.showGMean {
+			l.showGMean = false
+			continue
+		}
+		if l.showDelta {
+			l.showDelta = false
+			continue
+		}
+		if l.showStDev {
+			l.showStDev = false
+			continue
+		}
+		if l.showWrst {
+			l.showWrst = false
+			continue
+		}
+		if l.showBest {
+			l.showBest = false
+			continue
+		}
+		if l.showLast {
+			l.showLast = false
+			continue
+		}
+		if l.showSnt {
+			l.showSnt = false
+			continue
+		}
+		if l.showASN {
+			l.showASN = false
+			l.asnWidth = 0
+			continue
+		}
+		if l.showHostname {
+			l.showHostname = false
+			l.hostnameWidth = 0
+			continue
+		}
+		if l.showSpark {
+			l.showSpark = false
+			continue
+		}
+		break // only fixed columns remain
+	}
 }
 
 // renderColumnHeader builds the column header line based on the current layout.
@@ -482,13 +872,71 @@ func (m Model) renderColumnHeader(layout columnLayout) string {
 	if layout.showLast {
 		parts = append(parts, fmt.Sprintf("%-8s", "Last"))
 	}
+	if layout.showDelta {
+		parts = append(parts, fmt.Sprintf("%-8s", "Delta"))
+	}
+	if layout.showGMean {
+		parts = append(parts, fmt.Sprintf("%-8s", "GMean"))
+	}
+	if layout.showJttr {
+		parts = append(parts, fmt.Sprintf("%-8s", "Jttr"))
+	}
+	if layout.showJavg {
+		parts = append(parts, fmt.Sprintf("%-8s", "Javg"))
+	}
+	if layout.showSpark {
+		parts = append(parts, fmt.Sprintf("%-14s", "Spark"))
+	}
+	if layout.showTrend {
+		parts = append(parts, fmt.Sprintf("%-9s", "Trend"))
+	}
 	if layout.showStab {
 		parts = append(parts, fmt.Sprintf("%-6s", "Stab"))
 	}
 	return strings.Join(parts, " ")
 }
 
-func (m Model) renderHop(h *hop.Hop, isRateLimited bool) string {
+// computeDeltas returns hop-to-hop latency delta for each TTL.
+func computeDeltas(hopMap map[int]*hop.Hop, maxTTL int) []time.Duration {
+	deltas := make([]time.Duration, maxTTL+1)
+	var prevAvg time.Duration
+	hasPrev := false
+	for i := 1; i <= maxTTL; i++ {
+		h, ok := hopMap[i]
+		if !ok || h == nil {
+			continue
+		}
+		pn := h.PrimaryNode()
+		if pn == nil || pn.GetReceived() == 0 {
+			continue
+		}
+		avg := pn.AvgRTT()
+		if !hasPrev {
+			deltas[i] = avg
+			prevAvg = avg
+			hasPrev = true
+		} else {
+			deltas[i] = avg - prevAvg
+			prevAvg = avg
+		}
+	}
+	return deltas
+}
+
+// largestDeltaTTL returns the TTL with the largest positive delta.
+func largestDeltaTTL(deltas []time.Duration) int {
+	maxD := time.Duration(0)
+	maxTTL := 0
+	for i := 1; i < len(deltas); i++ {
+		if deltas[i] > maxD {
+			maxD = deltas[i]
+			maxTTL = i
+		}
+	}
+	return maxTTL
+}
+
+func (m Model) renderHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration, maxDeltaTTL int) string {
 	layout := m.getLayout()
 	ttlStr := fmt.Sprintf("%-4d", h.TTL)
 
@@ -602,10 +1050,72 @@ func (m Model) renderHop(h *hop.Hop, isRateLimited bool) string {
 		}
 	}
 
+	// New columns from M4
+	pn := h.PrimaryNode()
+
+	if layout.showDelta {
+		if h.TTL < len(deltas) && deltas[h.TTL] != 0 {
+			d := deltas[h.TTL]
+			deltaStr := fmt.Sprintf("%-8s", formatDelta(d))
+			if h.TTL == maxDeltaTTL {
+				parts = append(parts, amberStyle.Render(deltaStr))
+			} else {
+				parts = append(parts, deltaStr)
+			}
+		} else {
+			parts = append(parts, fmt.Sprintf("%-8s", "-"))
+		}
+	}
+	if layout.showGMean {
+		if pn != nil {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(pn.GeoMean())))
+		} else {
+			parts = append(parts, fmt.Sprintf("%-8s", "-"))
+		}
+	}
+	if layout.showJttr {
+		if pn != nil {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(pn.Jitter())))
+		} else {
+			parts = append(parts, fmt.Sprintf("%-8s", "-"))
+		}
+	}
+	if layout.showJavg {
+		if pn != nil {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(pn.JitterMean())))
+		} else {
+			parts = append(parts, fmt.Sprintf("%-8s", "-"))
+		}
+	}
+	if layout.showSpark {
+		if ps != nil && ps.Received > 0 {
+			parts = append(parts, renderSparkline(ps.SparklineData(), 14))
+		} else if pn != nil {
+			parts = append(parts, renderSparkline(pn.SparklineData(), 14))
+		} else {
+			parts = append(parts, renderSparkline(nil, 14))
+		}
+	}
+	if layout.showTrend {
+		if pn != nil {
+			trend := pn.Trend()
+			switch trend {
+			case "degrading":
+				parts = append(parts, trendDegStyle.Render(fmt.Sprintf("%-9s", "▲ "+trend)))
+			case "improving":
+				parts = append(parts, trendImpStyle.Render(fmt.Sprintf("%-9s", "▼ "+trend)))
+			default:
+				parts = append(parts, dimStyle.Render(fmt.Sprintf("%-9s", "— stable")))
+			}
+		} else {
+			parts = append(parts, fmt.Sprintf("%-9s", "-"))
+		}
+	}
+
 	return strings.Join(parts, " ")
 }
 
-func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool) []string {
+func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration, maxDeltaTTL int) []string {
 	layout := m.getLayout()
 	nodes := h.GetNodes()
 
@@ -754,6 +1264,52 @@ func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool) []string {
 			}
 		}
 
+		// New columns from M4
+		if layout.showDelta {
+			if i == 0 && h.TTL < len(deltas) && deltas[h.TTL] != 0 {
+				d := deltas[h.TTL]
+				deltaStr := fmt.Sprintf("%-8s", formatDelta(d))
+				if h.TTL == maxDeltaTTL {
+					parts = append(parts, amberStyle.Render(deltaStr))
+				} else {
+					parts = append(parts, deltaStr)
+				}
+			} else {
+				parts = append(parts, fmt.Sprintf("%-8s", "-"))
+			}
+		}
+		if layout.showGMean {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.GeoMean())))
+		}
+		if layout.showJttr {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.Jitter())))
+		}
+		if layout.showJavg {
+			parts = append(parts, fmt.Sprintf("%-8s", formatDuration(node.JitterMean())))
+		}
+		if layout.showSpark {
+			if ps != nil && ps.Received > 0 {
+				parts = append(parts, renderSparkline(ps.SparklineData(), 14))
+			} else {
+				parts = append(parts, renderSparkline(node.SparklineData(), 14))
+			}
+		}
+		if layout.showTrend {
+			if i == 0 {
+				trend := node.Trend()
+				switch trend {
+				case "degrading":
+					parts = append(parts, trendDegStyle.Render(fmt.Sprintf("%-9s", "▲ "+trend)))
+				case "improving":
+					parts = append(parts, trendImpStyle.Render(fmt.Sprintf("%-9s", "▼ "+trend)))
+				default:
+					parts = append(parts, dimStyle.Render(fmt.Sprintf("%-9s", "— stable")))
+				}
+			} else {
+				parts = append(parts, fmt.Sprintf("%-9s", ""))
+			}
+		}
+
 		// Stability badge
 		if layout.showStab {
 			stabPct := node.StabilityPercent()
@@ -819,6 +1375,21 @@ func (m Model) renderASNCell(ip net.IP, prevASN int, width int) string {
 		return asnBoundaryStyle.Render(formatted)
 	}
 	return asnStyle.Render(formatted)
+}
+
+func formatDelta(d time.Duration) string {
+	if d == 0 {
+		return "-"
+	}
+	prefix := "+"
+	if d < 0 {
+		prefix = "-"
+		d = -d
+	}
+	if d < time.Millisecond {
+		return fmt.Sprintf("%s%.0fµs", prefix, float64(d.Microseconds()))
+	}
+	return fmt.Sprintf("%s%.1fms", prefix, float64(d.Microseconds())/1000.0)
 }
 
 func formatDuration(d time.Duration) string {

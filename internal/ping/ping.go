@@ -13,7 +13,8 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// Result represents a single ping response.
+// Result represents a single ping event.
+// Lost=true means a ping was sent (sent marker); Lost=false means a reply was received.
 type Result struct {
 	IP   net.IP
 	RTT  time.Duration
@@ -21,19 +22,21 @@ type Result struct {
 }
 
 // Supplementer pings rate-limited hop IPs directly.
+// Call Open to start, PingAll each round, and Close when done.
 type Supplementer struct {
 	targets     sync.Map // IP string -> net.IP
 	targetCount int32    // atomic count
 	maxTargets  int
-	interval    time.Duration
 	icmpID      int // unique ICMP ID to avoid collision with probe engine
+	conn        *icmp.PacketConn
+	results     chan<- Result
+	seq         int
 }
 
-// New creates a Supplementer with the given ping interval.
-func New(interval time.Duration) *Supplementer {
+// New creates a Supplementer.
+func New() *Supplementer {
 	return &Supplementer{
 		maxTargets: 10,
-		interval:   interval,
 		icmpID:     50000 + rand.Intn(10000), // 50000-59999 range
 	}
 }
@@ -55,39 +58,49 @@ func (s *Supplementer) Submit(ip net.IP) {
 	}
 }
 
-// Run starts the ping loop. Blocks until ctx is cancelled.
-func (s *Supplementer) Run(ctx context.Context, results chan<- Result) error {
+// Open creates the ICMP socket and starts the reply listener.
+func (s *Supplementer) Open(ctx context.Context, results chan<- Result) error {
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		return fmt.Errorf("ping socket: %w", err)
 	}
-	defer conn.Close()
-
-	// Start listener
+	s.conn = conn
+	s.results = results
 	go s.listen(ctx, conn, results)
+	return nil
+}
 
-	seq := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(s.interval):
+// Close shuts down the ICMP socket.
+func (s *Supplementer) Close() {
+	if s.conn != nil {
+		s.conn.Close()
+	}
+}
+
+// PingAll sends one ICMP Echo Request to each target.
+// For each target pinged, a Result{Lost: true} is emitted as a "sent" marker.
+func (s *Supplementer) PingAll() {
+	if s.conn == nil {
+		return
+	}
+	s.seq++
+	s.targets.Range(func(key, val any) bool {
+		ip := val.(net.IP)
+		pkt, err := buildPingPacket(s.icmpID, s.seq)
+		if err != nil {
+			return true
 		}
 
-		seq++
-		s.targets.Range(func(key, val any) bool {
-			ip := val.(net.IP)
-			pkt, err := buildPingPacket(s.icmpID, seq)
-			if err != nil {
-				return true
-			}
+		dst := &net.IPAddr{IP: ip}
+		s.conn.WriteTo(pkt, dst)
 
-			dst := &net.IPAddr{IP: ip}
-			conn.SetDeadline(time.Now().Add(time.Second))
-			conn.WriteTo(pkt, dst)
-			return true
-		})
-	}
+		// Emit "sent" marker so consumer can increment Sent count
+		select {
+		case s.results <- Result{IP: ip, Lost: true}:
+		default:
+		}
+		return true
+	})
 }
 
 // listen reads ICMP Echo Replies and matches them to targets.

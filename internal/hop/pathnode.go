@@ -9,6 +9,8 @@ import (
 )
 
 const stabilityWindowSize = 50
+const sparklineSize = 28
+const trendWindowSize = 10
 
 // PathNode tracks per-IP statistics for ECMP multipath discovery.
 // It records RTT samples, flow IDs, loss, and path stability over time.
@@ -22,8 +24,24 @@ type PathNode struct {
 	maxRTT   time.Duration
 	lastRTT  time.Duration
 	totalRTT time.Duration
-	mean     float64 // running mean in ms (Welford's)
-	m2       float64 // running sum of squared differences in ms² (Welford's)
+	mean      float64 // running mean in ms (Welford's)
+	m2        float64 // running sum of squared differences in ms² (Welford's)
+	sumLogRTT   float64       // running sum of ln(rtt_ms) for geometric mean
+	hasPrevRTT  bool          // whether prevRTT is valid
+	prevRTT     time.Duration // previous probe's RTT
+	jitter      time.Duration // current jitter |rtt - prevRTT|
+	jitterMean  float64       // running jitter mean in ms
+	jitterCount int           // number of jitter samples
+
+	sparkBuf   [sparklineSize]time.Duration // ring buffer of RTT samples (0 = loss)
+	sparkIdx   int                          // next write index
+	sparkCount int                          // entries filled (up to sparklineSize)
+
+	recentAvgs     [trendWindowSize]float64 // per-round avg RTTs in ms
+	recentAvgIdx   int
+	recentAvgCount int
+	roundRTTSum    time.Duration // sum of RTTs received this round
+	roundRTTCount  int           // number of RTTs received this round
 
 	asnNum int    // Autonomous System Number (0 = unknown)
 	asnOrg string // AS organization name
@@ -34,6 +52,13 @@ type PathNode struct {
 	stabCount int
 
 	mu sync.Mutex
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 // NewPathNode creates a PathNode for the given IP address.
@@ -66,6 +91,27 @@ func (pn *PathNode) AddSample(rtt time.Duration, flowID int) {
 	pn.mean += delta / float64(pn.received)
 	delta2 := ms - pn.mean
 	pn.m2 += delta * delta2
+
+	// Geometric mean: accumulate ln(rtt_ms)
+	rttMs := float64(rtt) / float64(time.Millisecond)
+	if rttMs < 0.001 {
+		rttMs = 0.001
+	}
+	pn.sumLogRTT += math.Log(rttMs)
+
+	// Jitter: |current - previous|
+	if pn.hasPrevRTT {
+		pn.jitter = absDuration(rtt - pn.prevRTT)
+		pn.jitterCount++
+		jitterMs := float64(pn.jitter) / float64(time.Millisecond)
+		pn.jitterMean += (jitterMs - pn.jitterMean) / float64(pn.jitterCount)
+	}
+	pn.prevRTT = rtt
+	pn.hasPrevRTT = true
+
+	// Per-round tracking for trend detection and sparkline
+	pn.roundRTTSum += rtt
+	pn.roundRTTCount++
 
 	pn.flowIDs[flowID] = struct{}{}
 
@@ -100,6 +146,128 @@ func (pn *PathNode) StDev() float64 {
 		return 0
 	}
 	return math.Sqrt(pn.m2 / float64(pn.received))
+}
+
+// GeoMean returns the geometric mean of RTT samples.
+func (pn *PathNode) GeoMean() time.Duration {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	if pn.received == 0 {
+		return 0
+	}
+	ms := math.Exp(pn.sumLogRTT / float64(pn.received))
+	return time.Duration(ms * float64(time.Millisecond))
+}
+
+// recordLossLocked writes a loss sentinel to the sparkline buffer.
+// Caller must hold pn.mu.
+func (pn *PathNode) recordLossLocked() {
+	pn.sparkBuf[pn.sparkIdx] = 0 // 0 = timeout sentinel
+	pn.sparkIdx = (pn.sparkIdx + 1) % sparklineSize
+	if pn.sparkCount < sparklineSize {
+		pn.sparkCount++
+	}
+}
+
+// SparklineData returns the sparkline ring buffer contents in chronological order.
+func (pn *PathNode) SparklineData() []time.Duration {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	if pn.sparkCount == 0 {
+		return nil
+	}
+	result := make([]time.Duration, pn.sparkCount)
+	start := 0
+	if pn.sparkCount == sparklineSize {
+		start = pn.sparkIdx // oldest entry when buffer is full
+	}
+	for i := 0; i < pn.sparkCount; i++ {
+		result[i] = pn.sparkBuf[(start+i)%sparklineSize]
+	}
+	return result
+}
+
+// RecordRoundAvg records the per-round average RTT for trend detection
+// and sparkline. One sparkline entry per round (the round average),
+// not per probe.
+func (pn *PathNode) RecordRoundAvg() {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	if pn.roundRTTCount == 0 {
+		// No probes received this round — record loss in sparkline
+		pn.recordLossLocked()
+		return
+	}
+	avgMs := float64(pn.roundRTTSum) / float64(pn.roundRTTCount) / float64(time.Millisecond)
+	pn.recentAvgs[pn.recentAvgIdx] = avgMs
+	pn.recentAvgIdx = (pn.recentAvgIdx + 1) % trendWindowSize
+	if pn.recentAvgCount < trendWindowSize {
+		pn.recentAvgCount++
+	}
+
+	// Sparkline: record round average
+	avgRTT := pn.roundRTTSum / time.Duration(pn.roundRTTCount)
+	pn.sparkBuf[pn.sparkIdx] = avgRTT
+	pn.sparkIdx = (pn.sparkIdx + 1) % sparklineSize
+	if pn.sparkCount < sparklineSize {
+		pn.sparkCount++
+	}
+
+	pn.roundRTTSum = 0
+	pn.roundRTTCount = 0
+}
+
+// Trend returns the latency trend: "stable", "degrading", or "improving".
+func (pn *PathNode) Trend() string {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	if pn.recentAvgCount < 3 {
+		return "stable"
+	}
+	n := pn.recentAvgCount
+	start := 0
+	if n == trendWindowSize {
+		start = pn.recentAvgIdx
+	}
+	var sumX, sumY, sumXY, sumX2 float64
+	for i := 0; i < n; i++ {
+		x := float64(i)
+		y := pn.recentAvgs[(start+i)%trendWindowSize]
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumX2 += x * x
+	}
+	fn := float64(n)
+	slope := (fn*sumXY - sumX*sumY) / (fn*sumX2 - sumX*sumX)
+
+	avgMs := sumY / fn
+	threshold := 0.5
+	if pct := avgMs * 0.01; pct > threshold {
+		threshold = pct
+	}
+
+	if slope > threshold {
+		return "degrading"
+	}
+	if slope < -threshold {
+		return "improving"
+	}
+	return "stable"
+}
+
+// Jitter returns the current jitter (|rtt - prevRTT|).
+func (pn *PathNode) Jitter() time.Duration {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.jitter
+}
+
+// JitterMean returns the running mean jitter.
+func (pn *PathNode) JitterMean() time.Duration {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return time.Duration(pn.jitterMean * float64(time.Millisecond))
 }
 
 // LossPercent returns the packet loss percentage.
@@ -251,6 +419,20 @@ func (pn *PathNode) Reset() {
 	pn.totalRTT = 0
 	pn.mean = 0
 	pn.m2 = 0
+	pn.sumLogRTT = 0
+	pn.hasPrevRTT = false
+	pn.prevRTT = 0
+	pn.jitter = 0
+	pn.jitterMean = 0
+	pn.jitterCount = 0
+	pn.sparkBuf = [sparklineSize]time.Duration{}
+	pn.sparkIdx = 0
+	pn.sparkCount = 0
+	pn.recentAvgs = [trendWindowSize]float64{}
+	pn.recentAvgIdx = 0
+	pn.recentAvgCount = 0
+	pn.roundRTTSum = 0
+	pn.roundRTTCount = 0
 	pn.flowIDs = make(map[int]struct{})
 	pn.stability = [stabilityWindowSize]bool{}
 	pn.stabIdx = 0

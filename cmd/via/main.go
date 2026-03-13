@@ -24,7 +24,7 @@ import (
 )
 
 var (
-	version      = "0.0.2"
+	version      = "0.0.3"
 	buildVersion = "dev" // injected at build time via -ldflags
 )
 
@@ -53,6 +53,10 @@ func main() {
 	rootCmd.Flags().IntP("port", "p", 0, "destination port override (default: protocol-specific)")
 	rootCmd.Flags().Bool("no-asn", false, "skip ASN lookups")
 	rootCmd.Flags().Bool("no-ping", false, "skip ping supplement for rate-limited hops")
+	rootCmd.Flags().Float64("alert-loss", 5.0, "loss% threshold for destination alert (0 = disabled)")
+	rootCmd.Flags().Duration("alert-latency", 0, "latency threshold for destination alert (0 = disabled)")
+	rootCmd.Flags().Int("alert-rounds", 3, "consecutive rounds before alert fires")
+	rootCmd.Flags().Bool("no-alert", false, "disable alerting")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -109,6 +113,10 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	dstPort, _ := cmd.Flags().GetInt("port")
 	noASN, _ := cmd.Flags().GetBool("no-asn")
 	noPing, _ := cmd.Flags().GetBool("no-ping")
+	alertLoss, _ := cmd.Flags().GetFloat64("alert-loss")
+	alertLatency, _ := cmd.Flags().GetDuration("alert-latency")
+	alertRounds, _ := cmd.Flags().GetInt("alert-rounds")
+	noAlert, _ := cmd.Flags().GetBool("no-alert")
 
 	if reportMode && count == 0 {
 		count = 10
@@ -150,7 +158,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 
 	// Create TUI model
 	versionStr := "v" + version + " (" + buildVersion + ")"
-	model := tui.New(target, targetIP, cfg, versionStr, protocolName, noASN, noPing)
+	model := tui.New(target, targetIP, cfg, versionStr, protocolName, noASN, noPing, alertLoss, alertLatency, alertRounds, noAlert)
 
 	// Create bubbletea program
 	p := tea.NewProgram(model, tea.WithAltScreen())
@@ -175,12 +183,13 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	var supplementer *ping.Supplementer
 	pingResults := make(chan ping.Result, 64)
 	if !noPing {
-		supplementer = ping.New(time.Second)
-		go func() {
-			if err := supplementer.Run(ctx, pingResults); err != nil {
-				// Ping socket failure is non-fatal
-			}
-		}()
+		supplementer = ping.New()
+		if err := supplementer.Open(ctx, pingResults); err != nil {
+			// Ping socket failure is non-fatal; continue without ping
+			supplementer = nil
+		} else {
+			defer supplementer.Close()
+		}
 	}
 
 	tracer.OnRoundEnd = func() {
@@ -200,6 +209,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
+			supplementer.PingAll()
 		}
 	}
 	model.SetTracer(tracer)
@@ -339,10 +349,12 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 	var supplementer *ping.Supplementer
 	pingResultsCh := make(chan ping.Result, 64)
 	if !noPing {
-		supplementer = ping.New(time.Second)
-		go func() {
-			supplementer.Run(ctx, pingResultsCh)
-		}()
+		supplementer = ping.New()
+		if err := supplementer.Open(ctx, pingResultsCh); err != nil {
+			supplementer = nil
+		} else {
+			defer supplementer.Close()
+		}
 	}
 
 	// Collect ping results
@@ -360,9 +372,9 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 					pingStats[key] = stat
 				}
 				if r.Lost {
-					stat.AddLoss()
+					stat.MarkSent()
 				} else {
-					stat.AddSample(r.RTT)
+					stat.AddReply(r.RTT)
 				}
 			}
 		}
@@ -387,6 +399,7 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 					}
 				}
 			}
+			supplementer.PingAll()
 		}
 	}
 

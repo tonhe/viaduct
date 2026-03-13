@@ -13,6 +13,7 @@ type Hop struct {
 	TTL       int
 	Nodes     []*PathNode
 	sentTotal int // total probes sent to this TTL (all flows)
+	rounds    int // number of completed probe rounds
 
 	mu sync.RWMutex
 }
@@ -82,11 +83,13 @@ func (h *Hop) GetNodes() []*PathNode {
 	return out
 }
 
-// MarkRoundEnd advances stability tracking for all nodes.
+// MarkRoundEnd advances stability tracking for all nodes and increments the round counter.
 func (h *Hop) MarkRoundEnd() {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rounds++
 	for _, n := range h.Nodes {
+		n.RecordRoundAvg()
 		n.AdvanceRound()
 	}
 }
@@ -195,11 +198,12 @@ func (h *Hop) GetLastRTT() time.Duration {
 	return pn.GetLastRTT()
 }
 
-// GetSent returns the total sent count for this hop (thread-safe).
+// GetSent returns the number of completed rounds for this hop (thread-safe).
+// This is what the user-facing Snt column displays.
 func (h *Hop) GetSent() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.sentTotal
+	return h.rounds
 }
 
 // IncrementSent increments the total sent probe count.
@@ -209,12 +213,13 @@ func (h *Hop) IncrementSent() {
 	h.sentTotal++
 }
 
-// Reset clears all nodes and zeroes sentTotal, preserving TTL.
+// Reset clears all nodes and zeroes counters, preserving TTL.
 func (h *Hop) Reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Nodes = nil
 	h.sentTotal = 0
+	h.rounds = 0
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.
