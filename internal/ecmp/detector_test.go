@@ -72,3 +72,51 @@ func TestNoDivergence(t *testing.T) {
 		t.Fatalf("expected 0 divergence, got %d", len(result.DivergencePoints))
 	}
 }
+
+// TestAnalyzeEmptyTable ensures Analyze returns an empty result for a table with
+// no hops (kills the surviving mutant: if-body removed on len(hops)<2 guard).
+func TestAnalyzeEmptyTable(t *testing.T) {
+	table := hop.NewTable(10)
+	result := Analyze(table)
+	if len(result.DivergencePoints) != 0 || len(result.ConvergencePoints) != 0 {
+		t.Fatalf("expected empty result for empty table, got div=%v conv=%v",
+			result.DivergencePoints, result.ConvergencePoints)
+	}
+}
+
+// TestAnalyzeSingleHop ensures Analyze returns an empty result for a table with
+// exactly one hop (kills the surviving mutant: len(hops) < 2 → < 1 or ≤ 2).
+func TestAnalyzeSingleHop(t *testing.T) {
+	table := hop.NewTable(10)
+	h := table.GetOrCreate(1)
+	h.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0)
+	h.AddSample(net.ParseIP("10.0.0.2"), 5*time.Millisecond, 1)
+	result := Analyze(table)
+	if len(result.DivergencePoints) != 0 || len(result.ConvergencePoints) != 0 {
+		t.Fatalf("expected empty result for single hop, got div=%v conv=%v",
+			result.DivergencePoints, result.ConvergencePoints)
+	}
+}
+
+// TestAnalyzeTwoHopDivergence verifies that a 2-hop table (the minimal case) with
+// divergence at hop 2 is detected correctly.
+// Kills the surviving mutants: len(hops) < 2 → len(hops) <= 2 (< → <=)
+// and len(hops) < 2 → len(hops) < 3 (int 2 → 3).
+// With either mutation, this 2-hop table would return an empty result,
+// but the correct implementation detects divergence at TTL 2.
+func TestAnalyzeTwoHopDivergence(t *testing.T) {
+	table := hop.NewTable(10)
+	// TTL 1: single IP
+	h1 := table.GetOrCreate(1)
+	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0)
+
+	// TTL 2: two IPs — divergence
+	h2 := table.GetOrCreate(2)
+	h2.AddSample(net.ParseIP("10.0.1.1"), 10*time.Millisecond, 0)
+	h2.AddSample(net.ParseIP("10.0.1.2"), 10*time.Millisecond, 1)
+
+	result := Analyze(table)
+	if len(result.DivergencePoints) != 1 || result.DivergencePoints[0] != 2 {
+		t.Fatalf("expected divergence at TTL 2, got %v", result.DivergencePoints)
+	}
+}

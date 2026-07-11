@@ -1,7 +1,5 @@
 package probe
 
-import "encoding/binary"
-
 // UDPProtocol implements ProbeProtocol for UDP probes.
 type UDPProtocol struct {
 	BaseDstPort int // Base destination port (actual = BaseDstPort + TTL)
@@ -30,27 +28,36 @@ func (p *UDPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 
 // IdentifyResponse inspects the inner header from an ICMP error response
 // and returns the matching probe key if it contains a UDP packet.
+// Supports both IPv4 and IPv6 inner headers.
 func (p *UDPProtocol) IdentifyResponse(innerHeader []byte) (*probeKey, error) {
-	if len(innerHeader) < 28 {
+	if len(innerHeader) < 1 {
 		return nil, nil
 	}
-	// Validate IP protocol field is UDP (17)
-	if innerHeader[9] != 17 {
+	v := int(innerHeader[0] >> 4)
+	if v != 4 && v != 6 {
 		return nil, nil
 	}
-	ihl := int(innerHeader[0]&0x0f) * 4
-	if len(innerHeader) < ihl+8 {
+	_, _, proto, srcPort, dstPort, err := ParseInnerHeader(v, innerHeader)
+	if err != nil {
 		return nil, nil
 	}
-	udpData := innerHeader[ihl:]
-	srcPort := int(binary.BigEndian.Uint16(udpData[0:2]))
-	dstPort := int(binary.BigEndian.Uint16(udpData[2:4]))
-	key := probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
+	if proto != 17 {
+		return nil, nil
+	}
+	key := probeKey{SrcPort: int(srcPort), DstPort: int(dstPort), Seq: 0}
 	return &key, nil
 }
 
 // IsDestReachedICMP returns true if the ICMP type/code indicates the destination
-// was reached. For UDP probes, Port Unreachable (type 3, code 3) means success.
+// was reached. For UDP probes, Port Unreachable means success:
+//   IPv4: ICMP Type 3 (Destination Unreachable), Code 3 (Port Unreachable)
+//   IPv6: ICMPv6 Type 1 (Destination Unreachable), Code 4 (Port Unreachable)
 func (p *UDPProtocol) IsDestReachedICMP(icmpType, icmpCode int) bool {
-	return icmpType == 3 && icmpCode == 3
+	if icmpType == 3 && icmpCode == 3 {
+		return true
+	}
+	if icmpType == 1 && icmpCode == 4 {
+		return true
+	}
+	return false
 }

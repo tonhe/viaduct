@@ -47,3 +47,9 @@ type PingUpdateMsg struct {
 	RTT  time.Duration
 	Lost bool
 }
+
+// ExportDoneMsg is sent when an export file has been written.
+type ExportDoneMsg struct {
+	Path string
+	Err  error
+}

@@ -140,6 +140,27 @@ func TestICMPProtocol_IsDestReachedICMP(t *testing.T) {
 	}
 }
 
+func TestICMPProtocol_IdentifyResponse_IPv6(t *testing.T) {
+	p := NewICMPProtocol()
+	p.sessionID = 0x1234
+
+	inner := []byte{
+		0x60, 0, 0, 0, 0, 8, 58, 64,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		128, 0, 0, 0,
+		0x12, 0x34,
+		0x00, 0x05,
+	}
+	key, err := p.IdentifyResponse(inner)
+	if err != nil || key == nil {
+		t.Fatalf("IdentifyResponse failed: err=%v key=%v", err, key)
+	}
+	if key.SrcPort != 0x1234 || key.DstPort != 5 {
+		t.Errorf("key = %+v, want SrcPort=0x1234 DstPort=5", key)
+	}
+}
+
 // helper to build a fake ICMP Echo Request for IdentifyResponse tests
 func buildFakeInnerICMP(id, seq int) []byte {
 	// 20-byte IP header + 8-byte ICMP header

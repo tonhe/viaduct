@@ -117,3 +117,34 @@ func TestUDPProtocol_IdentifyResponse_RejectsNonUDP(t *testing.T) {
 		t.Errorf("expected nil for non-UDP, got %+v", *got)
 	}
 }
+
+func TestUDPProtocol_IdentifyResponse_IPv6(t *testing.T) {
+	p := NewUDPProtocol(33434)
+	inner := []byte{
+		0x60, 0, 0, 0, 0, 8, 17, 64,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		0xab, 0xcd, 0x82, 0x9a,
+		0, 8, 0, 0,
+	}
+	key, err := p.IdentifyResponse(inner)
+	if err != nil || key == nil {
+		t.Fatalf("IdentifyResponse failed: err=%v key=%v", err, key)
+	}
+	if key.SrcPort != 0xabcd || key.DstPort != 33434 {
+		t.Errorf("key = %+v, want SrcPort=0xabcd DstPort=33434", key)
+	}
+}
+
+func TestUDPProtocol_IsDestReachedICMP_IPv6(t *testing.T) {
+	p := NewUDPProtocol(33434)
+	if !p.IsDestReachedICMP(1, 4) {
+		t.Error("IsDestReachedICMP(1, 4) for ICMPv6 Port Unreachable = false, want true")
+	}
+	if p.IsDestReachedICMP(3, 3) != true {
+		t.Error("IsDestReachedICMP(3, 3) for ICMPv4 Port Unreachable = false, want true")
+	}
+	if p.IsDestReachedICMP(3, 0) {
+		t.Error("IsDestReachedICMP(3, 0) for unrelated = true, want false")
+	}
+}

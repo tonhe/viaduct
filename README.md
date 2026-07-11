@@ -1,27 +1,193 @@
-# via (Viaduct)
+<div align="center">
+  <h1>via</h1>
+  <p><em>A modern terminal-native traceroute replacement with real-time ECMP multipath discovery</em></p>
 
-A modern, terminal-native traceroute tool with real-time ECMP multipath discovery.
+  [![Go](https://img.shields.io/github/go-mod/go-version/tonhe/viaduct)](https://go.dev)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+  [![GitHub release](https://img.shields.io/github/v/release/tonhe/viaduct)](https://github.com/tonhe/viaduct/releases)
+  [![macOS](https://img.shields.io/badge/macOS-supported-brightgreen?logo=apple)](https://github.com/tonhe/viaduct)
+  [![Linux](https://img.shields.io/badge/Linux-supported-brightgreen?logo=linux&logoColor=white)](https://github.com/tonhe/viaduct)
+  [![Windows](https://img.shields.io/badge/Windows-supported-brightgreen?logo=windows&logoColor=white)](https://github.com/tonhe/viaduct)
 
-`via` replaces `traceroute`, `mtr`, and `paris-traceroute` with a live-updating TUI that shows packet loss, latency stats, reverse DNS, and all parallel paths through load-balanced networks.
+</div>
+
+Traditional `traceroute` shows one path. Real networks aren't single paths — they're forests of parallel ECMP links, rate-limiting routers, and load balancers that return different answers every probe. `via` sees all of it.
+
+`via` replaces `traceroute`, `mtr`, and `paris-traceroute` with a live-updating TUI that shows packet loss, latency stats, reverse DNS, ASN enrichment, and all parallel paths through load-balanced networks.
+
+<img src="img/demo.gif" alt="via showing ECMP multipath trace with sparklines and ASN enrichment" width="900">
+
+[Install](#install) · [Quick Start](#quick-start) · [Features](#features) · [Display Modes](#display-modes) · [Themes](#themes) · [Flags](#flags)
+
+---
+
+## How via Compares
+
+| Feature | traceroute | mtr | paris-traceroute | **via** |
+|---------|:---:|:---:|:---:|:---:|
+| ECMP multipath discovery | — | — | Yes | **Yes** |
+| Live-updating TUI | — | Yes | — | **Yes** |
+| ASN enrichment | — | — | — | **Yes** |
+| Rate-limit detection | — | — | — | **Yes** |
+| TCP/UDP/ICMP probes | Partial | ICMP | UDP/ICMP | **All + Auto** |
+| Display modes & sparklines | — | — | — | **4 modes** |
+| Destination alerting | — | — | — | **Yes** |
+| Color themes | — | — | — | **61** |
+| Settings persistence | — | — | — | **Yes** |
+
+---
 
 ## Install
 
 ### Homebrew
 
 ```bash
-brew tap tonhe/tap
-brew install viaduct
+brew install tonhe/tap/viaduct
 ```
 
 ### From source
-
-Requires Go 1.25+:
 
 ```bash
 git clone https://github.com/tonhe/viaduct.git
 cd viaduct
 make install    # builds and copies to ~/bin/
 ```
+
+> [!NOTE]
+> **Linux users** can avoid sudo by granting raw socket capability once:
+> ```bash
+> sudo setcap cap_net_raw+ep $(which via)
+> ```
+
+---
+
+## Quick Start
+
+```bash
+# Trace with ECMP multipath discovery (default: UDP, 6 flows)
+via google.com
+
+# TCP SYN probes — passes firewalls that block UDP/ICMP
+via -P tcp google.com
+
+# Auto mode — starts UDP, falls back to ICMP if no responses
+via -P auto google.com
+
+# Non-interactive report for scripts
+via -r google.com
+```
+
+> [!TIP]
+> Press <kbd>Esc</kbd> during any trace to open the settings menu — change themes, probe settings, or alert thresholds without restarting.
+
+---
+
+## Features
+
+- **ECMP multipath** — Paris-traceroute-style probing reveals all parallel paths through load-balanced networks with tree-view divergence (`├──`/`└──` connectors)
+- **Automatic rate-limit detection** — detects routers that rate-limit ICMP TTL Exceeded and silently switches to direct ping, replacing phantom loss with real data (`†` marker)
+- **4 display modes** — cycle with <kbd>d</kbd>: Default, Health, Latency, Variability — each with sparklines, trend detection, and hop-to-hop deltas
+- **Destination alerting** — monitors loss% and latency thresholds; identifies the responsible hop and ASN when alerts fire
+- **ASN enrichment** — each hop shows its AS number with boundary transitions highlighted; full org name at wide widths
+- **3 probe protocols + auto** — UDP (ECMP), TCP SYN (firewall bypass), ICMP (classic), and Auto (UDP with ICMP fallback)
+- **61 color themes** — Solarized Dark default; switch with `--theme` or the settings menu
+- **Config persistence** — settings saved to `~/.config/via/config.toml`; CLI flags override at runtime
+
+---
+
+## Protocol Modes
+
+| Protocol | Flag | ECMP | Dest Detection | Best For |
+|----------|------|------|----------------|----------|
+| UDP | `-P udp` (default) | Yes (src-port variation) | ICMP Port Unreachable | General use, ECMP discovery |
+| TCP SYN | `-P tcp` | Yes (src-port variation) | SYN-ACK or RST | Targets behind firewalls |
+| ICMP | `-P icmp` | No (single-path) | Echo Reply | Simple traces, compatibility |
+| Auto | `-P auto` | Yes → No on fallback | Per active protocol | Unknown networks |
+
+**Auto mode** starts with UDP for ECMP discovery. If no responses are received after 3 rounds (~3 seconds), it automatically falls back to ICMP. The TUI header updates to reflect the active protocol.
+
+---
+
+## IPv6 Support
+
+`via` runs over IPv4 or IPv6, selecting the family automatically based on the target's DNS records and the host's transport capability. Force a specific family with `-4` or `-6`:
+
+```bash
+via google.com          # auto-selects (prefers IPv6 if available)
+via -4 google.com       # IPv4
+via -6 google.com       # IPv6
+```
+
+If `-6` is requested and the target has no AAAA record (or the host has no IPv6 transport), `via` exits with a clear error rather than silently falling back.
+
+---
+
+## Rate-Limit Detection & Ping Supplement
+
+Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` and `traceroute` to show phantom packet loss at intermediate hops. This is the single most common source of misdiagnosis in traceroute output — operators see 60% loss at hop 3 and assume a problem, when the router is simply deprioritizing TTL Exceeded replies.
+
+`via` automagically detects this. After a few probe rounds, it identifies hops where loss is high but all downstream hops are healthy — the hallmark of rate-limiting, not real packet loss. It then launches direct ICMP Echo Requests (pings) to those hops in the background, on a separate socket, and replaces the misleading TTL Exceeded stats with accurate ping-derived data.
+
+The `†` dagger on the Snt column indicates a hop whose stats come from direct ping rather than TTL Exceeded replies. No configuration needed — it just works. Disable with `--no-ping` if you prefer raw TTL Exceeded data.
+
+---
+
+## Display Modes
+
+Press <kbd>d</kbd> to cycle through four view presets:
+
+| Mode | Columns | Best For |
+|------|---------|----------|
+| **Default** | Loss%, Snt, Avg, Best, Wrst, StDev, Last | General overview (mtr-equivalent) |
+| **Health** | Loss%, Avg, Delta, Sparkline, Trend | Quick health assessment |
+| **Latency** | Avg, Best, Wrst, GMean, Delta, Sparkline | Detailed latency analysis |
+| **Variability** | StDev, Jitter, Jitter Mean, Sparkline, Trend | Stability analysis |
+
+**Additional metrics:**
+
+- **Delta** — hop-to-hop latency difference; the largest delta is highlighted in amber to pinpoint where delay is introduced
+- **GMean** — geometric mean, a better central tendency for skewed latency distributions
+- **Jitter / Javg** — current jitter (`|rtt - prevRTT|`) and running mean jitter
+- **Sparkline** — heat-strip mini chart (green→gold→red gradient) showing per-round average latency (28 rounds); lost probes render as dim `·`
+- **Trend** — sliding-window linear regression over 10 rounds; shows `↑ degrading`, `↓ improving`, or `~ stable`
+
+---
+
+## Destination Alerting
+
+`via` monitors the destination hop for sustained degradation and alerts when thresholds are exceeded. By default, alerts fire when loss exceeds 5% for 3 consecutive rounds.
+
+When an alert fires, `via` walks backward through the hops to identify which hop and ASN is likely causing the problem, and displays the alert in a red bar above the status line.
+
+Configure with `--alert-loss`, `--alert-latency`, and `--alert-rounds`. Disable with `--no-alert`. Press <kbd>r</kbd> to reset alert state.
+
+---
+
+## Themes
+
+`via` ships with 61 built-in color themes. Set a theme with `--theme <slug>` or choose one in the settings menu (<kbd>Esc</kbd>).
+
+<details>
+<summary>Show all 61 themes</summary>
+
+| Family | Themes |
+|--------|--------|
+| **Solarized** | solarized-dark (default), solarized-light, solarized-dark-hc, solarized-osaka-night, solarized-darcula |
+| **Catppuccin** | catppuccin-mocha, catppuccin-macchiato, catppuccin-frappe, catppuccin-latte |
+| **Gruvbox** | gruvbox-dark, gruvbox-light, gruvbox-dark-hard, gruvbox-material |
+| **Tokyo Night** | tokyo-night, tokyo-night-storm, tokyo-night-moon, tokyo-night-day |
+| **One/Atom** | one-dark, one-light, one-half-dark, one-half-light |
+| **Rosé Pine** | rose-pine, rose-pine-moon, rose-pine-dawn |
+| **Kanagawa** | kanagawa-wave, kanagawa-dragon, kanagawa-lotus |
+| **Everforest** | everforest-dark, everforest-light |
+| **Fox** | nightfox, carbonfox, nordfox, dawnfox |
+| **Monokai** | monokai-classic, monokai-pro, monokai-vivid |
+| **GitHub** | github-dark, github-dark-dimmed, github-light |
+| **Standalone** | dracula, nord, flexoki-dark, flexoki-light, cyberdream, ayu-mirage, ayu-dark, ayu-light, challenger-deep, night-owl, night-owlish-light, doom-one, moonfly, sonokai, oxocarbon, poimandres, vesper, palenight, horizon, zenburn, modus-operandi, tomorrow |
+
+</details>
+
+---
 
 ## Usage
 
@@ -75,113 +241,7 @@ via --alert-latency 200ms google.com
 via --no-alert google.com
 ```
 
-### Avoid sudo (Linux only)
-
-Grant raw socket capability once:
-
-```bash
-sudo setcap cap_net_raw+ep $(which via)
-via google.com    # no sudo needed
-```
-
-## What You See
-
-```
-  via v0.0.3   Target: google.com (142.250.80.46)    Proto: UDP/ECMP    Probes: 847
-──────────────────────────────────────────────────────────────────────────────────────────────
-  #         IP                 Hostname               Loss%    Snt   Avg      Best     Wrst     StDev    Last     Stab
-  1         192.168.1.1        router.local            0.0%†    10    1.2ms    0.8ms    2.1ms    0.3      1.1ms
-  2         10.0.0.1           isp-gw.example.net      0.0%    84    5.4ms    4.8ms    6.9ms    0.5      5.2ms
-  3    ├──  72.14.215.65       ae-5.r21.snjsca04.us    0.0%    42    12.3ms   11.1ms   14.2ms   0.8      11.8ms   [100%]
-       └──  72.14.215.69       ae-7.r21.snjsca04.us    -        -    13.1ms   11.8ms   15.0ms   0.7      12.5ms   [100%]
-  4         *
-  5         142.250.80.46      lax17s55-in-f14.1e100   0.0%    84    14.1ms   13.0ms   16.5ms   0.9      13.9ms
-──────────────────────────────────────────────────────────────────────────────────────────────
-  Tracing... 5/5 hops    Elapsed: 1m24s    DNS: on    6 flows    j/k:scroll p:pause r:reset n:dns [d] Health q:quit
-```
-
-## Features
-
-- **Multiple probe protocols** -- UDP (default), TCP SYN, and ICMP modes with `--protocol`/`-P` flag
-- **Auto mode** -- starts with UDP, automatically falls back to ICMP if no responses are received
-- **TCP SYN probing** -- reaches targets behind firewalls that block UDP/ICMP (port 443 default, configurable with `--port`)
-- **ECMP multipath** -- Paris-traceroute-style probing reveals all parallel paths through load-balanced networks (UDP and TCP support multipath, ICMP is single-path)
-- **Tree view** -- divergence points auto-expand with `├──`/`└──` connectors showing multiple IPs at the same TTL
-- **Path stability** -- 50-round rolling window tracks how consistent each path is (`[100%]` = always present)
-- **Automatic rate-limit detection + ping supplement** -- automagically detects devices that rate-limit ICMP TTL Exceeded responses and switches their monitoring to direct ICMP Echo Requests (ping), replacing misleading loss stats with accurate data (marked with `†`)
-- **Display modes** -- cycle through 4 views with `d`: Default (standard mtr columns), Health (Loss%, Avg, Delta, Sparkline, Trend), Latency (Avg, Best, Wrst, GMean, Delta, Sparkline), Variability (StDev, Jitter, Jitter Mean, Sparkline, Trend)
-- **Inline sparklines** -- heat-strip sparklines with green→red gradient show per-round latency history at a glance (28 samples, lost probes shown as dim dots)
-- **Trend detection** -- sliding-window linear regression detects degrading or improving latency trends per hop
-- **Hop-to-hop delta** -- shows latency difference between adjacent hops, highlighting the largest contributor in amber
-- **Destination alerting** -- monitors destination loss% and latency against configurable thresholds; fires alerts after sustained degradation and identifies the affected hop and ASN
-- **Live updating** -- hops appear and stats refine in real time
-- **Full mtr columns** -- Snt, Avg, Best, Wrst, StDev, Last, Loss% plus GMean, Jitter, Jitter Mean (budget-based responsive layout adapts to any terminal width)
-- **Viewport scrolling** -- j/k to scroll, g/G to jump to top/bottom for long traces
-- **ASN enrichment** -- each hop shows its AS number and organization (e.g., `AS13335 Cloudflare`), with AS boundary transitions highlighted in yellow
-- **Async DNS** -- hostnames resolve in the background without blocking probes
-- **Report mode** -- non-interactive output with Flows and Stability columns (`via -r`)
-- **Auto sudo** -- detects missing permissions and re-execs under sudo automatically
-- **Clean exit** -- press `q` or `Ctrl-C` for a final summary
-
-## Protocol Modes
-
-| Protocol | Flag | ECMP | Dest Detection | Best For |
-|----------|------|------|----------------|----------|
-| UDP | `-P udp` (default) | Yes (src-port variation) | ICMP Port Unreachable | General use, ECMP discovery |
-| TCP SYN | `-P tcp` | Yes (src-port variation) | SYN-ACK or RST | Targets behind firewalls |
-| ICMP | `-P icmp` | No (single-path) | Echo Reply | Simple traces, compatibility |
-| Auto | `-P auto` | Yes → No on fallback | Per active protocol | Unknown networks |
-
-**Auto mode** starts with UDP for ECMP discovery. If no responses are received after 3 rounds (~3 seconds), it automatically falls back to ICMP. The TUI header updates to reflect the active protocol.
-
-**ICMP + `--paths`:** Prints a warning and runs single-path (ICMP cannot vary flows for ECMP).
-
-## Rate-Limit Detection & Ping Supplement
-
-Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` and `traceroute` to show phantom packet loss at intermediate hops. This is the single most common source of misdiagnosis in traceroute output — operators see 60% loss at hop 3 and assume a problem, when the router is simply deprioritizing TTL Exceeded replies.
-
-`via` automagically detects this. After a few probe rounds, it identifies hops where loss is high but all downstream hops are healthy — the hallmark of rate-limiting, not real packet loss. It then launches direct ICMP Echo Requests (pings) to those hops in the background, on a separate socket, and replaces the misleading TTL Exceeded stats with accurate ping-derived data.
-
-The `†` dagger next to the loss column indicates a hop whose stats come from direct ping rather than TTL Exceeded replies. No configuration needed — it just works. Disable with `--no-ping` if you prefer raw TTL Exceeded data.
-
-## Display Modes
-
-Press `d` to cycle through four view presets. Each view focuses on different aspects of the trace:
-
-| Mode | Columns | Best For |
-|------|---------|----------|
-| **Default** | Loss%, Snt, Avg, Best, Wrst, StDev, Last | General overview (mtr-equivalent) |
-| **Health** | Loss%, Avg, Delta, Sparkline, Trend | Quick health assessment |
-| **Latency** | Avg, Best, Wrst, GMean, Delta, Sparkline | Detailed latency analysis |
-| **Variability** | StDev, Jitter, Jitter Mean, Sparkline, Trend | Stability analysis |
-
-**Additional metrics available in display modes:**
-
-- **Delta** -- hop-to-hop latency difference; the largest delta is highlighted in amber to pinpoint where delay is introduced
-- **GMean** -- geometric mean, a better central tendency for skewed latency distributions
-- **Jitter / Javg** -- current jitter (`|rtt - prevRTT|`) and running mean jitter
-- **Sparkline** -- heat-strip mini chart (green→red gradient) showing per-round average latency (28 rounds); lost probes render as dim `·`
-- **Trend** -- sliding-window linear regression over 10 rounds; shows `↑ degrading`, `↓ improving`, or `~ stable`
-
-## Destination Alerting
-
-`via` monitors the destination hop for sustained degradation and alerts when thresholds are exceeded. By default, alerts fire when loss exceeds 5% for 3 consecutive rounds.
-
-When an alert fires, `via` walks backward through the hops to identify which hop and ASN is likely causing the problem, and displays the alert in a red bar above the status line.
-
-Configure with `--alert-loss`, `--alert-latency`, and `--alert-rounds`. Disable with `--no-alert`. Press `r` to reset alert state.
-
-## Architecture
-
-`via` is built on a fully concurrent architecture that keeps every subsystem independent:
-
-- **Protocol-agnostic probe engine** runs in its own goroutine behind a `ProbeProtocol` interface, firing packets without waiting for DNS or the UI
-- **DNS resolver** uses a worker pool (4 goroutines) with dedup and caching -- lookups never block probes
-- **ASN enricher** uses the same worker pool pattern to look up AS numbers via Team Cymru DNS -- zero config, no API keys
-- **TUI renders independently** on a 100ms tick, reading from thread-safe shared state
-- **No serialized I/O** -- unlike mtr (single-threaded C with synchronous DNS), every operation runs concurrently
-
-The result: probes keep firing at full speed while hostnames resolve in the background and the UI stays smooth.
+---
 
 ## Flags
 
@@ -205,19 +265,79 @@ The result: probes keep firing at full speed while hostnames resolve in the back
 | `--alert-latency` | | 0 | Latency threshold for destination alert (0 = disabled) |
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
 | `--no-alert` | | | Disable alerting |
+| `--theme` | | (config) | Color theme slug (e.g. 'dracula', 'nord') |
 | `--version` | | | Print version and exit |
+
+---
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `j`/`k` | Scroll up/down |
-| `g`/`G` | Jump to top/bottom |
-| `p` | Pause/resume probing |
-| `r` | Reset all hop stats |
-| `n` | Toggle DNS resolution |
-| `d` | Cycle display modes (Default → Health → Latency → Variability) |
-| `q` | Quit (prints final summary) |
+| <kbd>j</kbd> / <kbd>k</kbd> | Scroll up/down |
+| <kbd>g</kbd> / <kbd>G</kbd> | Jump to top/bottom |
+| <kbd>p</kbd> | Pause/resume probing |
+| <kbd>r</kbd> | Reset all hop stats and ping supplement |
+| <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability) |
+| <kbd>q</kbd> | Quit (prints final summary) |
+| <kbd>Esc</kbd> | Open settings menu |
+
+---
+
+<details>
+<summary>Architecture</summary>
+
+`via` is built on a fully concurrent architecture that keeps every subsystem independent:
+
+- **Protocol-agnostic probe engine** runs in its own goroutine behind a `ProbeProtocol` interface, firing packets without waiting for DNS or the UI
+- **DNS resolver** uses a worker pool (4 goroutines) with dedup and caching — lookups never block probes
+- **ASN enricher** uses the same worker pool pattern to look up AS numbers via Team Cymru DNS — zero config, no API keys
+- **TUI renders independently** on a 100ms tick, reading from thread-safe shared state
+- **No serialized I/O** — unlike mtr (single-threaded C with synchronous DNS), every operation runs concurrently
+
+The result: probes keep firing at full speed while hostnames resolve in the background and the UI stays smooth.
+
+</details>
+
+## Testing
+
+`via` runs a cross-platform test matrix on every push to `main` and `feat/*`
+branches (see `.github/workflows/test.yml`).
+
+**Locally:**
+
+```
+make test          # go test ./...  (fast, no race detector)
+make test-race     # go test -race ./...
+make test-tui      # TUI package only
+make coverage-gate # enforce per-package coverage floors
+```
+
+**Regenerating golden files** after intentional TUI output changes:
+
+```
+make golden-update
+```
+
+Then review the diff to `internal/tui/testdata/**/*.golden` and commit
+alongside the code change.
+
+### Soak tests (opt-in)
+
+Long-running live-network sweep to catch environmental, timing, and leak
+bugs. NEVER runs on CI. Requires `make install` first plus sudo or
+CAP_NET_RAW on `~/bin/via`.
+
+```
+make soak-test
+```
+
+Runs 10+ trace scenarios (v4/v6/mixed, UDP/TCP/ICMP/auto) against public
+hosts, tracks goroutine count and heap growth, and reports any suspicious
+patterns. ~30 minute runtime.
+
+**CI matrix:** Ubuntu, macOS, and Windows against Go 1.25.6. Build, race,
+coverage, and per-package coverage floors all run on each OS.
 
 ## License
 

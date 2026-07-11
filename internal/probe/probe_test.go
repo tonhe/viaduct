@@ -25,7 +25,7 @@ func TestConfigDefaults(t *testing.T) {
 }
 
 func TestBuildICMPEchoRequest(t *testing.T) {
-	pkt, err := buildICMPEchoRequest(1234, 1, 64)
+	pkt, err := buildICMPEchoRequest(4, 1234, 1, 64)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

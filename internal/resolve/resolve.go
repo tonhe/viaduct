@@ -16,17 +16,31 @@ type Result struct {
 
 // Resolver performs async reverse DNS lookups with caching and deduplication.
 type Resolver struct {
-	workers int
-	cache   sync.Map // IP string -> hostname string
-	pending sync.Map // IP string -> struct{} (dedup)
-	reqCh   chan net.IP
+	workers    int
+	cache      sync.Map // IP string -> hostname string
+	pending    sync.Map // IP string -> struct{} (dedup)
+	reqCh      chan net.IP
+	lookupFunc func(context.Context, net.IP) (string, error) // extracted for testability; defaults to real DNS
+}
+
+// defaultLookup performs a real reverse DNS lookup using the system resolver.
+func defaultLookup(ctx context.Context, ip net.IP) (string, error) {
+	names, err := net.DefaultResolver.LookupAddr(ctx, ip.String())
+	if err != nil {
+		return "", err
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	return names[0], nil
 }
 
 // New creates a resolver with the given number of worker goroutines.
 func New(workers int) *Resolver {
 	return &Resolver{
-		workers: workers,
-		reqCh:   make(chan net.IP, 256),
+		workers:    workers,
+		reqCh:      make(chan net.IP, 256),
+		lookupFunc: defaultLookup,
 	}
 }
 
@@ -86,12 +100,12 @@ func (r *Resolver) worker(ctx context.Context, results chan<- Result) {
 			key := ip.String()
 
 			resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			names, err := net.DefaultResolver.LookupAddr(resolveCtx, key)
+			name, err := r.lookupFunc(resolveCtx, ip)
 			cancel()
 
 			var hostname string
-			if err == nil && len(names) > 0 {
-				hostname = names[0]
+			if err == nil && name != "" {
+				hostname = name
 				// Remove trailing dot
 				if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
 					hostname = hostname[:len(hostname)-1]

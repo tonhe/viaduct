@@ -35,8 +35,7 @@ func (p *TCPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 	hdr[13] = 0x02                                    // SYN flag
 	binary.BigEndian.PutUint16(hdr[14:16], 65535)     // window size
 
-	// TCP checksum with pseudo-header using cfg.SourceIP and cfg.TargetIP
-	checksum := tcpChecksum(hdr, cfg.SourceIP, cfg.TargetIP)
+	checksum := TCPChecksum(cfg.IPVersion, cfg.SourceIP, cfg.TargetIP, hdr)
 	binary.BigEndian.PutUint16(hdr[16:18], checksum)
 
 	key := probeKey{SrcPort: srcPort, DstPort: p.DstPort, Seq: 0}
@@ -46,20 +45,21 @@ func (p *TCPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 // IdentifyResponse inspects the inner header from an ICMP error response
 // and returns the matching probe key if it contains a TCP packet.
 func (p *TCPProtocol) IdentifyResponse(innerHeader []byte) (*probeKey, error) {
-	if len(innerHeader) < 28 {
+	if len(innerHeader) < 1 {
 		return nil, nil
 	}
-	if innerHeader[9] != 6 { // must be TCP
+	v := int(innerHeader[0] >> 4)
+	if v != 4 && v != 6 {
 		return nil, nil
 	}
-	ihl := int(innerHeader[0]&0x0f) * 4
-	if len(innerHeader) < ihl+8 {
+	_, _, proto, srcPort, dstPort, err := ParseInnerHeader(v, innerHeader)
+	if err != nil {
 		return nil, nil
 	}
-	tcpData := innerHeader[ihl:]
-	srcPort := int(binary.BigEndian.Uint16(tcpData[0:2]))
-	dstPort := int(binary.BigEndian.Uint16(tcpData[2:4]))
-	key := probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
+	if proto != 6 {
+		return nil, nil
+	}
+	key := probeKey{SrcPort: int(srcPort), DstPort: int(dstPort), Seq: 0}
 	return &key, nil
 }
 
@@ -69,21 +69,8 @@ func (p *TCPProtocol) IsDestReachedICMP(icmpType, icmpCode int) bool {
 	return false
 }
 
-// tcpChecksum computes the TCP checksum including the IPv4 pseudo-header.
-func tcpChecksum(tcpHeader []byte, srcIP, dstIP net.IP) uint16 {
-	src := srcIP.To4()
-	dst := dstIP.To4()
-	psh := make([]byte, 12)
-	copy(psh[0:4], src)
-	copy(psh[4:8], dst)
-	psh[9] = 6 // TCP protocol number
-	binary.BigEndian.PutUint16(psh[10:12], uint16(len(tcpHeader)))
-	data := append(psh, tcpHeader...)
-	return checksumRFC1071(data)
-}
-
 // parseTCPResponse extracts a probe key from a raw TCP response.
-// On macOS, net.ListenPacket("ip4:tcp") strips the IP header, so the input
+// On macOS, net.ListenPacket("ip4:tcp" or "ip6:tcp") strips the IP header, so the input
 // is the TCP segment directly (no IP header).
 // Returns nil if the packet is not a SYN-ACK or RST.
 func parseTCPResponse(tcpData []byte) (*probeKey, bool) {
@@ -105,7 +92,7 @@ func parseTCPResponse(tcpData []byte) (*probeKey, bool) {
 }
 
 // listenTCP listens for SYN-ACK and RST responses on a raw TCP socket.
-// On macOS, net.ListenPacket("ip4:tcp") delivers TCP segments without IP header.
+// On macOS, net.ListenPacket("ip4:tcp" or "ip6:tcp") delivers TCP segments without IP header.
 func (t *Tracer) listenTCP(ctx context.Context, conn net.PacketConn, pm *probeMap, results chan<- Result) {
 	buf := make([]byte, 1500)
 	for {

@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/net/icmp"
-	"golang.org/x/net/ipv4"
+
+	"github.com/tonhe/viaduct/internal/probe"
 )
 
 // Result represents a single ping event.
@@ -21,6 +22,12 @@ type Result struct {
 	Lost bool
 }
 
+// packetWriter is the minimal interface for sending raw packets.
+// Satisfied by *icmp.PacketConn and by test fakes.
+type packetWriter interface {
+	WriteTo(b []byte, dst net.Addr) (int, error)
+}
+
 // Supplementer pings rate-limited hop IPs directly.
 // Call Open to start, PingAll each round, and Close when done.
 type Supplementer struct {
@@ -29,15 +36,21 @@ type Supplementer struct {
 	maxTargets  int
 	icmpID      int // unique ICMP ID to avoid collision with probe engine
 	conn        *icmp.PacketConn
+	writer      packetWriter // seam: nil until Open; set to conn unless overridden in tests
 	results     chan<- Result
 	seq         int
+	IPVersion   int // 4 or 6; defaults to 4 if zero
 }
 
-// New creates a Supplementer.
-func New() *Supplementer {
+// New creates a Supplementer. Pass ipVersion as 4 or 6; 0 defaults to 4.
+func New(ipVersion int) *Supplementer {
+	if ipVersion == 0 {
+		ipVersion = 4
+	}
 	return &Supplementer{
 		maxTargets: 10,
 		icmpID:     50000 + rand.Intn(10000), // 50000-59999 range
+		IPVersion:  ipVersion,
 	}
 }
 
@@ -60,11 +73,12 @@ func (s *Supplementer) Submit(ip net.IP) {
 
 // Open creates the ICMP socket and starts the reply listener.
 func (s *Supplementer) Open(ctx context.Context, results chan<- Result) error {
-	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	conn, err := icmp.ListenPacket(probe.ListenerNet(s.IPVersion), probe.RawListenAddr(s.IPVersion))
 	if err != nil {
 		return fmt.Errorf("ping socket: %w", err)
 	}
 	s.conn = conn
+	s.writer = conn
 	s.results = results
 	go s.listen(ctx, conn, results)
 	return nil
@@ -80,19 +94,25 @@ func (s *Supplementer) Close() {
 // PingAll sends one ICMP Echo Request to each target.
 // For each target pinged, a Result{Lost: true} is emitted as a "sent" marker.
 func (s *Supplementer) PingAll() {
-	if s.conn == nil {
+	if s.writer == nil {
 		return
 	}
+	s.pingAll()
+}
+
+// pingAll is the internal implementation; it assumes writer != nil.
+// Separated so tests can inject a fake writer without a raw socket.
+func (s *Supplementer) pingAll() {
 	s.seq++
 	s.targets.Range(func(key, val any) bool {
 		ip := val.(net.IP)
-		pkt, err := buildPingPacket(s.icmpID, s.seq)
+		pkt, err := buildPingPacket(s.icmpID, s.seq, s.IPVersion)
 		if err != nil {
 			return true
 		}
 
 		dst := &net.IPAddr{IP: ip}
-		s.conn.WriteTo(pkt, dst)
+		s.writer.WriteTo(pkt, dst)
 
 		// Emit "sent" marker so consumer can increment Sent count
 		select {
@@ -119,12 +139,12 @@ func (s *Supplementer) listen(ctx context.Context, conn *icmp.PacketConn, result
 			continue
 		}
 
-		msg, err := icmp.ParseMessage(ipv4.ICMPTypeEcho.Protocol(), buf[:n])
+		msg, err := icmp.ParseMessage(probe.ICMPProtoNum(s.IPVersion), buf[:n])
 		if err != nil {
 			continue
 		}
 
-		if msg.Type != ipv4.ICMPTypeEchoReply {
+		if msg.Type != probe.EchoReplyType(s.IPVersion) {
 			continue
 		}
 
@@ -155,7 +175,7 @@ func (s *Supplementer) listen(ctx context.Context, conn *icmp.PacketConn, result
 }
 
 // buildPingPacket creates an ICMP Echo Request with a timestamp payload.
-func buildPingPacket(id, seq int) ([]byte, error) {
+func buildPingPacket(id, seq, ipVersion int) ([]byte, error) {
 	// Embed send timestamp in payload for RTT calculation
 	now := time.Now().UnixNano()
 	data := make([]byte, 16)
@@ -165,7 +185,7 @@ func buildPingPacket(id, seq int) ([]byte, error) {
 	copy(data[8:], []byte("VIAPING\x00"))
 
 	msg := &icmp.Message{
-		Type: ipv4.ICMPTypeEcho,
+		Type: probe.EchoRequestType(ipVersion),
 		Code: 0,
 		Body: &icmp.Echo{
 			ID:   id,

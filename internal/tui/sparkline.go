@@ -2,25 +2,26 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/tonhe/viaduct/internal/theme"
 )
 
 // Sparkline renders as a colored heat strip: each data point is a full-height
 // block (█) colored on a green → yellow → red gradient based on relative value.
 // Lost probes (0 duration) render as a dim dot (·).
 
-// sparkGradient maps 0-7 to ANSI 256-color codes: green → yellow → red.
-var sparkGradient = []string{
-	"42",  // green
-	"78",  // green-cyan
-	"114", // light green
-	"150", // yellow-green
-	"186", // yellow
-	"222", // amber
-	"208", // orange
-	"196", // red
+// sparkGradient returns 8 interpolated colors from the active theme.
+func sparkGradient() [8]lipgloss.Color {
+	return theme.Current.SparkGradient()
+}
+
+// sparkLossStyle returns the style for lost-probe dots.
+func sparkLossStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(theme.Current.Base03)
 }
 
 // renderSparkline renders a sparkline of the given width (in characters).
@@ -40,31 +41,28 @@ func renderSparkline(data []time.Duration, width int) string {
 		data = data[len(data)-width:]
 	}
 
-	// Find min/max for auto-scaling (skip 0 = loss)
-	var minVal, maxVal float64
-	first := true
+	// Compute median for threshold-based coloring (skip 0 = loss)
+	var valid []float64
 	for _, d := range data {
-		if d == 0 {
-			continue
-		}
-		v := float64(d)
-		if first {
-			minVal = v
-			maxVal = v
-			first = false
-		} else {
-			if v < minVal {
-				minVal = v
-			}
-			if v > maxVal {
-				maxVal = v
-			}
+		if d > 0 {
+			valid = append(valid, float64(d))
 		}
 	}
 
-	valRange := maxVal - minVal
-	if valRange == 0 {
-		valRange = 1
+	var median float64
+	if len(valid) > 0 {
+		sorted := make([]float64, len(valid))
+		copy(sorted, valid)
+		sort.Float64s(sorted)
+		mid := len(sorted) / 2
+		if len(sorted)%2 == 0 {
+			median = (sorted[mid-1] + sorted[mid]) / 2
+		} else {
+			median = sorted[mid]
+		}
+	}
+	if median == 0 {
+		median = 1
 	}
 
 	// Right-align: pad with spaces on the left
@@ -74,7 +72,8 @@ func renderSparkline(data []time.Duration, width int) string {
 		result += " "
 	}
 
-	lossStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	gradient := sparkGradient()
+	lossStyle := sparkLossStyle()
 
 	for _, d := range data {
 		if d == 0 {
@@ -82,16 +81,28 @@ func renderSparkline(data []time.Duration, width int) string {
 			continue
 		}
 
-		normalized := (float64(d) - minVal) / valRange
-		idx := int(normalized * 7.99)
-		if idx > 7 {
+		// Color by % deviation above median:
+		//   ≤ 20% above  → idx 0-1  (green)
+		//   20-50% above  → idx 2-4  (green → gold)
+		//   50-100% above → idx 5-6  (gold → red)
+		//   > 100% above  → idx 7    (red)
+		// Below median is always green (idx 0).
+		pct := (float64(d) - median) / median
+		var idx int
+		switch {
+		case pct <= 0:
+			idx = 0
+		case pct <= 0.20:
+			idx = int(pct / 0.20 * 1.99) // 0-1
+		case pct <= 0.50:
+			idx = 2 + int((pct-0.20)/0.30*2.99) // 2-4
+		case pct <= 1.00:
+			idx = 5 + int((pct-0.50)/0.50*1.99) // 5-6
+		default:
 			idx = 7
 		}
-		if idx < 0 {
-			idx = 0
-		}
 
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(sparkGradient[idx]))
+		style := lipgloss.NewStyle().Foreground(gradient[idx])
 		result += style.Render("█")
 	}
 

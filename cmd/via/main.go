@@ -16,17 +16,35 @@ import (
 	"golang.org/x/net/icmp"
 
 	"github.com/tonhe/viaduct/internal/asn"
+	"github.com/tonhe/viaduct/internal/config"
+	"github.com/tonhe/viaduct/internal/export"
 	"github.com/tonhe/viaduct/internal/hop"
 	"github.com/tonhe/viaduct/internal/ping"
 	"github.com/tonhe/viaduct/internal/probe"
 	"github.com/tonhe/viaduct/internal/resolve"
+	"github.com/tonhe/viaduct/internal/sysprobe"
+	"github.com/tonhe/viaduct/internal/theme"
 	"github.com/tonhe/viaduct/internal/tui"
 )
 
 var (
-	version      = "0.0.3"
+	version      = "0.2.0"
 	buildVersion = "dev" // injected at build time via -ldflags
 )
+
+// tracerIface captures the methods runReport uses on probe.Tracer.
+// It is intentionally minimal — only the subset used by the report path.
+type tracerIface interface {
+	SetOnSent(probe.SentCounter)
+	SetOnRoundEnd(func())
+	Discover(ctx context.Context, results chan<- probe.Result)
+	Run(ctx context.Context, results chan<- probe.Result) error
+}
+
+// newTracer is a package-level var so tests can swap in a stub.
+var newTracer = func(target net.IP, cfg probe.Config) tracerIface {
+	return probe.NewTracer(target, cfg)
+}
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -51,12 +69,16 @@ func main() {
 	rootCmd.Flags().Bool("no-paths", false, "disable ECMP multipath (shorthand for --paths 1)")
 	rootCmd.Flags().StringP("protocol", "P", "udp", "probe protocol: udp, icmp, tcp, auto")
 	rootCmd.Flags().IntP("port", "p", 0, "destination port override (default: protocol-specific)")
+	rootCmd.Flags().BoolP("ipv4", "4", false, "force IPv4")
+	rootCmd.Flags().BoolP("ipv6", "6", false, "force IPv6")
 	rootCmd.Flags().Bool("no-asn", false, "skip ASN lookups")
 	rootCmd.Flags().Bool("no-ping", false, "skip ping supplement for rate-limited hops")
 	rootCmd.Flags().Float64("alert-loss", 5.0, "loss% threshold for destination alert (0 = disabled)")
 	rootCmd.Flags().Duration("alert-latency", 0, "latency threshold for destination alert (0 = disabled)")
 	rootCmd.Flags().Int("alert-rounds", 3, "consecutive rounds before alert fires")
 	rootCmd.Flags().Bool("no-alert", false, "disable alerting")
+	rootCmd.Flags().String("theme", "", "color theme (slug name, e.g. 'dracula')")
+	rootCmd.Flags().StringP("output", "o", "", "export format: json, csv, or dot (implies --report)")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -66,24 +88,78 @@ func main() {
 func runTrace(cmd *cobra.Command, args []string) error {
 	target := args[0]
 
-	// Resolve target to IPv4
+	// Load config
+	appCfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: config load error: %v (using defaults)\n", err)
+		appCfg = config.Default()
+	}
+	config.Validate(appCfg)
+
+	// Resolve theme — CLI flag overrides config
+	themeSlug, _ := cmd.Flags().GetString("theme")
+	themeExplicit := cmd.Flags().Changed("theme")
+	if themeSlug == "" {
+		themeSlug = appCfg.Theme
+	}
+	t := theme.ByName(themeSlug)
+	if t == nil {
+		if themeExplicit {
+			fmt.Fprintf(os.Stderr, "unknown theme %q\nValid themes:\n", themeSlug)
+			for _, n := range theme.Names() {
+				fmt.Fprintf(os.Stderr, "  %-25s %s\n", n[0], n[1])
+			}
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "warning: unknown theme %q in config, using solarized-dark\n", themeSlug)
+		t = theme.ByName("solarized-dark")
+	}
+	theme.Set(*t)
+
+	// Read family flags early — needed before DNS resolution.
+	forceV4, _ := cmd.Flags().GetBool("ipv4")
+	forceV6, _ := cmd.Flags().GetBool("ipv6")
+	if forceV4 && forceV6 {
+		return fmt.Errorf("-4 and -6 are mutually exclusive")
+	}
+
+	// Apply config default if neither flag was set
+	if !forceV4 && !forceV6 {
+		switch appCfg.IPFamily {
+		case "4":
+			forceV4 = true
+		case "6":
+			forceV6 = true
+		}
+	}
+
+	// Resolve target — collect both A and AAAA records.
 	ips, err := net.LookupIP(target)
 	if err != nil {
 		return fmt.Errorf("failed to resolve %q: %w", target, err)
 	}
-	var targetIP net.IP
+	var v4IP, v6IP net.IP
 	for _, ip := range ips {
 		if ip4 := ip.To4(); ip4 != nil {
-			targetIP = ip4
-			break
+			if v4IP == nil {
+				v4IP = ip4
+			}
+			continue
+		}
+		if v6IP == nil {
+			v6IP = ip
 		}
 	}
-	if targetIP == nil {
-		return fmt.Errorf("no IPv4 address found for %q", target)
+
+	ipVersion, targetIP, err := selectFamily(forceV4, forceV6, v4IP, v6IP, sysprobe.HasIPv4Transport(), sysprobe.HasIPv6Transport())
+	if err != nil {
+		return err
 	}
 
-	// Permission check: try opening a raw socket
-	testConn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	// Capability check for the selected family. sysprobe already attempted this
+	// from selectFamily, but we re-open here to catch transient failures and
+	// trigger sudo re-exec if needed.
+	testConn, err := icmp.ListenPacket(probe.ListenerNet(ipVersion), probe.RawListenAddr(ipVersion))
 	if err != nil {
 		if os.Geteuid() != 0 {
 			// Try re-exec under sudo
@@ -117,6 +193,57 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	alertLatency, _ := cmd.Flags().GetDuration("alert-latency")
 	alertRounds, _ := cmd.Flags().GetInt("alert-rounds")
 	noAlert, _ := cmd.Flags().GetBool("no-alert")
+	outputFmt, _ := cmd.Flags().GetString("output")
+
+	// Validate and normalize output format
+	if outputFmt != "" {
+		normalized, err := export.FormatName(outputFmt)
+		if err != nil {
+			return err
+		}
+		outputFmt = normalized
+		reportMode = true
+	}
+
+	// Apply config defaults for flags not explicitly set on CLI
+	if !cmd.Flags().Changed("protocol") {
+		protocolName = appCfg.Protocol
+	}
+	if !cmd.Flags().Changed("max-hops") {
+		maxHops = appCfg.MaxHops
+	}
+	if !cmd.Flags().Changed("interval") {
+		if d, err := time.ParseDuration(appCfg.Interval); err == nil {
+			interval = d
+		}
+	}
+	if !cmd.Flags().Changed("paths") {
+		numPaths = appCfg.Paths
+	}
+	if !cmd.Flags().Changed("no-dns") {
+		noDNS = !appCfg.DNSLookups
+	}
+	if !cmd.Flags().Changed("no-asn") {
+		noASN = !appCfg.ASNLookups
+	}
+	if !cmd.Flags().Changed("no-ping") {
+		noPing = !appCfg.PingSupplement
+	}
+	if !cmd.Flags().Changed("no-alert") && !cmd.Flags().Changed("alert-loss") {
+		if !appCfg.AlertEnabled {
+			noAlert = true
+		} else {
+			alertLoss = appCfg.AlertLoss
+		}
+	}
+	if !cmd.Flags().Changed("alert-latency") {
+		if d, err := time.ParseDuration(appCfg.AlertLatency); err == nil {
+			alertLatency = d
+		}
+	}
+	if !cmd.Flags().Changed("alert-rounds") {
+		alertRounds = appCfg.AlertRounds
+	}
 
 	if reportMode && count == 0 {
 		count = 10
@@ -128,7 +255,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cfg := probe.Config{
+	probeCfg := probe.Config{
 		MaxHops:     maxHops,
 		FirstTTL:    firstTTL,
 		Timeout:     timeout,
@@ -141,30 +268,37 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		NumPaths:    numPaths,
 		BasePort:    44000,
 		Protocol:    proto,
+		IPVersion:   ipVersion,
 	}
 
 	// Determine source IP
-	srcConn, err := net.Dial("udp4", targetIP.String()+":1")
+	udpNet := "udp4"
+	dialTarget := targetIP.String() + ":1"
+	if ipVersion == 6 {
+		udpNet = "udp6"
+		dialTarget = "[" + targetIP.String() + "]:1"
+	}
+	srcConn, err := net.Dial(udpNet, dialTarget)
 	if err == nil {
-		cfg.SourceIP = srcConn.LocalAddr().(*net.UDPAddr).IP
+		probeCfg.SourceIP = srcConn.LocalAddr().(*net.UDPAddr).IP
 		srcConn.Close()
 	}
-	cfg.TargetIP = targetIP
+	probeCfg.TargetIP = targetIP
 
 	// Report mode: bypass TUI, run N rounds, print table, exit
-	if cfg.ReportMode {
-		return runReport(target, targetIP, cfg, protocolName, noASN, noPing)
+	if probeCfg.ReportMode {
+		return runReport(target, targetIP, probeCfg, protocolName, noASN, noPing, outputFmt)
 	}
 
 	// Create TUI model
 	versionStr := "v" + version + " (" + buildVersion + ")"
-	model := tui.New(target, targetIP, cfg, versionStr, protocolName, noASN, noPing, alertLoss, alertLatency, alertRounds, noAlert)
+	model := tui.New(target, targetIP, probeCfg, versionStr, protocolName, noASN, noPing, alertLoss, alertLatency, alertRounds, noAlert, appCfg)
 
 	// Create bubbletea program
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	// Wire auto-mode protocol switch callback
-	cfg.OnProtocolSwitch = func(newProto string) {
+	probeCfg.OnProtocolSwitch = func(newProto string) {
 		p.Send(tui.ProtocolSwitchMsg{NewProtocol: newProto})
 	}
 
@@ -177,13 +311,13 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	dnsResults := make(chan resolve.Result, 64)
 
 	// Start probe tracer in background
-	tracer := probe.NewTracer(targetIP, cfg)
+	tracer := probe.NewTracer(targetIP, probeCfg)
 	tracer.OnSent = model.Table()
 	// Start ping supplementer
 	var supplementer *ping.Supplementer
 	pingResults := make(chan ping.Result, 64)
 	if !noPing {
-		supplementer = ping.New()
+		supplementer = ping.New(probeCfg.IPVersion)
 		if err := supplementer.Open(ctx, pingResults); err != nil {
 			// Ping socket failure is non-fatal; continue without ping
 			supplementer = nil
@@ -214,6 +348,8 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	}
 	model.SetTracer(tracer)
 	go func() {
+		// ICMP discovery pass: find target TTL before main protocol starts
+		tracer.Discover(ctx, probeResults)
 		if err := tracer.Run(ctx, probeResults); err != nil {
 			p.Send(tui.ProbeErrorMsg{Err: err})
 		}
@@ -296,10 +432,10 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, noPing bool) error {
+func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, noPing bool, outputFmt string) error {
 	table := hop.NewTable(cfg.MaxHops)
-	tracer := probe.NewTracer(targetIP, cfg)
-	tracer.OnSent = table
+	tracer := newTracer(targetIP, cfg)
+	tracer.SetOnSent(table)
 
 	var resolver *resolve.Resolver
 	if !cfg.NoDNS {
@@ -349,7 +485,7 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 	var supplementer *ping.Supplementer
 	pingResultsCh := make(chan ping.Result, 64)
 	if !noPing {
-		supplementer = ping.New()
+		supplementer = ping.New(cfg.IPVersion)
 		if err := supplementer.Open(ctx, pingResultsCh); err != nil {
 			supplementer = nil
 		} else {
@@ -380,7 +516,7 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 		}
 	}()
 
-	tracer.OnRoundEnd = func() {
+	tracer.SetOnRoundEnd(func() {
 		for _, h := range table.Snapshot() {
 			h.MarkRoundEnd()
 		}
@@ -401,7 +537,7 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 			}
 			supplementer.PingAll()
 		}
-	}
+	})
 
 	// Track target hit for display (atomic for cross-goroutine safety)
 	var maxTTLHit int32
@@ -433,6 +569,9 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 		}
 	}()
 
+	// ICMP discovery pass: find target TTL before main protocol starts
+	tracer.Discover(ctx, probeResults)
+
 	// Run tracer (blocks until MaxRounds complete)
 	if err := tracer.Run(ctx, probeResults); err != nil {
 		return fmt.Errorf("tracer error: %w", err)
@@ -444,7 +583,25 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 	cancel()
 	<-collectorDone // wait for collector goroutine to exit
 
-	printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName, pingStats)
+	maxTTL := table.MaxTTLSeen()
+	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
+		maxTTL = hit
+	}
+
+	if outputFmt != "" {
+		versionStr := "v" + version + " (" + buildVersion + ")"
+		report := export.BuildReport(versionStr, target, targetIP, protocolName, 0, table, resolver, enricher, maxTTL)
+		switch outputFmt {
+		case "json":
+			export.WriteJSON(os.Stdout, report)
+		case "csv":
+			export.WriteCSV(os.Stdout, report)
+		case "dot":
+			export.WriteDOT(os.Stdout, report)
+		}
+	} else {
+		printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName, pingStats)
+	}
 	return nil
 }
 
@@ -462,15 +619,6 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 		fmt.Printf("via — %s (%s) — %s\n", target, targetIP.String(), protoLabel)
 	}
 
-	// Column headers
-	if multipath {
-		fmt.Printf("%-4s %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
-			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab")
-	} else {
-		fmt.Printf("%-4s %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
-			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last")
-	}
-
 	// Determine max TTL to display
 	maxTTL := table.MaxTTLSeen()
 	if maxTTLHit > 0 && maxTTLHit < maxTTL {
@@ -482,6 +630,38 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 	hopMap := make(map[int]*hop.Hop, len(hops))
 	for _, h := range hops {
 		hopMap[h.TTL] = h
+	}
+
+	// Compute dynamic IP column width
+	ipColWidth := 15
+	for _, h := range hops {
+		if h.GetIP() != nil {
+			if l := len(h.GetIP().String()); l > ipColWidth {
+				ipColWidth = l
+			}
+		}
+		if multipath && h.IsDivergent() {
+			for _, node := range h.GetNodes() {
+				if node.GetIP() != nil {
+					if l := len(node.GetIP().String()); l > ipColWidth {
+						ipColWidth = l
+					}
+				}
+			}
+		}
+	}
+	if ipColWidth > 39 {
+		ipColWidth = 39
+	}
+	ipFmt := fmt.Sprintf("%%-%ds", ipColWidth)
+
+	// Column headers
+	if multipath {
+		fmt.Printf(fmt.Sprintf("%%-%ds", 4) + " " + ipFmt + " %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab")
+	} else {
+		fmt.Printf(fmt.Sprintf("%%-%ds", 4) + " " + ipFmt + " %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last")
 	}
 
 	rateLimited := hop.DetectRateLimited(hops, maxTTL)
@@ -573,7 +753,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
-				fmt.Printf("%-4d %-18s %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				fmt.Printf("%-4d " + ipFmt + " %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -654,7 +834,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					flows = hop.FormatFlowIDs(nodes[0].GetFlowIDs())
 					stab = fmt.Sprintf("%.0f%%", nodes[0].StabilityPercent())
 				}
-				fmt.Printf("%-4d %-18s %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				fmt.Printf("%-4d " + ipFmt + " %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -670,7 +850,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					stab,
 				)
 			} else {
-				fmt.Printf("%-4d %-18s %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
+				fmt.Printf("%-4d " + ipFmt + " %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -733,4 +913,43 @@ func reExecWithSudo() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// selectFamily picks an IP version and target address based on user flags
+// and local transport capability. Returns (version, target, err).
+// hasV4 and hasV6 reflect whether the local host has IPv4/IPv6 transport
+// (typically from sysprobe.HasIPv4Transport / HasIPv6Transport).
+func selectFamily(forceV4, forceV6 bool, v4, v6 net.IP, hasV4, hasV6 bool) (int, net.IP, error) {
+	switch {
+	case forceV4:
+		if v4 == nil {
+			return 0, nil, fmt.Errorf("target has no IPv4 (A) record")
+		}
+		if !hasV4 {
+			return 0, nil, fmt.Errorf("no IPv4 transport on this host")
+		}
+		return 4, v4, nil
+	case forceV6:
+		if v6 == nil {
+			return 0, nil, fmt.Errorf("target has no IPv6 (AAAA) record")
+		}
+		if !hasV6 {
+			return 0, nil, fmt.Errorf("this host has no IPv6 transport")
+		}
+		return 6, v6, nil
+	}
+
+	// Auto-select is best-effort. Prefer v6 when both target AAAA and local v6 work.
+	// Otherwise pick v4 if available — the downstream raw-socket open will trigger
+	// sudo re-exec if CAP_NET_RAW is missing. Only error when no address exists.
+	if v6 != nil && hasV6 {
+		return 6, v6, nil
+	}
+	if v4 != nil {
+		return 4, v4, nil
+	}
+	if v6 != nil {
+		return 6, v6, nil
+	}
+	return 0, nil, fmt.Errorf("no usable address for target")
 }
