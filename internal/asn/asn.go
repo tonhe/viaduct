@@ -85,6 +85,16 @@ func (e *Enricher) Submit(ip net.IP) bool {
 		return false
 	}
 
+	// Double-check cache: the worker's cache.Store and pending.Delete are two
+	// separate sync.Map operations, so a concurrent Submit can observe the
+	// Delete before it observes the Store. Without this recheck, an in-flight
+	// lookup that's just about to finish can be duplicated by a Submit that
+	// squeezed in between the worker's two writes.
+	if _, ok := e.cache.Load(key); ok {
+		e.pending.Delete(key)
+		return false
+	}
+
 	select {
 	case e.reqCh <- ip:
 		return true

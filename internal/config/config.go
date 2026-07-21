@@ -90,8 +90,21 @@ func Load() (*Config, error) {
 
 	// Start from defaults so any field not present in the file keeps its default.
 	cfg := Default()
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+
+	// Defense-in-depth: some malformed TOML inputs (e.g., a time literal
+	// assigned to a string field) can panic in the underlying reflect call.
+	// Recover and convert to a normal parse error so a bad config file never
+	// crashes via at startup. Regression coverage lives in FuzzLoad.
+	unmarshalErr := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("malformed config: %v", r)
+			}
+		}()
+		return toml.Unmarshal(data, cfg)
+	}()
+	if unmarshalErr != nil {
+		return nil, fmt.Errorf("config: parse %s: %w", path, unmarshalErr)
 	}
 	return cfg, nil
 }
