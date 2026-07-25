@@ -58,7 +58,12 @@ make install    # builds and copies to ~/bin/
 > ```bash
 > sudo setcap cap_net_raw+ep $(which via)
 > ```
-
+> **macOS user** can run `via` without prompting for a password by changing binary ownership to `root` and setting the SUID bit:
+>
+>```bash
+> sudo chown root /usr/local/bin/via
+> sudo chmod 4755 /usr/local/bin/via
+> ```
 ---
 
 ## Quick Start
