@@ -26,6 +26,23 @@ func udpChecksumV6(src, dst net.IP, datagram []byte) uint16 {
 	return sum
 }
 
+// udpChecksumV4 computes the UDP checksum for an IPv4 datagram over the IPv4
+// pseudo-header (source, destination, zero, protocol 17, UDP length). Pass
+// the datagram with its checksum field zeroed. A sum that computes to zero is
+// returned as 0xFFFF, because zero on the wire means "no checksum" (RFC 768).
+func udpChecksumV4(src, dst net.IP, datagram []byte) uint16 {
+	psh := make([]byte, 12, 12+len(datagram))
+	copy(psh[0:4], src.To4())
+	copy(psh[4:8], dst.To4())
+	psh[9] = 17 // UDP
+	binary.BigEndian.PutUint16(psh[10:12], uint16(len(datagram)))
+	sum := checksumRFC1071(append(psh, datagram...))
+	if sum == 0 {
+		return 0xffff
+	}
+	return sum
+}
+
 // UDPProtocol implements ProbeProtocol for UDP probes.
 type UDPProtocol struct {
 	BaseDstPort int // Base destination port (actual = BaseDstPort + TTL)
@@ -49,11 +66,17 @@ func (p *UDPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 		return nil, probeKey{}, err
 	}
 	// IPv6 requires a UDP checksum; without one the destination discards the
-	// probe and never sends Port Unreachable. IPv4 keeps the zero checksum,
-	// which is legal there. If either address is unknown the checksum cannot
-	// be computed and the field stays zero, as before.
-	if cfg.IPVersion == 6 && cfg.SourceIP != nil && cfg.TargetIP != nil {
-		binary.BigEndian.PutUint16(pkt[6:8], udpChecksumV6(cfg.SourceIP, cfg.TargetIP, pkt))
+	// probe and never sends Port Unreachable. A zero checksum is legal in
+	// IPv4 but unusual enough that middleboxes may drop it, so IPv4 probes
+	// carry one too. If either address is unknown (or is not of the probe's
+	// family) the checksum cannot be computed and the field stays zero.
+	if cfg.SourceIP != nil && cfg.TargetIP != nil {
+		switch {
+		case cfg.IPVersion == 6:
+			binary.BigEndian.PutUint16(pkt[6:8], udpChecksumV6(cfg.SourceIP, cfg.TargetIP, pkt))
+		case cfg.SourceIP.To4() != nil && cfg.TargetIP.To4() != nil:
+			binary.BigEndian.PutUint16(pkt[6:8], udpChecksumV4(cfg.SourceIP, cfg.TargetIP, pkt))
+		}
 	}
 	key := probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
 	return pkt, key, nil

@@ -96,19 +96,76 @@ func TestUDPProtocol_BuildProbe_IPv6ChecksumCoversAddresses(t *testing.T) {
 	}
 }
 
-// IPv4 behaviour is unchanged: a zero UDP checksum is legal there and is what
-// via has always sent.
-func TestUDPProtocol_BuildProbe_IPv4ChecksumStaysZero(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.IPVersion = 4
-	cfg.SourceIP = net.ParseIP("192.0.2.1")
-	cfg.TargetIP = net.ParseIP("198.51.100.1")
-	pkt, _, err := NewUDPProtocol(33434).BuildProbe(0, 1, 1, cfg)
-	if err != nil {
-		t.Fatalf("BuildProbe: %v", err)
+// udp4PseudoHeader builds the IPv4 pseudo-header for a UDP datagram of the
+// given length (RFC 768).
+func udp4PseudoHeader(src, dst net.IP, length int) []byte {
+	psh := make([]byte, 12)
+	copy(psh[0:4], src.To4())
+	copy(psh[4:8], dst.To4())
+	psh[9] = 17
+	binary.BigEndian.PutUint16(psh[10:12], uint16(length))
+	return psh
+}
+
+// A zero UDP checksum is legal in IPv4 but unusual; middleboxes that validate
+// or normalise UDP may drop such probes, which shows as false loss. IPv4
+// probes carry a real checksum too (viaduct#61).
+func TestUDPProtocol_BuildProbe_IPv4HasValidChecksum(t *testing.T) {
+	src := net.ParseIP("192.0.2.1")
+	dst := net.ParseIP("198.51.100.1")
+	p := NewUDPProtocol(33434)
+
+	for _, tc := range []struct {
+		name      string
+		flow, ttl int
+		payload   int
+	}{
+		{"even payload", 0, 1, 64},
+		{"odd payload", 3, 7, 33},
+		{"empty payload", 0, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.IPVersion = 4
+			cfg.SourceIP = src
+			cfg.TargetIP = dst
+			cfg.PayloadSize = tc.payload
+
+			pkt, _, err := p.BuildProbe(tc.flow, tc.ttl, 1, cfg)
+			if err != nil {
+				t.Fatalf("BuildProbe: %v", err)
+			}
+			if got := binary.BigEndian.Uint16(pkt[6:8]); got == 0 {
+				t.Fatalf("UDP checksum is zero")
+			}
+			whole := append(udp4PseudoHeader(src, dst, len(pkt)), pkt...)
+			if got := onesComplementSum(whole); got != 0xffff {
+				t.Errorf("pseudo-header + datagram sums to %#04x, want 0xffff (checksum is wrong)", got)
+			}
+		})
 	}
-	if got := binary.BigEndian.Uint16(pkt[6:8]); got != 0 {
-		t.Errorf("IPv4 UDP checksum = %#04x, want 0 (unchanged)", got)
+}
+
+// The IPv4 checksum helper must never return zero either: zero on the wire
+// means "no checksum" (RFC 768).
+func TestUDPChecksumV4_NeverZero(t *testing.T) {
+	src := net.ParseIP("192.0.2.1")
+	dst := net.ParseIP("198.51.100.1")
+	found := false
+	for sp := 0; sp < 65536 && !found; sp++ {
+		d := make([]byte, 8)
+		binary.BigEndian.PutUint16(d[0:2], uint16(sp))
+		binary.BigEndian.PutUint16(d[4:6], 8)
+		whole := append(udp4PseudoHeader(src, dst, len(d)), d...)
+		if onesComplementSum(whole) == 0xffff {
+			found = true
+			if got := udpChecksumV4(src, dst, d); got != 0xffff {
+				t.Errorf("checksum for the zero case = %#04x, want 0xffff", got)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no zero-checksum datagram found in the search space; test needs a different vector")
 	}
 }
 
