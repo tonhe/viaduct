@@ -192,13 +192,7 @@ func TestIPv6(t *testing.T) {
 	const rounds = 20
 	path := []string{r1V6, r2V6, r3V6, dst1V6}
 	for _, m := range modes[:2] {
-		udp6 := func(t *testing.T) {
-			if m.name == "udp" {
-				knownIssue(t, 54, "IPv6 UDP probes carry a zero checksum; the destination drops them")
-			}
-		}
 		t.Run(m.name+"/clean", func(t *testing.T) {
-			udp6(t)
 			reset(t)
 			r := via(t, traceArgs(m, rounds, dst1V6, "-6")...)
 			sent := rounds * m.perRound
@@ -207,7 +201,6 @@ func TestIPv6(t *testing.T) {
 			}
 		})
 		t.Run(m.name+"/every-fifth-dropped", func(t *testing.T) {
-			udp6(t)
 			reset(t)
 			script(t, "scenarios/drop-replies.sh", "r3", "5", "6")
 			r := via(t, traceArgs(m, rounds, dst1V6, "-6")...)
