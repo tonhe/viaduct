@@ -25,10 +25,23 @@ type echoState struct {
 // SubmitEchoTargets replaces the tracer's echo-target set wholesale
 // (demux invariant 4: recomputed from the live hop table every round, so
 // the set self-heals across route changes and cannot grow stale).
+//
+// At most maxEchoTargetsPerTTL targets are kept for each TTL: the first ones
+// submitted, in order.
 func (t *Tracer) SubmitEchoTargets(targets []EchoTarget) {
+	kept := make([]EchoTarget, 0, len(targets))
+	perTTL := make(map[int]int)
+	for _, tgt := range targets {
+		if perTTL[tgt.TTL] >= maxEchoTargetsPerTTL {
+			continue
+		}
+		perTTL[tgt.TTL]++
+		kept = append(kept, tgt)
+	}
+
 	t.echo.mu.Lock()
 	defer t.echo.mu.Unlock()
-	t.echo.targets = append(t.echo.targets[:0:0], targets...)
+	t.echo.targets = kept
 	if len(t.echo.targets) == 0 {
 		t.echo.cursor = 0
 	} else {
@@ -40,6 +53,11 @@ func (t *Tracer) SubmitEchoTargets(targets []EchoTarget) {
 func (t *Tracer) SetOnEchoSent(f func(ip net.IP, ttl int)) { t.onEchoSent = f }
 
 const echoFullTTL = 64
+
+// maxEchoTargetsPerTTL bounds how many addresses the echo tier pings at one
+// hop distance. A hop legitimately has a handful of ECMP nodes; the cap keeps
+// forged replies from growing the set of addresses via pings without bound.
+const maxEchoTargetsPerTTL = 8
 
 // sendEchoes emits up to budget echo probes, round-robining through the
 // target set across rounds. seq resolution: each send registers its pair in
@@ -69,7 +87,8 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 			continue
 		}
 		key := probeKey{SrcPort: t.cfg.EchoID, DstPort: *seq, Seq: 0}
-		t.pm.add(key, tgt.TTL, 0, time.Now(), ProbeICMPEcho)
+		// The reply must come from the address this echo is sent to.
+		t.pm.addTo(key, tgt.TTL, 0, time.Now(), ProbeICMPEcho, tgt.IP)
 		if snd.SetTTL(echoFullTTL) != nil {
 			t.pm.remove(key)
 			continue

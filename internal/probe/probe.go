@@ -96,6 +96,11 @@ type probeRecord struct {
 	flowID    int
 	sentAt    time.Time
 	probeType ProbeType
+	// dst is the address the probe was sent to, for probes answered by an
+	// Echo Reply (ICMP TTL probes: the target; echo-tier probes: the hop).
+	// The listener accepts an Echo Reply only from this address. nil means
+	// unknown: no sender check.
+	dst net.IP
 }
 
 // probeMap tracks outstanding probes.
@@ -114,10 +119,44 @@ func (pm *probeMap) add(key probeKey, ttl int, flowID int, sentAt time.Time, pt 
 	pm.items[key] = probeRecord{ttl: ttl, flowID: flowID, sentAt: sentAt, probeType: pt}
 }
 
+// addTo is add for a probe whose reply must come from dst (see probeRecord.dst).
+func (pm *probeMap) addTo(key probeKey, ttl int, flowID int, sentAt time.Time, pt ProbeType, dst net.IP) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.items[key] = probeRecord{ttl: ttl, flowID: flowID, sentAt: sentAt, probeType: pt, dst: dst}
+}
+
 func (pm *probeMap) remove(key probeKey) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	delete(pm.items, key)
+}
+
+// matchEchoReply is match for an Echo Reply received from the given address.
+// When the probe's destination is known, a reply from any other address is
+// not a reply to that probe: it is ignored and the record is left in place,
+// so a forged reply can neither count as an answer nor use up the record
+// before the genuine reply arrives.
+func (pm *probeMap) matchEchoReply(key probeKey, from net.IP) (probeRecord, bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	rec, ok := pm.items[key]
+	if !ok {
+		return probeRecord{}, false
+	}
+	if rec.dst != nil && (from == nil || !rec.dst.Equal(from)) {
+		return probeRecord{}, false
+	}
+	delete(pm.items, key)
+	return rec, true
+}
+
+// peerIP returns the address of a packet's sender without any IPv6 zone.
+func peerIP(peer net.Addr) net.IP {
+	if a, ok := peer.(*net.IPAddr); ok {
+		return a.IP
+	}
+	return net.ParseIP(peer.String())
 }
 
 func (pm *probeMap) match(key probeKey) (probeRecord, bool) {
@@ -380,7 +419,8 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			if icmpSnd != nil {
 				seq++
 				if pkt, key, err := icmpProto.BuildProbe(0, ttl, seq, t.cfg); err == nil {
-					t.pm.add(key, ttl, 0, time.Now(), ProbeICMPTTL)
+					// The only Echo Reply that answers this probe comes from the target.
+					t.pm.addTo(key, ttl, 0, time.Now(), ProbeICMPTTL, t.target)
 					if icmpSnd.SetTTL(ttl) == nil {
 						if _, err := icmpSnd.WriteTo(pkt, dst); err == nil {
 							probesSent++
@@ -615,7 +655,18 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 			continue
 		}
 
-		rec, ok := t.pm.match(key)
+		peerIP := peerIP(peer)
+
+		// An Echo Reply answers a probe only if it comes from the address
+		// that probe was sent to. ICMP errors come from routers along the
+		// path, so they are matched on the quoted packet alone.
+		var rec probeRecord
+		var ok bool
+		if msg.Type == EchoReplyType(t.cfg.IPVersion) {
+			rec, ok = t.pm.matchEchoReply(key, peerIP)
+		} else {
+			rec, ok = t.pm.match(key)
+		}
 		if !ok {
 			continue
 		}
@@ -625,8 +676,6 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 		if rec.probeType == ProbeUDPTTL || rec.probeType == ProbeTCPTTL {
 			atomic.AddInt32(&t.responseCount, 1)
 		}
-
-		peerIP := net.ParseIP(peer.String())
 
 		// For Echo Replies: only ICMP-TTL matches confer target-reached
 		// naturally (matches the pre-refactor ICMP-mode behavior). Echoes
@@ -673,21 +722,25 @@ func innerVersion(b []byte) int {
 	return int(b[0] >> 4)
 }
 
-// embeddedDestMatches returns true when the embedded IP-header destination
-// equals cfg.TargetIP (or when either side is nil/unparseable — best-effort
-// guard, never a hard-fail on the happy path). Empty inner bodies are
-// treated as non-matching.
+// embeddedDestMatches reports whether the packet quoted in an ICMP error was
+// addressed to target. A quote that cannot be parsed does not match: an error
+// message is only evidence about our probe if it shows the probe. The shortest
+// quote RFC 792 allows, an IP header plus 8 bytes of the original datagram
+// (28 bytes for IPv4, 48 for IPv6), parses and matches.
+//
+// With no target configured there is nothing to compare against, and the
+// quote is accepted.
 func embeddedDestMatches(target net.IP, inner []byte) bool {
 	if target == nil {
-		return true // no target to compare against; do not drop
+		return true
 	}
 	v := innerVersion(inner)
 	if v != 4 && v != 6 {
-		return true // unparseable; let downstream logic reject
+		return false
 	}
 	_, dstIP, _, _, _, err := ParseInnerHeader(v, inner)
 	if err != nil || dstIP == nil {
-		return true
+		return false
 	}
 	return dstIP.Equal(target)
 }
