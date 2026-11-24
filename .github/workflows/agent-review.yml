@@ -1,0 +1,20 @@
+# Claude review on agent PRs. Require the check "review / agent-review" in the main ruleset.
+name: agent-review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+concurrency: {group: "agent-review-${{ github.event.pull_request.number }}", cancel-in-progress: true}
+jobs:
+  review:
+    uses: tonhe/agent-loop/.github/workflows/review.yml@v1
+    with:
+      loop_ref: v1
+      owner_login: tonhe
+      verify_command: make test-all
+      platforms: Linux, macOS, and Windows
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

@@ -11,6 +11,9 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Requires your approval in Settings > Environments > release. The agent's PAT
+    # has no Deployments permission, so it cannot approve a release.
+    environment: release
     steps:
       - name: Checkout
         uses: actions/checkout@v4

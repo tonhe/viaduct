@@ -1,0 +1,40 @@
+# One fix round after reviews, then auto-merge for risk:low. Sweeps every 3 hours as a fallback.
+name: agent-followup
+on:
+  pull_request_review:
+    types: [submitted]
+  schedule:
+    - cron: '43 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      pr: {description: "PR number (empty = all agent PRs)", required: false}
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+concurrency: {group: "agent-followup-${{ github.event.pull_request.number || 'sweep' }}", cancel-in-progress: false}
+jobs:
+  followup:
+    # Reviews: react only to CodeRabbit. The sweep catches everything else.
+    if: github.event_name != 'pull_request_review' || github.event.review.user.login == 'coderabbitai[bot]'
+    uses: tonhe/agent-loop/.github/workflows/followup.yml@v1
+    with:
+      loop_ref: v1
+      pr: ${{ github.event.pull_request.number || github.event.inputs.pr || '' }}
+      owner_login: tonhe
+      git_author_name: tonhe
+      git_author_email: a.mattke@gmail.com
+      verify_command: make test-all
+      go_version_file: go.mod
+      bash_allow: >-
+        Bash(go build:*),Bash(go test:*),Bash(go vet:*),Bash(gofmt:*),Bash(go mod tidy),
+        Bash(make build),Bash(make test),Bash(make test-race),Bash(make test-tui),
+        Bash(make test-all),Bash(make coverage-gate),Bash(make golden-update)
+      protected_paths: |
+        Makefile
+        scripts/
+        .goreleaser.yml
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_PAT: ${{ secrets.AGENT_PAT }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
