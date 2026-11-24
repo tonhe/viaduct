@@ -165,3 +165,24 @@ func TestTableMarkRoundSent_CarriesProbeCount(t *testing.T) {
 		t.Errorf("LossPercent = %.2f, want %.2f", got, want)
 	}
 }
+
+func TestHopProbeCounts_ReportClosedRoundsOnly(t *testing.T) {
+	// ProbeCounts are the exact figures LossPercent is computed from, exposed
+	// so exports (and the network lab) can check them against real packets.
+	h := NewHop(3)
+	if sent, recvd := h.ProbeCounts(); sent != 0 || recvd != 0 {
+		t.Fatalf("new hop ProbeCounts = %d, %d, want 0, 0", sent, recvd)
+	}
+	h.MarkRoundSentProbes(7)
+	reply(h, 5)
+	h.MarkRoundEnd()
+	h.MarkRoundSentProbes(7) // open round: not included
+	reply(h, 2)
+	if sent, recvd := h.ProbeCounts(); sent != 7 || recvd != 5 {
+		t.Errorf("ProbeCounts with round 2 open = %d, %d, want 7, 5", sent, recvd)
+	}
+	h.MarkRoundEnd()
+	if sent, recvd := h.ProbeCounts(); sent != 14 || recvd != 7 {
+		t.Errorf("ProbeCounts after round 2 closed = %d, %d, want 14, 7", sent, recvd)
+	}
+}

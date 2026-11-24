@@ -23,11 +23,16 @@ type Report struct {
 }
 
 // Hop represents a single TTL in the trace.
+//
+// Loss is per probe: (ProbesSent - ProbesReceived) / ProbesSent over completed
+// rounds. Sent is the number of rounds, as shown in the Rnd column.
 type Hop struct {
-	TTL   int     `json:"ttl"`
-	Nodes []Node  `json:"nodes,omitempty"`
-	Loss  float64 `json:"loss_pct"`
-	Sent  int     `json:"sent"`
+	TTL            int     `json:"ttl"`
+	Nodes          []Node  `json:"nodes,omitempty"`
+	Loss           float64 `json:"loss_pct"`
+	Sent           int     `json:"sent"`
+	ProbesSent     int     `json:"probes_sent"`
+	ProbesReceived int     `json:"probes_received"`
 }
 
 // Node represents a unique responder at a given TTL.
@@ -87,10 +92,13 @@ func BuildReport(version string, target string, targetIP net.IP,
 			continue
 		}
 
+		probesSent, probesRecvd := h.ProbeCounts()
 		eh := Hop{
-			TTL:  ttl,
-			Loss: h.LossPercent(),
-			Sent: h.Rounds(),
+			TTL:            ttl,
+			Loss:           h.LossPercent(),
+			Sent:           h.Rounds(),
+			ProbesSent:     probesSent,
+			ProbesReceived: probesRecvd,
 		}
 
 		for _, node := range h.GetNodes() {

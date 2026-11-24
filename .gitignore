@@ -1,5 +1,6 @@
 # Binaries
 /via
+/lab.test
 *.exe
 *.dll
 *.so

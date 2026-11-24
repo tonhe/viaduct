@@ -199,6 +199,15 @@ func (h *Hop) LossPercent() float64 {
 	return float64(lost) / float64(h.closedSent) * 100
 }
 
+// ProbeCounts returns the TTL-limited probes sent to this TTL and the replies
+// received, as of the last closed round. These are the figures LossPercent is
+// computed from. received can exceed sent if a reply was duplicated.
+func (h *Hop) ProbeCounts() (sent, received int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.closedSent, h.closedRecvd
+}
+
 // GetMinRTT returns the primary node's minimum RTT.
 func (h *Hop) GetMinRTT() time.Duration {
 	h.mu.RLock()

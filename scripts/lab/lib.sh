@@ -42,6 +42,9 @@ lab_clear_impairments() {
       [[ $dev == lo ]] && continue
       lab_x "$n" tc qdisc del dev "$dev" root 2>/dev/null || true
     done
+    # Drop rules and their counters (scenarios/drop-replies.sh).
+    lab_x "$n" nft delete table ip lab 2>/dev/null || true
+    lab_x "$n" nft delete table ip6 lab 2>/dev/null || true
   done
   for n in $LAB_ROUTERS dst1 dst2; do
     # Baseline: no ICMP error rate limiting anywhere, so loss is zero unless a

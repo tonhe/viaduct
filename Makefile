@@ -3,13 +3,15 @@ PKG      := ./cmd/via
 BUILD_TS := $(shell date -u '+%Y%m%d.%H%M')
 LDFLAGS  := -ldflags "-X main.buildVersion=$(BUILD_TS)"
 
-.PHONY: build clean install test test-tui test-all test-race golden-update coverage-gate soak-test
+LAB_TEST := lab.test
+
+.PHONY: build clean install test test-tui test-all test-race golden-update coverage-gate soak-test lab-build lab-test lab-docker
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) $(PKG)
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(LAB_TEST)
 	rm -rf dist/ bin/
 
 install: build
@@ -48,6 +50,36 @@ golden-update:
 # Run the per-package coverage floor check (matches CI).
 coverage-gate:
 	bash scripts/check-coverage.sh
+
+# Network lab: checks via's numbers against real packets on a topology built
+# from Linux network namespaces (scripts/lab, internal/lab). Deterministic: it
+# drops exact packets and asserts exact counts. Linux only; sends nothing
+# outside its own namespaces.
+#
+#   make lab-build && sudo make lab-test     on a host where you have root
+#   make lab-docker                          anywhere with Docker
+#
+# Building is separate from running so the build uses your Go toolchain and
+# only the run needs root. Needs iproute2, nftables, tcpdump and mtr.
+lab-build: build
+	go test -c -tags lab -o $(LAB_TEST) ./internal/lab
+
+lab-test:
+	@if [ "$$(id -u)" != "0" ]; then \
+		echo "lab-test needs root (network namespaces, nftables, raw sockets)."; \
+		echo "Run 'make lab-build' and then 'sudo make lab-test', or use 'make lab-docker'."; \
+		exit 1; \
+	fi
+	@if [ ! -x $(LAB_TEST) ] || [ ! -x $(BINARY) ]; then \
+		echo "Run 'make lab-build' first, as your normal user."; \
+		exit 1; \
+	fi
+	cd internal/lab && LAB_REPO_ROOT=$(CURDIR) VIA_BIN=$(CURDIR)/$(BINARY) $(CURDIR)/$(LAB_TEST) -test.v -test.timeout 15m
+
+lab-docker: lab-build
+	docker build -q -t vialab:local scripts/lab
+	docker run --rm --privileged -v $(CURDIR):/src:ro -w /src/internal/lab \
+		-e LAB_STRICT vialab:local /src/$(LAB_TEST) -test.v -test.timeout 15m
 
 # Soak test: opt-in, hits real network, requires raw-socket capability.
 # Runs the full sweep (10+ scenarios) against public hosts.

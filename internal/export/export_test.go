@@ -200,6 +200,45 @@ func TestWriteDOT(t *testing.T) {
 // produce a hop with loss/sent data but no nodes. The gap path produces
 // Hop{TTL: ttl} with zero loss and zero sent, while the non-gap path would
 // produce a hop with loss/sent from the Hop object.
+// TestBuildReport_ProbeCounts: each hop exports the exact probe counts its
+// loss figure is computed from, so a consumer can check them against a packet
+// capture instead of trusting a percentage.
+func TestBuildReport_ProbeCounts(t *testing.T) {
+	table := hop.NewTable(1)
+	h := table.GetOrCreate(1)
+	ip := net.ParseIP("192.0.2.2")
+	// Two rounds of 7 probes; 7 answered, then 4 answered.
+	for _, answered := range []int{7, 4} {
+		h.MarkRoundSentProbes(7)
+		for i := 0; i < answered; i++ {
+			h.AddSample(ip, time.Millisecond, i, hop.KindPrimary)
+		}
+		h.MarkRoundEnd()
+	}
+
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", 0, table, nil, nil, 1)
+	if len(r.Hops) != 1 {
+		t.Fatalf("hops = %d, want 1", len(r.Hops))
+	}
+	got := r.Hops[0]
+	if got.ProbesSent != 14 || got.ProbesReceived != 11 {
+		t.Errorf("ProbesSent, ProbesReceived = %d, %d, want 14, 11", got.ProbesSent, got.ProbesReceived)
+	}
+	if got.Sent != 2 {
+		t.Errorf("Sent (rounds) = %d, want 2", got.Sent)
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"probes_sent": 14`, `"probes_received": 11`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("JSON missing %s", want)
+		}
+	}
+}
+
 func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	table := hop.NewTable(2)
 
