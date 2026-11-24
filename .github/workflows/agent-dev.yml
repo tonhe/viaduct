@@ -1,0 +1,44 @@
+# Dev agent: nightly on agent:ready issues, on demand, or when you label an issue agent:urgent.
+#   On demand: gh workflow run agent-dev.yml -f issue=42
+name: agent-dev
+on:
+  schedule:
+    - cron: '17 7 * * *'   # ~2:17 AM Eastern
+  workflow_dispatch:
+    inputs:
+      issue: {description: "Issue number to work now", required: true}
+  issues:
+    types: [labeled]
+permissions:
+  contents: read
+  issues: read
+# Label events other than agent:urgent get their own throwaway group, so they can never
+# displace a queued nightly or urgent run.
+concurrency:
+  group: ${{ (github.event_name == 'issues' && github.event.label.name != 'agent:urgent') && format('agent-dev-noop-{0}', github.run_id) || 'agent-dev' }}
+  cancel-in-progress: false
+jobs:
+  dev:
+    if: github.event_name != 'issues' || github.event.label.name == 'agent:urgent'
+    uses: tonhe/agent-loop/.github/workflows/dev.yml@v1
+    with:
+      loop_ref: v1
+      mode: ${{ github.event_name == 'schedule' && 'scheduled' || (github.event_name == 'issues' && 'urgent' || 'manual') }}
+      issue: ${{ github.event.inputs.issue || github.event.issue.number || '' }}
+      owner_login: tonhe
+      git_author_name: tonhe
+      git_author_email: a.mattke@gmail.com
+      verify_command: make test-all
+      go_version_file: go.mod
+      bash_allow: >-
+        Bash(go build:*),Bash(go test:*),Bash(go vet:*),Bash(gofmt:*),Bash(go mod tidy),
+        Bash(make build),Bash(make test),Bash(make test-race),Bash(make test-tui),
+        Bash(make test-all),Bash(make coverage-gate),Bash(make golden-update)
+      protected_paths: |
+        Makefile
+        scripts/
+        .goreleaser.yml
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_PAT: ${{ secrets.AGENT_PAT }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

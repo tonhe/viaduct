@@ -1,0 +1,24 @@
+# Nightly backlog triage. Logic lives in tonhe/agent-loop.
+name: agent-backlog
+on:
+  schedule:
+    - cron: '17 6 * * *'   # ~1:17 AM Eastern (UTC; drifts an hour with DST)
+  workflow_dispatch:
+    inputs:
+      dry_run: {type: boolean, default: false, description: "Plan only, change nothing"}
+permissions:
+  contents: read
+  issues: read
+concurrency: {group: agent-backlog, cancel-in-progress: false}
+jobs:
+  backlog:
+    uses: tonhe/agent-loop/.github/workflows/backlog.yml@v1
+    with:
+      loop_ref: v1
+      owner_login: tonhe
+      verify_command: make test-all
+      dry_run: ${{ inputs.dry_run == true }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_PAT: ${{ secrets.AGENT_PAT }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
