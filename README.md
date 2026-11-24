@@ -92,6 +92,7 @@ via -r google.com
 - **3 probe protocols + auto** — UDP (ECMP), TCP SYN (firewall bypass), ICMP (classic), and Auto (UDP with ICMP fallback)
 - **61 color themes** — Solarized Dark default; switch with `--theme` or the settings menu
 - **Config persistence** — settings saved to `~/.config/via/config.toml`; CLI flags override at runtime
+- **TUI export** — press <kbd>e</kbd> to write the current trace to a JSON, CSV, or DOT file (`export_format` config key)
 
 ---
 
@@ -279,8 +280,24 @@ via --no-alert google.com
 | <kbd>p</kbd> | Pause/resume probing |
 | <kbd>r</kbd> | Reset all hop stats and ping supplement |
 | <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability) |
+| <kbd>e</kbd> | Export the current trace to a file (see [Exporting from the TUI](#exporting-from-the-tui)) |
 | <kbd>q</kbd> | Quit (prints final summary) |
 | <kbd>Esc</kbd> | Open settings menu |
+
+### Exporting from the TUI
+
+Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table to a file.
+
+- **Format** — `json` by default. Set `export_format` in `~/.config/via/config.toml` to `json`, `csv`, or `dot` to change it:
+
+  ```toml
+  export_format = "csv"
+  ```
+
+  The settings menu does not show `export_format`, and saving settings from the menu rewrites the config file without it, so add the line again after saving settings.
+- **Location** — the file is written to the current working directory (the directory you ran `via` from).
+- **File name** — `via-<target>-<timestamp>.<format>`, where `<target>` is the target as given on the command line and `<timestamp>` is local time as `YYYYMMDD-HHMM` (e.g. `via-google.com-20261124-1530.json`). Exporting again within the same minute overwrites the earlier file.
+- **Result** — the status line shows `Exported to <path>` or `Export failed: <error>` for a few seconds.
 
 ---
 
