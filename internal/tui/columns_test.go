@@ -150,7 +150,7 @@ func TestColumnView_HeightClamp(t *testing.T) {
 	for ttl := 1; ttl <= 30; ttl++ {
 		ip := net.ParseIP("192.0.2.1")
 		m.sessions[0].table.GetOrCreate(ttl).AddSample(ip, time.Duration(ttl)*time.Millisecond, 0, hop.KindPrimary)
-		m.sessions[0].table.MarkRoundSent(ttl)
+		m.sessions[0].table.MarkRoundSent(ttl, 1)
 	}
 
 	output := stripANSI(m.View())

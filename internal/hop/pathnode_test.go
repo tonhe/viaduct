@@ -51,7 +51,7 @@ func TestPathNodeStDev(t *testing.T) {
 	}
 }
 
-// PathNode no longer tracks sent/loss directly; hop-level round-based loss
+// PathNode no longer tracks sent/loss directly; hop-level per-probe loss
 // is tested in hop_test.go (TestHopRoundBasedLoss, TestHopLossPercent).
 
 func TestPathNodeStability(t *testing.T) {

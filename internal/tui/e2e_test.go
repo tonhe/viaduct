@@ -68,7 +68,7 @@ func TestE2E_HappyPath(t *testing.T) {
 			tm.Send(HopUpdateMsg{Result: result})
 		}
 		for ttl := 1; ttl <= 5; ttl++ {
-			table.MarkRoundSent(ttl)
+			table.MarkRoundSent(ttl, 1)
 		}
 		tm.Send(RoundEndMsg{})
 	}
@@ -143,7 +143,7 @@ func TestE2E_IPv6Target(t *testing.T) {
 
 	// 1 round: mark each TTL sent directly on the shared table, then signal round-end.
 	for ttl := 1; ttl <= len(v6Addrs); ttl++ {
-		table.MarkRoundSent(ttl)
+		table.MarkRoundSent(ttl, 1)
 	}
 	tm.Send(RoundEndMsg{})
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})

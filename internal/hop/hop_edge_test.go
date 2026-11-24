@@ -121,7 +121,7 @@ func TestGeoMeanVerySmallValues(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Hop-level round-based loss — edge cases
+// Hop-level per-probe loss — edge cases
 // ---------------------------------------------------------------------------
 
 // TestHopLossPercentZeroRounds: no divide-by-zero when no rounds sent.
@@ -272,13 +272,17 @@ func TestHopPrimaryNodeNil(t *testing.T) {
 // TestTableMarkRoundSent: Table.MarkRoundSent creates hop + increments roundsSent.
 func TestTableMarkRoundSent(t *testing.T) {
 	tbl := NewTable(10)
-	tbl.MarkRoundSent(3)
-	tbl.MarkRoundSent(3)
+	tbl.MarkRoundSent(3, 1)
+	tbl.MarkRoundSent(3, 1)
 	h := tbl.GetOrCreate(3)
-	// roundsSent=2, roundsRecvd=0 → 100% loss.
+	if got := h.Rounds(); got != 2 {
+		t.Fatalf("Rounds = %d, want 2", got)
+	}
+	// Both rounds closed with no replies: 2 probes sent, 0 answered → 100% loss.
+	h.MarkRoundEnd()
 	loss := h.LossPercent()
 	if loss != 100.0 {
-		t.Fatalf("expected 100%% loss after 2 MarkRoundSent with no samples, got %.1f%%", loss)
+		t.Fatalf("expected 100%% loss after 2 closed rounds with no samples, got %.1f%%", loss)
 	}
 }
 

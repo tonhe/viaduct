@@ -66,8 +66,11 @@ func DefaultConfig() Config {
 }
 
 // RoundMarker is notified once per hop per round when probes are dispatched.
+// probes is the number of TTL-limited probes actually written for that TTL
+// this round (the ICMP TTL probe plus every primary flow); echo-tier probes
+// are reported separately through the echo-sent callback.
 type RoundMarker interface {
-	MarkRoundSent(ttl int)
+	MarkRoundSent(ttl int, probes int)
 }
 
 // Result is emitted for each probe response.
@@ -369,13 +372,19 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 				continue
 			}
 
+			// TTL-limited probes actually written for this TTL this round.
+			// Reported to the round marker so loss is computed per probe.
+			probesSent := 0
+
 			// Tier 1: one ICMP TTL probe per hop per round.
 			if icmpSnd != nil {
 				seq++
 				if pkt, key, err := icmpProto.BuildProbe(0, ttl, seq, t.cfg); err == nil {
 					t.pm.add(key, ttl, 0, time.Now(), ProbeICMPTTL)
 					if icmpSnd.SetTTL(ttl) == nil {
-						icmpSnd.WriteTo(pkt, dst)
+						if _, err := icmpSnd.WriteTo(pkt, dst); err == nil {
+							probesSent++
+						}
 					}
 				}
 				time.Sleep(t.cfg.ProbeDelay)
@@ -415,14 +424,16 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 					if _, err := snd.WriteTo(pkt, dst); err != nil {
 						continue
 					}
+					probesSent++
 
 					time.Sleep(t.cfg.ProbeDelay)
 				}
 			}
 
-			// One round-sent notification per TTL per round (ECMP-agnostic).
+			// One round-sent notification per TTL per round, carrying the
+			// number of probes that went out.
 			if t.OnRound != nil {
-				t.OnRound.MarkRoundSent(ttl)
+				t.OnRound.MarkRoundSent(ttl, probesSent)
 			}
 		}
 

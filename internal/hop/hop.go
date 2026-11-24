@@ -12,9 +12,16 @@ import (
 type Hop struct {
 	TTL       int
 	Nodes     []*PathNode
-	roundsSent         int  // rounds in which the tracer probed this TTL
-	roundsRecvd        int  // rounds with >=1 non-echo response
-	respondedThisRound bool // true if a non-echo reply arrived in the current round
+	roundsSent int // rounds in which the tracer probed this TTL (includes the open round)
+
+	// Per-probe loss accounting. The running counters move as probes go out
+	// and replies come in; the closed counters are a snapshot taken when a
+	// round closes, so loss never includes probes whose replies may still be
+	// on the way.
+	probesSent   int // TTL-limited probes sent to this TTL
+	probesRecvd  int // non-echo replies received
+	closedSent   int // probesSent as of the last closed round
+	closedRecvd  int // probesRecvd as of the last closed round
 
 	mu sync.RWMutex
 }
@@ -42,7 +49,7 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind
 		h.Nodes = append(h.Nodes, node)
 	}
 	if kind != KindEcho {
-		h.respondedThisRound = true
+		h.probesRecvd++
 	}
 	node.AddSample(rtt, flowID, kind)
 }
@@ -87,23 +94,30 @@ func (h *Hop) GetNodes() []*PathNode {
 	return out
 }
 
-// MarkRoundSent records that the tracer probed this TTL this round.
-// Called once per hop per round (probe.RoundMarker via Table).
-func (h *Hop) MarkRoundSent() {
+// MarkRoundSent records a round in which one TTL-limited probe was sent to
+// this TTL. Shorthand for MarkRoundSentProbes(1).
+func (h *Hop) MarkRoundSent() { h.MarkRoundSentProbes(1) }
+
+// MarkRoundSentProbes records that the tracer sent probes TTL-limited probes
+// to this TTL this round (ICMP TTL plus every primary flow). Called once per
+// hop per round (probe.RoundMarker via Table).
+func (h *Hop) MarkRoundSentProbes(probes int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.roundsSent++
+	if probes > 0 {
+		h.probesSent += probes
+	}
 }
 
-// MarkRoundEnd closes a probe round: records whether any non-echo reply
-// arrived, then advances stability tracking for all nodes.
+// MarkRoundEnd closes a probe round: probes sent so far and replies received
+// so far become the figures loss is computed from, then stability tracking
+// advances for all nodes.
 func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.respondedThisRound {
-		h.roundsRecvd++
-	}
-	h.respondedThisRound = false
+	h.closedSent = h.probesSent
+	h.closedRecvd = h.probesRecvd
 	for _, n := range h.Nodes {
 		n.RecordRoundAvg()
 		n.AdvanceRound()
@@ -167,15 +181,22 @@ func (h *Hop) StDev() float64 {
 	return pn.StDev()
 }
 
-// LossPercent returns round-based loss: rounds with no response over rounds
-// probed. ECMP-agnostic — six flows answering in one round count once.
+// LossPercent returns per-probe loss: TTL-limited probes that got no reply
+// over probes sent, across completed rounds. The open round is excluded, so a
+// live view does not show probes still awaiting their replies as lost. A
+// reply that arrives after its round closed is credited when the next round
+// closes.
 func (h *Hop) LossPercent() float64 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.roundsSent == 0 {
+	if h.closedSent == 0 {
 		return 0
 	}
-	return float64(h.roundsSent-h.roundsRecvd) / float64(h.roundsSent) * 100
+	lost := h.closedSent - h.closedRecvd
+	if lost < 0 {
+		lost = 0 // duplicated replies
+	}
+	return float64(lost) / float64(h.closedSent) * 100
 }
 
 // GetMinRTT returns the primary node's minimum RTT.
@@ -225,8 +246,10 @@ func (h *Hop) Reset() {
 	defer h.mu.Unlock()
 	h.Nodes = nil
 	h.roundsSent = 0
-	h.roundsRecvd = 0
-	h.respondedThisRound = false
+	h.probesSent = 0
+	h.probesRecvd = 0
+	h.closedSent = 0
+	h.closedRecvd = 0
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.
@@ -265,10 +288,10 @@ func (t *Table) GetOrCreate(ttl int) *Hop {
 	return h
 }
 
-// MarkRoundSent records that a probe round was sent to the given TTL.
-// Implements probe.RoundMarker.
-func (t *Table) MarkRoundSent(ttl int) {
-	t.GetOrCreate(ttl).MarkRoundSent()
+// MarkRoundSent records that a round of probes TTL-limited probes was sent to
+// the given TTL. Implements probe.RoundMarker.
+func (t *Table) MarkRoundSent(ttl int, probes int) {
+	t.GetOrCreate(ttl).MarkRoundSentProbes(probes)
 }
 
 // Snapshot returns a sorted slice of hops from TTL 1 to MaxTTLSeen.

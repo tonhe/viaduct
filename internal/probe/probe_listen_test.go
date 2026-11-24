@@ -47,7 +47,7 @@ func TestSetOnRoundEnd(t *testing.T) {
 // mockRoundMarker satisfies RoundMarker for tests.
 type mockRoundMarker struct{ count int }
 
-func (m *mockRoundMarker) MarkRoundSent(_ int) { m.count++ }
+func (m *mockRoundMarker) MarkRoundSent(_ int, _ int) { m.count++ }
 
 // fakeAddr implements net.Addr, returning a fixed IPv4 string so that
 // net.ParseIP(peer.String()) in Tracer.listen succeeds.

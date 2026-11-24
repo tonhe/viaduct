@@ -708,7 +708,7 @@ func TestKeys_MultiTarget_Reset(t *testing.T) {
 		m.sessions[1].probeCount = 3
 		// Seed a hop on session 1 to verify table reset.
 		m.sessions[1].table.GetOrCreate(1).AddSample(nil, 10*time.Millisecond, 0, hop.KindPrimary)
-		m.sessions[1].table.MarkRoundSent(1)
+		m.sessions[1].table.MarkRoundSent(1, 1)
 
 		next, _ := m.onMainKey(keyPress("r"))
 

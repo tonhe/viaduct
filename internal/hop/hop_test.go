@@ -98,7 +98,7 @@ func TestTableSnapshot(t *testing.T) {
 	tbl := NewTable(30)
 	h := tbl.GetOrCreate(1)
 	h.AddSample(net.ParseIP("1.1.1.1"), 5*time.Millisecond, 0, KindPrimary)
-	tbl.MarkRoundSent(1)
+	tbl.MarkRoundSent(1, 1)
 
 	snap := tbl.Snapshot()
 	if len(snap) != 1 {
@@ -254,15 +254,16 @@ func TestHopLossPercentMultiNode(t *testing.T) {
 	h := NewHop(1)
 	ip1 := net.ParseIP("10.0.0.1")
 	ip2 := net.ParseIP("10.0.0.2")
-	// 10 rounds sent; 7 rounds had at least one response => 30% loss
+	// 10 rounds of 2 probes; both answered in 7 rounds, none in 3 => 6 of 20
+	// probes lost => 30% loss
 	for i := 0; i < 7; i++ {
-		h.MarkRoundSent()
+		h.MarkRoundSentProbes(2)
 		h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
 		h.AddSample(ip2, 15*time.Millisecond, 1, KindPrimary)
 		h.MarkRoundEnd()
 	}
 	for i := 0; i < 3; i++ {
-		h.MarkRoundSent()
+		h.MarkRoundSentProbes(2)
 		h.MarkRoundEnd()
 	}
 	loss := h.LossPercent()
@@ -271,40 +272,40 @@ func TestHopLossPercentMultiNode(t *testing.T) {
 	}
 }
 
-func TestHopRoundBasedLoss(t *testing.T) {
+func TestHopPerProbeLossECMP(t *testing.T) {
 	h := NewHop(3)
 	ip := net.ParseIP("198.51.100.1")
-	// Round 1: 6 ECMP flows all answer — counts as ONE received round.
-	h.MarkRoundSent()
+	// Round 1: 6 ECMP flows sent, all answer.
+	h.MarkRoundSentProbes(6)
 	for f := 0; f < 6; f++ {
 		h.AddSample(ip, 10*time.Millisecond, f, KindPrimary)
 	}
 	h.MarkRoundEnd()
-	// Round 2: silence.
-	h.MarkRoundSent()
+	// Round 2: 6 flows sent, silence.
+	h.MarkRoundSentProbes(6)
 	h.MarkRoundEnd()
 	if got := h.LossPercent(); got != 50.0 {
-		t.Errorf("LossPercent = %v, want 50 (round-based, ECMP-agnostic)", got)
+		t.Errorf("LossPercent = %v, want 50 (6 of 12 probes lost)", got)
 	}
 	if h.Rounds() != 2 {
 		t.Errorf("Rounds = %d, want 2", h.Rounds())
 	}
 }
 
-func TestHopRoundBasedLossV6(t *testing.T) {
+func TestHopPerProbeLossECMPV6(t *testing.T) {
 	h := NewHop(3)
 	ip := net.ParseIP("2001:db8::1")
-	// Round 1: 6 ECMP flows all answer — counts as ONE received round.
-	h.MarkRoundSent()
+	// Round 1: 6 ECMP flows sent, all answer.
+	h.MarkRoundSentProbes(6)
 	for f := 0; f < 6; f++ {
 		h.AddSample(ip, 10*time.Millisecond, f, KindPrimary)
 	}
 	h.MarkRoundEnd()
-	// Round 2: silence.
-	h.MarkRoundSent()
+	// Round 2: 6 flows sent, silence.
+	h.MarkRoundSentProbes(6)
 	h.MarkRoundEnd()
 	if got := h.LossPercent(); got != 50.0 {
-		t.Errorf("LossPercent = %v, want 50 (round-based, ECMP-agnostic)", got)
+		t.Errorf("LossPercent = %v, want 50 (6 of 12 probes lost)", got)
 	}
 	if h.Rounds() != 2 {
 		t.Errorf("Rounds = %d, want 2", h.Rounds())

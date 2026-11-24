@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,6 +95,89 @@ func TestInterleavedRoundSendsICMPAndPrimary(t *testing.T) {
 	for _, id := range icmpIDs {
 		if id != cfg.ICMPID {
 			t.Errorf("ICMP TTL probe ID = 0x%x, want 0x%x", id, cfg.ICMPID)
+		}
+	}
+}
+
+// probeCountMarker records the probe count reported for each TTL.
+type probeCountMarker struct {
+	mu     sync.Mutex
+	probes map[int][]int
+}
+
+func (m *probeCountMarker) MarkRoundSent(ttl int, probes int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.probes == nil {
+		m.probes = map[int][]int{}
+	}
+	m.probes[ttl] = append(m.probes[ttl], probes)
+}
+
+// TestRoundMarkerReportsProbesSent: the round marker is told how many
+// TTL-limited probes actually went out for each TTL, so loss can be computed
+// per probe. UDP with 3 flows sends 1 ICMP TTL + 3 UDP = 4 per TTL per round.
+func TestRoundMarkerReportsProbesSent(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.IPVersion = 4
+	cfg.Protocol = NewUDPProtocol(33434)
+	cfg.MaxHops = 2
+	cfg.FirstTTL = 1
+	cfg.NumPaths = 3
+	cfg.ProbeDelay = 0
+	cfg.RoundDelay = 5 * time.Millisecond
+	cfg.MaxRounds = 2
+
+	snd := &fakeSender{}
+	tr := newRunTracer(snd, cfg, net.ParseIP("192.0.2.1"))
+	rm := &probeCountMarker{}
+	tr.SetOnRoundSent(rm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := tr.run(ctx, nil, make(chan Result, 64)); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	for ttl := 1; ttl <= 2; ttl++ {
+		got := rm.probes[ttl]
+		if len(got) != 2 || got[0] != 4 || got[1] != 4 {
+			t.Errorf("TTL %d: probes reported per round = %v, want [4 4]", ttl, got)
+		}
+	}
+}
+
+// TestRoundMarkerReportsProbesSent_ICMP: ICMP mode sends one probe per TTL.
+func TestRoundMarkerReportsProbesSent_ICMP(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.IPVersion = 4
+	cfg.Protocol = NewICMPProtocol(cfg)
+	cfg.MaxHops = 3
+	cfg.FirstTTL = 1
+	cfg.NumPaths = 6 // ignored for ICMP
+	cfg.ProbeDelay = 0
+	cfg.RoundDelay = 5 * time.Millisecond
+	cfg.MaxRounds = 1
+
+	snd := &fakeSender{}
+	tr := newRunTracer(snd, cfg, net.ParseIP("192.0.2.1"))
+	rm := &probeCountMarker{}
+	tr.SetOnRoundSent(rm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := tr.run(ctx, nil, make(chan Result, 64)); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	for ttl := 1; ttl <= 3; ttl++ {
+		got := rm.probes[ttl]
+		if len(got) != 1 || got[0] != 1 {
+			t.Errorf("TTL %d: probes reported = %v, want [1]", ttl, got)
 		}
 	}
 }
@@ -624,7 +708,7 @@ func TestTargetDetectionViaICMPTTLProbe(t *testing.T) {
 
 type timingRoundMarker struct{ last time.Time }
 
-func (m *timingRoundMarker) MarkRoundSent(_ int) { m.last = time.Now() }
+func (m *timingRoundMarker) MarkRoundSent(_ int, _ int) { m.last = time.Now() }
 
 // TestRoundClosesAfterCollectionWindow verifies OnRoundEnd fires only after the
 // inter-round pause, not immediately after sending. Responses arrive through an
