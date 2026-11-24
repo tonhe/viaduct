@@ -1,0 +1,9 @@
+# CodeRabbit is advisory here, not a required check.
+#
+# The free open-source plan limits reviews per developer per hour, and every push to a
+# pull request counts as one. Review each pull request once, when it opens, instead of
+# again on every push. To ask for another review, comment "@coderabbitai review".
+reviews:
+  auto_review:
+    enabled: true
+    auto_incremental_review: false

@@ -92,7 +92,8 @@ via -r google.com
 - **ASN enrichment** — each hop shows its AS number with boundary transitions highlighted; full org name at wide widths
 - **3 probe protocols + auto** — UDP (ECMP), TCP SYN (firewall bypass), ICMP (classic), and Auto (UDP with ICMP fallback)
 - **61 color themes** — Solarized Dark default; switch with `--theme` or the settings menu
-- **Config persistence** — settings saved to `~/.config/via/config.toml`; CLI flags override at runtime
+- **Config persistence** — settings saved to `~/.config/via/config.toml` (see [Config file location](#config-file-location) for other platforms); CLI flags override at runtime
+- **TUI export** — press <kbd>e</kbd> to write the current trace to a JSON, CSV, or DOT file (`export_format` config key)
 
 ---
 
@@ -337,6 +338,7 @@ via -r -c 3 -o json google.com one.one.one.one
 | <kbd>p</kbd> | Pause/resume probing |
 | <kbd>r</kbd> | Reset all hop stats |
 | <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability → Probe Detail) |
+| <kbd>e</kbd> | Export the current trace to a file (see [Exporting from the TUI](#exporting-from-the-tui)) |
 | <kbd>q</kbd> | Quit (prints final summary) |
 | <kbd>Esc</kbd> | Open settings menu |
 
@@ -348,6 +350,31 @@ via -r -c 3 -o json google.com one.one.one.one
 | <kbd>Tab</kbd> | Cycle focus to next target |
 | <kbd>Space</kbd> | Mark/unmark target for column comparison |
 | <kbd>c</kbd> | Toggle column view (bordered panes, one per target) |
+
+### Config file location
+
+| Platform | Path |
+|----------|------|
+| Linux/macOS (default) | `~/.config/via/config.toml` |
+| Linux/macOS with `XDG_CONFIG_HOME` set | `$XDG_CONFIG_HOME/via/config.toml` |
+| Windows | `%APPDATA%\via\config.toml` (falls back to `%USERPROFILE%\AppData\Roaming\via\config.toml` if `APPDATA` is empty) |
+
+### Exporting from the TUI
+
+Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table to a file.
+
+- **Format** — `json` by default. Set `export_format` in the config file (see [Config file location](#config-file-location)) to `json`, `csv`, or `dot` to change it. Only these three values are valid; any other value produces an empty file.
+
+  ```toml
+  export_format = "csv"
+  ```
+
+  `via` reads the config file at startup, so set `export_format` before starting `via` or restart it after changing the file. Pressing <kbd>e</kbd> during a trace keeps using the format loaded at startup.
+
+  The settings menu does not show `export_format`, and saving settings from the menu rewrites the config file without it, so add the line again after saving settings.
+- **Location** — the file is written to the current working directory (the directory you ran `via` from).
+- **File name** — `via-<target>-<timestamp>.<format>`, where `<target>` is the target as given on the command line and `<timestamp>` is local time as `YYYYMMDD-HHMM` (e.g. `via-google.com-20261124-1530.json`). Exporting again within the same minute overwrites the earlier file. With more than one target the file is `via-multi-<timestamp>.<format>` and holds every target that did not fail at startup.
+- **Result** — the status line shows `Exported to <path>` or `Export failed: <error>` for a few seconds.
 
 ---
 
