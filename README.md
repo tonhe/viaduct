@@ -406,6 +406,10 @@ patterns. ~30 minute runtime.
 **CI matrix:** Ubuntu, macOS, and Windows against Go 1.25.6. Build, race,
 coverage, and per-package coverage floors all run on each OS.
 
+## Changelog and contributing
+
+Release notes are on the [GitHub releases page](https://github.com/tonhe/viaduct/releases), which is the project's changelog. To contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md). Design notes are in [docs/](docs/): [architecture](docs/ARCHITECTURE.md) and the [TUI design guide](docs/UI-DESIGN.md).
+
 ## License
 
 MIT
