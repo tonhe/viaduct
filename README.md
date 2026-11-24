@@ -121,6 +121,12 @@ via -6 google.com       # IPv6
 
 If `-6` is requested and the target has no AAAA record (or the host has no IPv6 transport), `via` exits with a clear error rather than silently falling back.
 
+- **Capability:** a host counts as IPv6-capable only if it has a global or unique-local IPv6 address. A link-local address alone is not enough.
+- **Route pre-flight:** before probing an IPv6 target, `via` checks that the host has a route to it. If family was auto-selected and there is no IPv6 route, it falls back to IPv4 and shows `no IPv6 route to <address>; using IPv4` in the status bar (on stderr in report mode). With `-6` it exits with an error instead.
+- **IPv4-mapped addresses:** `::ffff:192.0.2.1` is traced as `192.0.2.1` over IPv4. Combining one with `-6` is an error.
+- **Multicast:** multicast targets (`224.0.0.0/4`, `ff00::/8`) are rejected at startup.
+- **Narrow terminals:** a 39-character address is shown in full where it fits. Where it does not, it is shortened in the middle (`2001:db8…55:6661`) so hops that share a prefix stay distinguishable.
+
 ---
 
 ## Rate-Limit Detection
@@ -130,6 +136,10 @@ Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` an
 `via` automagically detects this. The tracer interleaves per-round probes with budgeted direct ICMP Echo Requests sent to each discovered hop. When TTL-probe loss is high but the direct echo responses remain healthy, `via` marks the hop rate-limited and reports echo-derived stats instead of the misleading TTL Exceeded data.
 
 The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come from direct echo probes rather than TTL Exceeded replies. No configuration needed — it just works.
+
+**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
+
+**When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The destination is never marked. TUI, report mode and exports all show the same figure; JSON exports also carry per-node counts for each probe type and the `rate_limited` verdict.
 
 ---
 

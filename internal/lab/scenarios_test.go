@@ -328,6 +328,58 @@ func TestRealLossIsNeverFlaggedAsRateLimiting(t *testing.T) {
 	}
 }
 
+// An IPv4-mapped IPv6 literal is traced as the IPv4 address it embeds, over
+// IPv4, along the IPv4 path.
+func TestIPv4MappedLiteralTracesOverIPv4(t *testing.T) {
+	const rounds = 5
+	reset(t)
+	r := via(t, "-P", "icmp", "-c", strconv.Itoa(rounds), "-i", "200ms", "::ffff:"+dst1V4)
+	if r.TargetIP != dst1V4 {
+		t.Errorf("target_ip = %s, want %s", r.TargetIP, dst1V4)
+	}
+	for i, ip := range pathToDst1 {
+		wantHop(t, hopByTTL(t, r, i+1), ip, rounds, rounds, rounds)
+	}
+}
+
+// Targets that cannot be traced are refused before any probe is sent.
+func TestUntraceableTargetsAreRefusedAtStartup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"IPv4 multicast", []string{"224.0.0.251"}, "multicast"},
+		{"IPv6 multicast", []string{"ff02::1"}, "multicast"},
+		{"IPv4-mapped literal with -6", []string{"-6", "::ffff:" + dst1V4}, "IPv4-mapped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset(t)
+			var stderr string
+			pkts := capture(t, func() {
+				cmd := inNS("client", viaBin, append([]string{"-r", "-n", "--no-asn", "-c", "2"}, tc.args...)...)
+				out, err := cmd.CombinedOutput()
+				stderr = string(out)
+				if err == nil {
+					t.Errorf("via exited zero; output:\n%s", out)
+				}
+			})
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("error output does not mention %q:\n%s", tc.want, stderr)
+			}
+			for _, p := range pkts {
+				if p.src == clientV4 || p.src == clientV6 {
+					if p.proto == 58 && p.icmpType >= 133 && p.icmpType <= 137 {
+						continue // neighbor discovery, not a probe
+					}
+					t.Errorf("a packet left the client for a refused target: %+v", p)
+					break
+				}
+			}
+		})
+	}
+}
+
 // Scenario 9: two targets in one session. Loss on dst1's path must not show
 // up on dst2's.
 func TestMultiTargetIsolation(t *testing.T) {

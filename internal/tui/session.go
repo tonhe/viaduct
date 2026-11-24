@@ -33,6 +33,7 @@ type TargetSession struct {
 	alertEngine      *AlertEngine
 	startErr         error // resolution/family/socket failure; session never traces
 	marked           bool  // comparison mark for column view
+	notice           string // setup notice shown in the status bar (TargetSpec.Notice)
 }
 
 // newSession creates a TargetSession with the per-target initial state that
@@ -60,6 +61,10 @@ type TargetSpec struct {
 	Cfg          probe.Config
 	ProtocolName string
 	Err          error
+	// Notice is a one-line message about how the target was set up that the
+	// user should see while tracing, for example that IPv4 is being used
+	// because there is no IPv6 route. Empty for none.
+	Notice string
 }
 
 // NewMulti creates a Model with one session per spec. Shared resolver,
@@ -72,9 +77,11 @@ func NewMulti(specs []TargetSpec, version string, noASN bool, alertLoss float64,
 	m := New(specs[0].Name, specs[0].IP, specs[0].Cfg, version, specs[0].ProtocolName, noASN, alertLoss, alertLatency, alertRounds, noAlert, appCfg)
 	// New builds sessions[0] unconditionally; patch its error state after the fact.
 	m.sessions[0].startErr = specs[0].Err
+	m.sessions[0].notice = specs[0].Notice
 	for _, sp := range specs[1:] {
 		s := newSession(sp.Name, sp.IP, sp.Cfg, sp.ProtocolName, alertLoss, alertLatency, alertRounds, noAlert)
 		s.startErr = sp.Err
+		s.notice = sp.Notice
 		m.sessions = append(m.sessions, s)
 	}
 	return m

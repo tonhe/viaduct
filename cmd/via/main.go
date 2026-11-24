@@ -105,6 +105,21 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 			specs[i].Err = fmt.Errorf("resolve %s: %w", tgt, err)
 			continue
 		}
+		// Multicast is not a traceable destination. Reject it here, before any
+		// socket is opened, instead of leaving it to whatever the socket layer
+		// does. A name that also has unicast addresses uses those.
+		ips, err = dropMulticast(tgt, ips)
+		if err != nil {
+			specs[i].Err = err
+			continue
+		}
+		// An IPv4-mapped IPv6 literal (::ffff:a.b.c.d) is the IPv4 address it
+		// embeds and is traced over IPv4 (To4 below does that). Forcing IPv6
+		// on one is a contradiction, so say so instead of "no AAAA record".
+		if forceV6 && isIPv4MappedLiteral(tgt) {
+			specs[i].Err = fmt.Errorf("%s is an IPv4-mapped address and is traced over IPv4; it cannot be used with -6", tgt)
+			continue
+		}
 		var v4, v6 net.IP
 		for _, ip := range ips {
 			if ip4 := ip.To4(); ip4 != nil && v4 == nil {
@@ -118,6 +133,25 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 			specs[i].Err = err
 			continue
 		}
+		// Pre-flight an IPv6 choice: a host can have an IPv6 address and still
+		// no route to the target, which used to surface as a socket error
+		// mid-trace. Auto-selection falls back to IPv4 when the target has an
+		// A record and says so; an explicit -6 is never overridden.
+		if ver == 6 {
+			if rerr := routeTo(ip); rerr != nil {
+				switch {
+				case forceV6:
+					specs[i].Err = fmt.Errorf("no IPv6 route to %s (%v); -6 was given, so not falling back to IPv4", ip, rerr)
+					continue
+				case v4 != nil:
+					specs[i].Notice = fmt.Sprintf("no IPv6 route to %s; using IPv4", ip)
+					ver, ip = 4, v4
+				default:
+					specs[i].Err = fmt.Errorf("no IPv6 route to %s (%v), and %s has no IPv4 address", ip, rerr, tgt)
+					continue
+				}
+			}
+		}
 		cfg := base
 		cfg.IPVersion = ver
 		cfg.BasePort, cfg.ICMPID, cfg.EchoID = sessionPorts(i)
@@ -125,6 +159,50 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 		specs[i].Cfg = cfg
 	}
 	return specs
+}
+
+// routeTo reports whether this host has a route to ip. It connects a UDP
+// socket, which makes the kernel do the route lookup and sends no packet. A
+// variable so tests can replace it.
+var routeTo = func(ip net.IP) error {
+	network, addr := "udp4", ip.String()+":1"
+	if ip.To4() == nil {
+		network, addr = "udp6", "["+ip.String()+"]:1"
+	}
+	conn, err := net.Dial(network, addr)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+// dropMulticast removes multicast addresses (IPv4 224.0.0.0/4, IPv6 ff00::/8)
+// from a target's resolved addresses. If nothing else is left, it returns an
+// error naming the target.
+func dropMulticast(target string, ips []net.IP) ([]net.IP, error) {
+	unicast := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if !ip.IsMulticast() {
+			unicast = append(unicast, ip)
+		}
+	}
+	if len(unicast) == 0 && len(ips) > 0 {
+		if net.ParseIP(target) != nil {
+			return nil, fmt.Errorf("%s is a multicast address; via traces unicast targets only", target)
+		}
+		return nil, fmt.Errorf("%s resolves only to multicast addresses; via traces unicast targets only", target)
+	}
+	return unicast, nil
+}
+
+// isIPv4MappedLiteral reports whether s is an IPv6 literal of the form
+// ::ffff:a.b.c.d (or its hex spelling), which stands for an IPv4 address.
+func isIPv4MappedLiteral(s string) bool {
+	if !strings.Contains(s, ":") {
+		return false
+	}
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() != nil
 }
 
 func runTrace(cmd *cobra.Command, args []string) error {
@@ -534,6 +612,13 @@ func runTrace(cmd *cobra.Command, args []string) error {
 // pre-multi runReport path. For multiple targets, text mode separates each
 // section with a rule line; structured exports use WriteJSONMulti/etc.
 func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, outputFmt string) error {
+	// Setup notices (e.g. an IPv4 fallback) go to stderr, so they are seen
+	// without ending up in piped report or export output.
+	for _, sp := range specs {
+		if sp.Notice != "" {
+			fmt.Fprintf(os.Stderr, "note: %s: %s\n", sp.Name, sp.Notice)
+		}
+	}
 	if len(specs) == 1 {
 		sp := specs[0]
 		if sp.Err != nil {

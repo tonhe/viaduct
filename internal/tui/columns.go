@@ -129,7 +129,13 @@ const (
 // computePaneLayout distributes `inner` (the width between the border glyphs)
 // across the pane's columns. Frame overhead: a leading and trailing space plus
 // the num column and the separator before IP.
-func computePaneLayout(inner int) paneLayout {
+//
+// needIP is the length of the longest address the pane has to show. The IP
+// column grows to paneIPMax, enough for any IPv4 address, or to needIP when an
+// address is longer (IPv6 runs to 39 characters), before the hostname column
+// gets any room: a hostname next to an address cut to a prefix is no help.
+func computePaneLayout(inner, needIP int) paneLayout {
+	ipMax := maxInt(paneIPMax, needIP)
 	avail := inner - (1 + paneNumW + 1 + 1) // lead + num + sep + trailing
 	lay := paneLayout{ipw: paneIPMin}
 	if avail <= paneIPMin {
@@ -145,7 +151,7 @@ func computePaneLayout(inner int) paneLayout {
 		lay.showLoss = true
 		remaining -= 1 + paneLossW
 	}
-	if grow := minInt(remaining, paneIPMax-paneIPMin); grow > 0 {
+	if grow := minInt(remaining, ipMax-paneIPMin); grow > 0 {
 		lay.ipw += grow
 		remaining -= grow
 	}
@@ -242,11 +248,6 @@ func (m Model) renderPane(s *TargetSession, paneWidth, maxTTL int, focused bool)
 	bstyle := paneBorderStyle(focused)
 	v := bstyle.Render(bd.v)
 	inner := paneWidth - 2
-	lay := computePaneLayout(inner)
-
-	lines := make([]string, 0, maxTTL+3)
-	lines = append(lines, m.paneTopBorder(s, bd, bstyle, paneWidth, focused))
-	lines = append(lines, v+m.paneHeaderContent(lay, inner)+v)
 
 	hops := make(map[int]*hop.Hop)
 	for _, h := range s.table.Snapshot() {
@@ -260,6 +261,22 @@ func (m Model) renderPane(s *TargetSession, paneWidth, maxTTL int, focused bool)
 	if s.maxTTLHit > 0 && s.maxTTLHit < sessionMax {
 		sessionMax = s.maxTTLHit
 	}
+
+	// The longest address this pane shows decides how wide the IP column may grow.
+	needIP := 0
+	for ttl, h := range hops {
+		if ttl > sessionMax {
+			continue
+		}
+		if ip := h.GetIP(); ip != nil {
+			needIP = maxInt(needIP, len(ip.String()))
+		}
+	}
+	lay := computePaneLayout(inner, needIP)
+
+	lines := make([]string, 0, maxTTL+3)
+	lines = append(lines, m.paneTopBorder(s, bd, bstyle, paneWidth, focused))
+	lines = append(lines, v+m.paneHeaderContent(lay, inner)+v)
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		var content string
 		if ttl <= sessionMax {
@@ -334,7 +351,7 @@ func (m Model) paneRowContent(lay paneLayout, inner, ttl int, h *hop.Hop) string
 			lossCell = fmt.Sprintf("%*s", paneLossW, "")
 		}
 	} else {
-		ipCell = ipStyle().Render(padCell(truncateSummary(h.GetIP().String(), lay.ipw), lay.ipw))
+		ipCell = ipStyle().Render(padCell(truncateAddr(h.GetIP().String(), lay.ipw), lay.ipw))
 		if lay.hostw > 0 {
 			name := h.GetHostname()
 			hostCell = hostStyle().Render(padCell(truncateSummary(name, lay.hostw), lay.hostw))
@@ -363,6 +380,26 @@ func (m Model) paneRowContent(lay paneLayout, inner, ttl int, h *hop.Hop) string
 		fields = append(fields, lossCell)
 	}
 	return padCell(" "+strings.Join(fields, " "), inner)
+}
+
+// truncateAddr shortens an address to n columns by cutting out its middle:
+// head + "…" + tail. Addresses that share a prefix (hops in one network, or
+// any two IPv6 addresses in the same /64) differ at the end, so a prefix-only
+// cut would make them look identical.
+func truncateAddr(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	switch {
+	case n <= 0:
+		return ""
+	case n == 1:
+		return "…"
+	}
+	head := n / 2
+	tail := n - 1 - head
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
 
 func minInt(a, b int) int {

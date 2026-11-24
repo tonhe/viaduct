@@ -604,6 +604,10 @@ func (m Model) View() string {
 		flowLabel = fmt.Sprintf("    %d flows", s.probeCfg.NumPaths)
 	}
 	switchHint := ""
+	if s.notice != "" {
+		// Setup notice (e.g. an IPv4 fallback): stays for the whole trace.
+		switchHint = "    " + s.notice
+	}
 	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
 		switchHint = "    " + s.switchStatusMsg
 	}
@@ -634,6 +638,7 @@ func (m Model) View() string {
 type columnLayout struct {
 	ipWidth       int
 	showTree      bool // ECMP tree connector column (4 chars)
+	treeOptional  bool // no hop is divergent, so the tree column is empty and may be dropped to fit
 	showHostname  bool
 	hostnameWidth int
 	showRnd       bool
@@ -701,6 +706,15 @@ func (m Model) getLayout() columnLayout {
 
 	if s.probeCfg.NumPaths > 1 {
 		layout.showTree = true
+		// The tree column only carries connectors for hops with more than one
+		// node. With none, it is blank and can go when the terminal is narrow.
+		layout.treeOptional = true
+		for _, h := range hops {
+			if h.IsDivergent() {
+				layout.treeOptional = false
+				break
+			}
+		}
 	}
 
 	// Budget-based layout: start with fixed columns (#, IP, Loss%, Avg, Spark),
@@ -1035,9 +1049,28 @@ func (l *columnLayout) clampToWidth(maxWidth int) {
 			l.showSpark = false
 			continue
 		}
-		break // only fixed columns remain
+		// Only the fixed columns remain (#, tree, IP, Loss%, Avg). With a
+		// 39-character IPv6 address they need 65 columns. Give up the blank
+		// tree column first, then shorten the address column; addresses that
+		// no longer fit are cut in the middle so both ends stay visible.
+		if l.showTree && l.treeOptional {
+			l.showTree = false
+			continue
+		}
+		if l.ipWidth > minIPColWidth {
+			shrink := l.computeWidth() - maxWidth
+			if shrink > l.ipWidth-minIPColWidth {
+				shrink = l.ipWidth - minIPColWidth
+			}
+			l.ipWidth -= shrink
+			continue
+		}
+		break // nothing left to give
 	}
 }
+
+// minIPColWidth is the narrowest the IP column gets: any IPv4 address fits.
+const minIPColWidth = 15
 
 // renderColumnHeader builds the column header line based on the current layout.
 func (m Model) renderColumnHeader(layout columnLayout) string {
@@ -1147,7 +1180,7 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 	if layout.showTree {
 		parts = append(parts, "    ") // empty tree connector column
 	}
-	parts = append(parts, ipStyle().Render(fmt.Sprintf("%-*s", layout.ipWidth, ip.String())))
+	parts = append(parts, ipStyle().Render(fmt.Sprintf("%-*s", layout.ipWidth, truncateAddr(ip.String(), layout.ipWidth))))
 
 	// Hostname
 	if layout.showHostname {
@@ -1316,7 +1349,7 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 		var parts []string
 		parts = append(parts, ttlStr)
 		parts = append(parts, treeStyle().Render(connector))
-		parts = append(parts, ipStyle().Render(fmt.Sprintf("%-*s", layout.ipWidth, ip.String())))
+		parts = append(parts, ipStyle().Render(fmt.Sprintf("%-*s", layout.ipWidth, truncateAddr(ip.String(), layout.ipWidth))))
 
 		// Hostname
 		if layout.showHostname {
