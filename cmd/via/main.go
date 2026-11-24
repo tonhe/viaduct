@@ -161,6 +161,24 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 	return specs
 }
 
+// resolveNumPaths decides how many ECMP flows to probe from the --paths flag
+// (flagPaths, and whether it was given), --no-paths, and the config file.
+// --no-paths means one flow and is an explicit choice: the config value does
+// not override it. Giving it together with a --paths value other than 1 is a
+// contradiction and an error.
+func resolveNumPaths(flagPaths int, pathsChanged, noPaths bool, configPaths int) (int, error) {
+	switch {
+	case noPaths && pathsChanged && flagPaths != 1:
+		return 0, fmt.Errorf("--no-paths and --paths %d contradict each other; use one of them", flagPaths)
+	case noPaths:
+		return 1, nil
+	case pathsChanged:
+		return flagPaths, nil
+	default:
+		return configPaths, nil
+	}
+}
+
 // routeTo reports whether this host has a route to ip. It connects a UDP
 // socket, which makes the kernel do the route lookup and sends no packet. A
 // variable so tests can replace it.
@@ -300,9 +318,6 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	noDNS, _ := cmd.Flags().GetBool("no-dns")
 	numPaths, _ := cmd.Flags().GetInt("paths")
 	noPaths, _ := cmd.Flags().GetBool("no-paths")
-	if noPaths {
-		numPaths = 1
-	}
 	protocolName, _ := cmd.Flags().GetString("protocol")
 	dstPort, _ := cmd.Flags().GetInt("port")
 	noASN, _ := cmd.Flags().GetBool("no-asn")
@@ -334,8 +349,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 			interval = d
 		}
 	}
-	if !cmd.Flags().Changed("paths") {
-		numPaths = appCfg.Paths
+	numPaths, err = resolveNumPaths(numPaths, cmd.Flags().Changed("paths"), noPaths, appCfg.Paths)
+	if err != nil {
+		return err
 	}
 	if !cmd.Flags().Changed("no-dns") {
 		noDNS = !appCfg.DNSLookups
@@ -648,7 +664,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 				fmt.Fprintf(os.Stderr, "error tracing %s: %v\n", sp.Name, runErr)
 				continue
 			}
-			r := export.BuildReport(versionStr, sp.Name, sp.IP, protocolName, 0, table, resolver, enricher, maxTTL)
+			r := export.BuildReport(versionStr, sp.Name, sp.IP, protocolName, table, resolver, enricher, maxTTL)
 			reports = append(reports, r)
 		} else {
 			// Text mode: run and print inline.
@@ -948,7 +964,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 
 	if outputFmt != "" {
 		versionStr := "v" + version + " (" + buildVersion + ")"
-		report := export.BuildReport(versionStr, target, targetIP, protocolName, 0, table, resolver, enricher, maxTTL)
+		report := export.BuildReport(versionStr, target, targetIP, protocolName, table, resolver, enricher, maxTTL)
 		switch outputFmt {
 		case "json":
 			export.WriteJSON(os.Stdout, report)

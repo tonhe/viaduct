@@ -49,6 +49,9 @@ func TestCleanPath(t *testing.T) {
 				t.Fatalf("hops = %d, want %d", len(r.Hops), len(pathToDst1))
 			}
 			want := rounds * m.perRound
+			if total := want * len(pathToDst1); r.Probes != total {
+				t.Errorf("report probes = %d, want %d (%d to each of %d hops)", r.Probes, total, want, len(pathToDst1))
+			}
 			onWire := probesSentByTTL(pkts, clientV4, dst1V4)
 			for i, ip := range pathToDst1 {
 				ttl := i + 1
@@ -325,6 +328,25 @@ func TestRealLossIsNeverFlaggedAsRateLimiting(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --no-paths sends one UDP flow per hop per round instead of six, so each hop
+// gets 2 probes a round (the ICMP TTL probe and one UDP probe).
+func TestNoPathsSendsOneFlow(t *testing.T) {
+	const rounds = 10
+	reset(t)
+	var r export.Report
+	pkts := capture(t, func() {
+		r = via(t, "--no-paths", "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4)
+	})
+	want := rounds * 2
+	onWire := probesSentByTTL(pkts, clientV4, dst1V4)
+	for i, ip := range pathToDst1 {
+		wantHop(t, hopByTTL(t, r, i+1), ip, rounds, want, want)
+		if onWire[i+1] != want {
+			t.Errorf("TTL %d: %d probes on the wire, want %d", i+1, onWire[i+1], want)
+		}
 	}
 }
 

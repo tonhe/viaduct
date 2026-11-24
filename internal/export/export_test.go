@@ -34,7 +34,7 @@ func buildTestTable() *hop.Table {
 func TestBuildReport(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	if r.Version != "v0.1.0" {
 		t.Errorf("version = %q, want %q", r.Version, "v0.1.0")
@@ -103,7 +103,7 @@ func TestFormatName(t *testing.T) {
 func TestWriteJSON(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	var buf bytes.Buffer
 	if err := WriteJSON(&buf, r); err != nil {
@@ -126,7 +126,7 @@ func TestWriteJSON(t *testing.T) {
 func TestWriteCSV(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	var buf bytes.Buffer
 	if err := WriteCSV(&buf, r); err != nil {
@@ -153,7 +153,7 @@ func TestWriteCSV(t *testing.T) {
 func TestWriteDOT(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	// Set ASN data for clustering test
 	r.Hops[0].Nodes[0].ASN = 64496
@@ -216,7 +216,7 @@ func TestBuildReport_ProbeCounts(t *testing.T) {
 		h.MarkRoundEnd()
 	}
 
-	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", 0, table, nil, nil, 1)
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 1)
 	if len(r.Hops) != 1 {
 		t.Fatalf("hops = %d, want 1", len(r.Hops))
 	}
@@ -236,6 +236,40 @@ func TestBuildReport_ProbeCounts(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("JSON missing %s", want)
 		}
+	}
+}
+
+// TestBuildReport_ProbesIsTotalSent: the top-level probes field is the number
+// of TTL-limited probes sent to the hops in the report. It used to be whatever
+// the caller passed, which was 0 in report mode (viaduct#52).
+func TestBuildReport_ProbesIsTotalSent(t *testing.T) {
+	table := hop.NewTable(4)
+	ip := net.ParseIP("192.0.2.2")
+
+	h1 := table.GetOrCreate(1) // 2 rounds of 7, all answered
+	for i := 0; i < 2; i++ {
+		h1.MarkRoundSentProbes(7)
+		for j := 0; j < 7; j++ {
+			h1.AddSample(ip, time.Millisecond, j, hop.KindPrimary)
+		}
+		h1.MarkRoundEnd()
+	}
+	h2 := table.GetOrCreate(2) // 2 rounds of 7, never answered: a gap hop
+	for i := 0; i < 2; i++ {
+		h2.MarkRoundSentProbes(7)
+		h2.MarkRoundEnd()
+	}
+	h3 := table.GetOrCreate(3) // beyond the reported depth: not counted
+	h3.MarkRoundSentProbes(7)
+	h3.AddSample(ip, time.Millisecond, 0, hop.KindPrimary)
+	h3.MarkRoundEnd()
+
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 2)
+	if r.Probes != 28 {
+		t.Errorf("Probes = %d, want 28 (14 to each of the two reported hops, the silent one included)", r.Probes)
+	}
+	if len(r.Hops) != 2 || len(r.Hops[1].Nodes) != 0 {
+		t.Fatalf("fixture: want 2 hops with a silent second hop, got %+v", r.Hops)
 	}
 }
 
@@ -265,7 +299,7 @@ func TestBuildReport_NodeProbeTypes(t *testing.T) {
 		h.MarkRoundEnd()
 	}
 
-	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", 0, table, nil, nil, 1)
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 1)
 	n := r.Hops[0].Nodes[0]
 	if n.Probes.ICMPTTL.Received != 1 {
 		t.Errorf("icmp_ttl received = %d, want 1", n.Probes.ICMPTTL.Received)
@@ -312,7 +346,7 @@ func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	// h2 has no AddSample calls → GetIP() returns nil → must be treated as gap.
 
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("10.0.0.1"),
-		"udp", 10, table, nil, nil, 2)
+		"udp", table, nil, nil, 2)
 
 	if len(r.Hops) != 2 {
 		t.Fatalf("expected 2 hops, got %d", len(r.Hops))

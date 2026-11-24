@@ -1931,7 +1931,7 @@ func (m Model) exportCmd() tea.Cmd {
 				}
 				mr.Targets = append(mr.Targets, export.BuildReport(
 					m.version, snap.target, snap.targetIP,
-					snap.protocolName, snap.probeCount, snap.table,
+					snap.protocolName, snap.table,
 					m.resolver, m.enricher, maxTTL,
 				))
 			}
@@ -1967,7 +1967,6 @@ func (m Model) exportCmd() tea.Cmd {
 	target := s.target
 	targetIP := s.targetIP
 	protocolName := s.protocolName
-	probeCount := s.probeCount
 	maxTTLHit := s.maxTTLHit
 	table := s.table
 	return func() tea.Msg {
@@ -1976,7 +1975,7 @@ func (m Model) exportCmd() tea.Cmd {
 			maxTTL = maxTTLHit
 		}
 		report := export.BuildReport(m.version, target, targetIP,
-			protocolName, probeCount, table, m.resolver, m.enricher, maxTTL)
+			protocolName, table, m.resolver, m.enricher, maxTTL)
 
 		format := "json"
 		if m.config != nil && m.config.ExportFormat != "" {

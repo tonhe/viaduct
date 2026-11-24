@@ -71,6 +71,47 @@ func TestResolveTargetSpecs_RejectsMulticast(t *testing.T) {
 	})
 }
 
+// --no-paths means one flow, whatever the config file says (viaduct#51). It
+// used to be overwritten by the config's paths value unless --paths was also
+// given.
+func TestResolveNumPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		flagPaths    int
+		pathsChanged bool
+		noPaths      bool
+		configPaths  int
+		want         int
+		wantErr      bool
+	}{
+		{name: "nothing given: the config value", flagPaths: 6, configPaths: 4, want: 4},
+		{name: "--paths given: the flag wins over config", flagPaths: 12, pathsChanged: true, configPaths: 4, want: 12},
+		{name: "--no-paths: one flow, config ignored", flagPaths: 6, noPaths: true, configPaths: 6, want: 1},
+		{name: "--no-paths with config paths 1", flagPaths: 6, noPaths: true, configPaths: 1, want: 1},
+		{name: "--no-paths with --paths 1: consistent, allowed", flagPaths: 1, pathsChanged: true, noPaths: true, configPaths: 6, want: 1},
+		{name: "--no-paths with --paths 8: contradiction", flagPaths: 8, pathsChanged: true, noPaths: true, configPaths: 6, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveNumPaths(tc.flagPaths, tc.pathsChanged, tc.noPaths, tc.configPaths)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("got %d, want an error", got)
+				}
+				if !strings.Contains(err.Error(), "--no-paths") || !strings.Contains(err.Error(), "--paths") {
+					t.Errorf("error should name both flags: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("paths = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // withRouteCheck replaces the route pre-flight for one test.
 func withRouteCheck(t *testing.T, f func(ip net.IP) error) {
 	t.Helper()

@@ -140,7 +140,7 @@ The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come 
 
 **How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
 
-**When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The destination is never marked. TUI, report mode and exports all show the same figure; JSON exports also carry per-node counts for each probe type and the `rate_limited` verdict.
+**When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The destination is never marked. TUI, report mode and exports all show the same figure; JSON exports also carry per-node counts for each probe type and the `rate_limited` verdict. In the JSON, each hop has `probes_sent` and `probes_received`, and the top-level `probes` is the total sent to the hops in the report.
 
 ---
 

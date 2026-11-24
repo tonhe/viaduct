@@ -18,7 +18,10 @@ type Report struct {
 	Target    string    `json:"target"`
 	TargetIP  string    `json:"target_ip"`
 	Protocol  string    `json:"protocol"`
-	Probes    int       `json:"probes"`
+	// Probes is the number of TTL-limited probes sent to the hops in the
+	// report, over completed rounds: the sum of what was sent to each TTL,
+	// including hops that never answered.
+	Probes int `json:"probes"`
 	Hops      []Hop     `json:"hops"`
 }
 
@@ -99,7 +102,7 @@ func msFromDuration(d time.Duration) float64 {
 
 // BuildReport constructs a Report from the current trace state.
 func BuildReport(version string, target string, targetIP net.IP,
-	protocol string, probeCount int, table *hop.Table,
+	protocol string, table *hop.Table,
 	resolver *resolve.Resolver, enricher *asn.Enricher,
 	maxTTL int) Report {
 
@@ -109,7 +112,6 @@ func BuildReport(version string, target string, targetIP net.IP,
 		Target:    target,
 		TargetIP:  targetIP.String(),
 		Protocol:  protocol,
-		Probes:    probeCount,
 	}
 
 	hops := table.Snapshot()
@@ -120,6 +122,10 @@ func BuildReport(version string, target string, targetIP net.IP,
 
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		h, ok := hopMap[ttl]
+		if ok {
+			sent, _ := h.ProbeCounts()
+			r.Probes += sent // counted whether or not the hop ever answered
+		}
 		if !ok || h.GetIP() == nil {
 			r.Hops = append(r.Hops, Hop{TTL: ttl})
 			continue
