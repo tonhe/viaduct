@@ -311,6 +311,38 @@ func timeExceededFrom(pkts []packet, src, client string) int {
 	return n
 }
 
+// echoesTo counts the direct echo requests (full TTL, not TTL-limited probes)
+// the client sent to ip, and the echo replies that came back from it.
+func echoesTo(pkts []packet, client, ip string) (sent, received int) {
+	for _, p := range pkts {
+		if p.proto != 1 && p.proto != 58 {
+			continue
+		}
+		request, reply := 8, 0
+		if p.proto == 58 {
+			request, reply = 128, 129
+		}
+		switch {
+		case p.src == client && p.dst == ip && p.icmpType == request && p.ttl > 32:
+			sent++
+		case p.src == ip && p.dst == client && p.icmpType == reply:
+			received++
+		}
+	}
+	return sent, received
+}
+
+// viaText runs via in report mode with the plain-text table and returns it.
+func viaText(t *testing.T, args ...string) string {
+	t.Helper()
+	full := append([]string{"-r", "-n", "--no-asn"}, args...)
+	out, err := inNS("client", viaBin, full...).Output()
+	if err != nil {
+		t.Fatalf("via %v: %v", full, err)
+	}
+	return string(out)
+}
+
 // mtrLoss runs mtr from the client and returns loss percent per hop address.
 func mtrLoss(t *testing.T, target string, count int, extra ...string) map[string]float64 {
 	t.Helper()

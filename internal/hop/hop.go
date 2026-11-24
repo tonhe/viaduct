@@ -199,6 +199,31 @@ func (h *Hop) LossPercent() float64 {
 	return float64(lost) / float64(h.closedSent) * 100
 }
 
+// MarkTarget records that the node with the given address at this TTL is the
+// trace's destination (see PathNode.MarkTarget).
+func (h *Hop) MarkTarget(ip net.IP) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, n := range h.Nodes {
+		if n.IP.Equal(ip) {
+			n.MarkTarget()
+		}
+	}
+}
+
+// HeadlineLoss is the loss figure every view shows for this hop, and whether
+// it is echo-derived. When the hop's primary node is judged rate-limited, the
+// TTL probe loss is an artifact of the router throttling its replies, so the
+// loss of direct echoes to that node is reported instead (shown as "~N%†").
+// Otherwise it is LossPercent.
+func (h *Hop) HeadlineLoss() (loss float64, rateLimited bool) {
+	if pn := h.PrimaryNode(); pn != nil && pn.RateLimitState() == RateLimitYes {
+		echo := pn.EchoStats()
+		return echo.ProbeLossPercent(), true
+	}
+	return h.LossPercent(), false
+}
+
 // ProbeCounts returns the TTL-limited probes sent to this TTL and the replies
 // received, as of the last closed round. These are the figures LossPercent is
 // computed from. received can exceed sent if a reply was duplicated.

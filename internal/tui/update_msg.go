@@ -63,6 +63,7 @@ func (m Model) onHopUpdate(msg HopUpdateMsg) (Model, tea.Cmd) {
 	h.AddSample(r.IP, r.RTT, r.FlowID, kind)
 	s.probeCount++
 	if r.IsTarget {
+		h.MarkTarget(r.IP)
 		s.targetHit = true
 		if s.maxTTLHit == 0 || r.TTL < s.maxTTLHit {
 			s.maxTTLHit = r.TTL

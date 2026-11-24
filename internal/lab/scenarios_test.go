@@ -5,6 +5,7 @@ package lab
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tonhe/viaduct/internal/export"
@@ -216,6 +217,113 @@ func TestIPv6(t *testing.T) {
 			wantHop(t, hopByTTL(t, r, 2), r2V6, rounds, sent, sent)
 			wantHop(t, hopByTTL(t, r, 3), r3V6, rounds, sent, seen-dropped)
 			wantHop(t, hopByTTL(t, r, 4), dst1V6, rounds, sent, sent)
+		})
+	}
+}
+
+// Scenario 5: r1 limits its ICMP errors to one per second but answers every
+// ping. via must flag r1 as rate-limited, must not flag anything else, and
+// the echo figures it reports for r1 must be the packets on the wire.
+func TestRateLimitedRouterIsFlagged(t *testing.T) {
+	const rounds = 60
+	for _, m := range modes[:2] {
+		t.Run(m.name, func(t *testing.T) {
+			reset(t)
+			script(t, "scenarios/ratelimit.sh", "r1")
+			var r export.Report
+			pkts := capture(t, func() { r = via(t, traceArgs(m, rounds, dst1V4)...) })
+
+			h1 := hopByTTL(t, r, 1)
+			if len(h1.Nodes) != 1 || h1.Nodes[0].IP != r1V4 {
+				t.Fatalf("TTL 1 nodes = %+v, want exactly %s", h1.Nodes, r1V4)
+			}
+			n := h1.Nodes[0]
+
+			// TTL probes: via received exactly the Time Exceeded that reached
+			// the client, and that is well short of what it sent.
+			onWire := timeExceededFrom(pkts, r1V4, clientV4)
+			sent := rounds * m.perRound
+			if h1.ProbesSent != sent || h1.ProbesReceived != onWire {
+				t.Errorf("r1 TTL probes sent/received = %d/%d, want %d/%d (Time Exceeded on the wire)",
+					h1.ProbesSent, h1.ProbesReceived, sent, onWire)
+			}
+			if onWire >= sent {
+				t.Fatalf("r1 answered every TTL probe (%d of %d); the rate limit did not take effect", onWire, sent)
+			}
+
+			// Echo tier: exact agreement with the capture, and no echo lost.
+			wireSent, wireRecv := echoesTo(pkts, clientV4, r1V4)
+			if n.Probes.Echo.Sent != wireSent || n.Probes.Echo.Received != wireRecv {
+				t.Errorf("r1 echo sent/received = %d/%d, capture shows %d/%d",
+					n.Probes.Echo.Sent, n.Probes.Echo.Received, wireSent, wireRecv)
+			}
+			if wireRecv != wireSent {
+				t.Errorf("r1 answered %d of %d echoes on the wire; a rate-limited router answers all of them", wireRecv, wireSent)
+			}
+			if n.RateLimited != "yes" {
+				t.Errorf("r1 rate_limited = %q, want yes", n.RateLimited)
+			}
+
+			// Nothing beyond r1 is affected or flagged.
+			for i, ip := range pathToDst1[1:] {
+				h := hopByTTL(t, r, i+2)
+				wantHop(t, h, ip, rounds, sent, sent)
+				for _, node := range h.Nodes {
+					if node.RateLimited == "yes" {
+						t.Errorf("TTL %d (%s) is flagged rate-limited; only r1 is", h.TTL, node.IP)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The text report shows a rate-limited hop's echo loss, marked ~N%†. Every
+// echo to r1 is answered, so that is ~0%†, not the TTL probe loss.
+func TestRateLimitedRouter_ReportShowsEchoLoss(t *testing.T) {
+	reset(t)
+	script(t, "scenarios/ratelimit.sh", "r1")
+	out := viaText(t, "-P", "icmp", "-c", "60", "-i", "200ms", dst1V4)
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, r1V4+" ") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no row for %s in report:\n%s", r1V4, out)
+	}
+	if !strings.Contains(row, "~0%†") {
+		t.Errorf("r1 row should show echo-derived loss ~0%%†; got:\n%s", row)
+	}
+}
+
+// Real loss is not rate limiting. Every 5th reply of every type from r3 is
+// dropped, echoes included, so TTL probe loss and echo loss are both exactly
+// 20%. Ten runs; nothing may be flagged in any of them.
+func TestRealLossIsNeverFlaggedAsRateLimiting(t *testing.T) {
+	const rounds = 25
+	runs := map[string]int{"icmp": 10, "udp": 3} // udp rounds are slower; the rule is the same
+	for _, m := range modes[:2] {
+		t.Run(m.name, func(t *testing.T) {
+			for run := 1; run <= runs[m.name]; run++ {
+				reset(t)
+				script(t, "scenarios/drop-replies.sh", "r3", "5")
+				r := via(t, traceArgs(m, rounds, dst1V4)...)
+				h3 := hopByTTL(t, r, 3)
+				if h3.ProbesReceived >= h3.ProbesSent {
+					t.Fatalf("run %d: no loss at r3 (%d/%d); the drop rule did not take effect", run, h3.ProbesReceived, h3.ProbesSent)
+				}
+				for _, h := range r.Hops {
+					for _, node := range h.Nodes {
+						if node.RateLimited == "yes" {
+							t.Errorf("run %d: TTL %d (%s) flagged rate-limited on a path with real loss only (echo %d/%d, icmp ttl %d/%d)",
+								run, h.TTL, node.IP, node.Probes.Echo.Received, node.Probes.Echo.Sent,
+								node.Probes.ICMPTTL.Received, node.Probes.ICMPTTL.Sent)
+						}
+					}
+				}
+			}
 		})
 	}
 }

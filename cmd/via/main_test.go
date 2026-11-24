@@ -744,8 +744,17 @@ func TestPrintReport_RateLimitDagger(t *testing.T) {
 	targetIP := net.ParseIP("192.0.2.4").To4()
 
 	tbl := hop.NewTable(30)
-	// TTL 1: 30% TTL loss, 20% echo loss, 5 echo samples → RateLimitYes.
-	seedHopRateLimit(t, tbl, 1, net.ParseIP("192.0.2.1"), 10, 7, 5, 4)
+	// TTL 1: 80% ICMP TTL probe loss, every one of 40 echoes answered →
+	// RateLimitYes. The hop's TTL probes also go mostly unanswered, so its
+	// TTL loss is high; the report must show the echo loss (0%) instead.
+	h1 := seedHopRateLimit(t, tbl, 1, net.ParseIP("192.0.2.1"), 40, 8, 40, 40)
+	for i := 0; i < 10; i++ {
+		h1.MarkRoundSent()
+	}
+	h1.MarkRoundEnd()
+	if got := h1.LossPercent(); got < 50 {
+		t.Fatalf("fixture: TTL 1 probe loss = %.1f%%, want a high figure to tell it apart from echo loss", got)
+	}
 	// TTL 2: no echo data → RateLimitUndetermined; must render plain loss.
 	seedHopRateLimit(t, tbl, 2, net.ParseIP("192.0.2.2"), 10, 5, 0, 0)
 
@@ -779,6 +788,10 @@ func TestPrintReport_RateLimitDagger(t *testing.T) {
 	}
 	if !strings.Contains(row1, "~") {
 		t.Errorf("TTL 1 (RateLimitYes) row missing tilde; got: %q", row1)
+	}
+	// The figure is the echo loss, as in the TUI, not the TTL probe loss.
+	if !strings.Contains(row1, "~0%†") {
+		t.Errorf("TTL 1 row should show echo-derived loss ~0%%†; got: %q", row1)
 	}
 	// RateLimitUndetermined: must render plain loss with no dagger/tilde.
 	if strings.Contains(row2, "†") {

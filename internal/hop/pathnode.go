@@ -69,6 +69,7 @@ type PathNode struct {
 	sparkCount int                          // entries filled (up to sparklineSize)
 
 	echoSentThisRound bool // an echo probe was dispatched to this node this round
+	isTarget          bool // this node is the trace's destination
 
 	recentAvgs     [trendWindowSize]float64 // per-round avg RTTs in ms
 	recentAvgIdx   int
@@ -488,7 +489,13 @@ const (
 	RateLimitYes
 )
 
-const rateLimitMinEchoSamples = 5
+const (
+	// rateLimitMinEchoSamples is the fewest echo probes needed for a verdict.
+	rateLimitMinEchoSamples = 20
+	// rateLimitZ is the z-score the difference between ICMP TTL probe loss
+	// and echo loss must reach: 2.58 is p < 0.01, two-sided.
+	rateLimitZ = 2.58
+)
 
 func (pn *PathNode) RateLimitState() RateLimitState {
 	pn.mu.Lock()
@@ -496,15 +503,51 @@ func (pn *PathNode) RateLimitState() RateLimitState {
 	return pn.rateLimitStateLocked()
 }
 
+// MarkTarget records that this node is the trace's destination. The
+// destination is never judged rate-limited: an echo to it is the same packet
+// on the same path as the ICMP TTL probe that reaches it, so any difference
+// between the two loss figures is sampling noise.
+func (pn *PathNode) MarkTarget() {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.isTarget = true
+}
+
 // rateLimitStateLocked is RateLimitState without acquiring pn.mu, for callers
 // that already hold it (e.g. RecordRoundAvg).
+//
+// A node is rate-limited when it answers direct echoes but not TTL-limited
+// probes: its ICMP TTL probe loss is significantly higher than its echo loss.
+// "Significantly" is a two-proportion z-test, so the verdict accounts for how
+// many probes of each kind there are; a fixed margin flags ordinary lossy
+// links whenever the two samples happen to differ.
 func (pn *PathNode) rateLimitStateLocked() RateLimitState {
 	if pn.icmpEcho.Sent < rateLimitMinEchoSamples {
 		return RateLimitUndetermined
 	}
-	echoLoss := pn.icmpEcho.ProbeLossPercent()
-	ttlLoss := pn.icmpTTL.RoundLossPercent()
-	if echoLoss < ttlLoss-5.0 {
+	if pn.isTarget {
+		return RateLimitNo
+	}
+	// ICMP TTL: one probe per round, so Sent (rounds) is probes sent.
+	n1, n2 := float64(pn.icmpTTL.Sent), float64(pn.icmpEcho.Sent)
+	if n1 == 0 {
+		return RateLimitNo
+	}
+	lost1 := n1 - float64(pn.icmpTTL.Received)
+	lost2 := n2 - float64(pn.icmpEcho.Received)
+	if lost1 < 0 {
+		lost1 = 0
+	}
+	if lost2 < 0 {
+		lost2 = 0
+	}
+	p1, p2 := lost1/n1, lost2/n2
+	pooled := (lost1 + lost2) / (n1 + n2)
+	variance := pooled * (1 - pooled) * (1/n1 + 1/n2)
+	if variance <= 0 {
+		return RateLimitNo // both lossless or both dead: nothing to tell apart
+	}
+	if (p1-p2)/math.Sqrt(variance) >= rateLimitZ {
 		return RateLimitYes
 	}
 	return RateLimitNo
@@ -536,6 +579,7 @@ func (pn *PathNode) Reset() {
 	pn.sparkIdx = 0
 	pn.sparkCount = 0
 	pn.echoSentThisRound = false
+	pn.isTarget = false
 	pn.recentAvgs = [trendWindowSize]float64{}
 	pn.recentAvgIdx = 0
 	pn.recentAvgCount = 0

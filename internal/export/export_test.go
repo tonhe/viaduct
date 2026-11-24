@@ -239,6 +239,58 @@ func TestBuildReport_ProbeCounts(t *testing.T) {
 	}
 }
 
+// TestBuildReport_NodeProbeTypes: each node exports its per-probe-type counts
+// and its rate-limit state, so a consumer can tell real loss from ICMP rate
+// limiting and can check the echo tier against a capture.
+func TestBuildReport_NodeProbeTypes(t *testing.T) {
+	table := hop.NewTable(1)
+	h := table.GetOrCreate(1)
+	ip := net.ParseIP("192.0.2.2")
+	// Three rounds. ICMP TTL answered once, primary answered every round;
+	// two echoes sent, one answered.
+	for round := 0; round < 3; round++ {
+		h.MarkRoundSentProbes(2)
+		if round == 0 {
+			h.AddSample(ip, time.Millisecond, 0, hop.KindICMPTTL)
+		}
+		h.AddSample(ip, time.Millisecond, 0, hop.KindPrimary)
+		if round > 0 {
+			for _, n := range h.GetNodes() {
+				n.MarkEchoSent()
+			}
+		}
+		if round == 1 {
+			h.AddSample(ip, time.Millisecond, 0, hop.KindEcho)
+		}
+		h.MarkRoundEnd()
+	}
+
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", 0, table, nil, nil, 1)
+	n := r.Hops[0].Nodes[0]
+	if n.Probes.ICMPTTL.Received != 1 {
+		t.Errorf("icmp_ttl received = %d, want 1", n.Probes.ICMPTTL.Received)
+	}
+	if n.Probes.Primary.Received != 3 {
+		t.Errorf("primary received = %d, want 3", n.Probes.Primary.Received)
+	}
+	if n.Probes.Echo.Sent != 2 || n.Probes.Echo.Received != 1 {
+		t.Errorf("echo sent/received = %d/%d, want 2/1", n.Probes.Echo.Sent, n.Probes.Echo.Received)
+	}
+	if n.RateLimited != "undetermined" {
+		t.Errorf("rate_limited = %q, want undetermined (too few echo samples)", n.RateLimited)
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"probes"`, `"icmp_ttl"`, `"primary"`, `"echo"`, `"rate_limited": "undetermined"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("JSON missing %s", want)
+		}
+	}
+}
+
 func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	table := hop.NewTable(2)
 

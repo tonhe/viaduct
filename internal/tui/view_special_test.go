@@ -80,8 +80,9 @@ func hopsIPv6Full() testOpt {
 //
 // hopsFull() already seeded TTL 3 with one response sample (IP 203.0.113.10).
 // We layer on top: mark that sample as "round received" then add 8 more silent
-// rounds → 1/9 = ~88.9% icmpTTL round loss (renders as ~89%). Then add 5 echo
-// probes, all received (0% echo loss), satisfying echoLoss < ttlLoss - 5.0.
+// rounds → heavy TTL probe loss. Then add 20 echo probes, all received (0%
+// echo loss), which the classifier reads as rate limiting; the loss cell
+// shows the echo-derived figure, ~0%†.
 //
 // NOTE: callers must apply this AFTER hopsFull() so the sample is already seeded.
 func withRateLimitedHop(ttl int) testOpt {
@@ -96,11 +97,12 @@ func withRateLimitedHop(ttl int) testOpt {
 			h.MarkRoundEnd()
 		}
 		// roundsSent=9, roundsRecvd=1 → 8/9 ≈ 88.9% → displayed as ~89%.
-		// Now drive echo ground-truth on the primary PathNode: 5 sent, 5 received
-		// (0% echo loss) so echoLoss(0) < ttlLoss(88.9) - 5.0 → RateLimitYes.
+		// Now drive echo ground-truth on the primary PathNode: 20 sent, 20
+		// received (0% echo loss). TTL probe loss far above echo loss with
+		// enough echo samples (the classifier needs 20) → RateLimitYes.
 		pn := h.PrimaryNode()
 		if pn != nil {
-			for i := 0; i < 5; i++ {
+			for i := 0; i < 20; i++ {
 				pn.MarkEchoSent()
 				pn.AddSample(20*time.Millisecond, 0, hop.KindEcho)
 			}

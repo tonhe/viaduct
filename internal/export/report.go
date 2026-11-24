@@ -48,6 +48,39 @@ type Node struct {
 	FlowIDs   []int    `json:"flow_ids,omitempty"`
 	Stability float64  `json:"stability_pct,omitempty"`
 	Trend     string   `json:"trend,omitempty"`
+
+	// Probes breaks the node's replies down by probe type. RateLimited is
+	// "yes", "no" or "undetermined": whether the node's TTL-probe loss is
+	// judged to be ICMP rate limiting rather than real loss.
+	Probes      NodeProbes `json:"probes"`
+	RateLimited string     `json:"rate_limited"`
+}
+
+// NodeProbes holds per-probe-type counts for one node.
+type NodeProbes struct {
+	ICMPTTL ProbeCount `json:"icmp_ttl"` // TTL-limited ICMP echo requests
+	Primary ProbeCount `json:"primary"`  // TTL-limited UDP or TCP probes
+	Echo    ProbeCount `json:"echo"`     // direct ICMP echo requests to this node
+}
+
+// ProbeCount is probes sent and replies received for one probe type. For the
+// two TTL-limited types, Sent counts rounds in which this node was known,
+// because a TTL-limited probe is addressed to a hop distance, not to a node;
+// for Echo it counts the echo requests actually sent to the node.
+type ProbeCount struct {
+	Sent     int `json:"sent"`
+	Received int `json:"received"`
+}
+
+func rateLimitName(s hop.RateLimitState) string {
+	switch s {
+	case hop.RateLimitYes:
+		return "yes"
+	case hop.RateLimitNo:
+		return "no"
+	default:
+		return "undetermined"
+	}
 }
 
 // RTTStats holds round-trip time statistics in milliseconds.
@@ -125,6 +158,13 @@ func BuildReport(version string, target string, targetIP net.IP,
 				Stability: node.StabilityPercent(),
 				Trend:     node.Trend(),
 			}
+			icmpTTL, primary, echo := node.ICMPTTLStats(), node.PrimaryStats(), node.EchoStats()
+			en.Probes = NodeProbes{
+				ICMPTTL: ProbeCount{Sent: icmpTTL.Sent, Received: icmpTTL.Received},
+				Primary: ProbeCount{Sent: primary.Sent, Received: primary.Received},
+				Echo:    ProbeCount{Sent: echo.Sent, Received: echo.Received},
+			}
+			en.RateLimited = rateLimitName(node.RateLimitState())
 
 			if en.Hostname == "" && resolver != nil {
 				if name, ok := resolver.Lookup(ip); ok {

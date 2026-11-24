@@ -700,6 +700,7 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 				h := table.GetOrCreate(r.TTL)
 				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
 				if r.IsTarget {
+					h.MarkTarget(r.IP)
 					cur := atomic.LoadInt32(&maxTTLHit)
 					if cur == 0 || int32(r.TTL) < cur {
 						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
@@ -826,6 +827,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 				h := table.GetOrCreate(r.TTL)
 				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
 				if r.IsTarget {
+					h.MarkTarget(r.IP)
 					cur := atomic.LoadInt32(&maxTTLHit)
 					if cur == 0 || int32(r.TTL) < cur {
 						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
@@ -954,8 +956,6 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 			continue
 		}
 
-		isRateLimited := h.PrimaryNode() != nil && h.PrimaryNode().RateLimitState() == hop.RateLimitYes
-
 		if multipath && h.IsDivergent() {
 			// Show one row per unique IP (PathNode) at this TTL
 			// Hop-level loss on first row, "-" on subsequent (ECMP can't attribute per-node)
@@ -963,7 +963,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 			sort.Slice(nodes, func(i, j int) bool {
 				return nodes[i].GetReceived() > nodes[j].GetReceived()
 			})
-			hopLoss := h.LossPercent()
+			hopLoss, isRateLimited := h.HeadlineLoss()
 			sent := h.Rounds()
 			nodeIdx := 0
 			for _, node := range nodes {
@@ -1059,12 +1059,12 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				asnLabel = asnLabel[:20]
 			}
 
-			loss := h.LossPercent()
+			loss, isRateLimited := h.HeadlineLoss()
 			var lossStr string
 			if isRateLimited {
-				// Echo-confirmed rate limiting: display an approximate loss
-				// with the dagger marker so the operator knows the TTL loss
-				// is an ICMP artifact, not real packet loss.
+				// Echo-confirmed rate limiting: the TTL probe loss is an ICMP
+				// artifact, so show the loss of direct echoes to the hop,
+				// marked with tilde and dagger. Same figure as the TUI.
 				lossStr = fmt.Sprintf("~%.0f%%†", loss)
 			} else {
 				lossStr = fmt.Sprintf("%.1f%%", loss)
