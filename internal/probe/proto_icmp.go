@@ -13,10 +13,14 @@ type ICMPProtocol struct {
 	sessionID int // random ID to avoid collision between concurrent via instances
 }
 
-// NewICMPProtocol creates an ICMP protocol with a random session ID.
-func NewICMPProtocol() *ICMPProtocol {
+// NewICMPProtocol creates an ICMP protocol with a session ID from config or random.
+func NewICMPProtocol(cfg Config) *ICMPProtocol {
+	id := cfg.ICMPID
+	if id == 0 {
+		id = 1 + rand.Intn(65534) // 1..65534
+	}
 	return &ICMPProtocol{
-		sessionID: rand.Intn(0xFFFF-1) + 1, // 1..65534
+		sessionID: id,
 	}
 }
 

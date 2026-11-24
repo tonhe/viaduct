@@ -15,18 +15,18 @@ func buildTestTable() *hop.Table {
 	t := hop.NewTable(30)
 
 	h1 := t.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 6*time.Millisecond, 0)
+	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.AddSample(net.ParseIP("10.0.0.1"), 6*time.Millisecond, 0, hop.KindPrimary)
 
 	h2 := t.GetOrCreate(2)
-	h2.AddSample(net.ParseIP("192.168.1.1"), 10*time.Millisecond, 0)
-	h2.AddSample(net.ParseIP("192.168.1.2"), 12*time.Millisecond, 1)
+	h2.AddSample(net.ParseIP("192.168.1.1"), 10*time.Millisecond, 0, hop.KindPrimary)
+	h2.AddSample(net.ParseIP("192.168.1.2"), 12*time.Millisecond, 1, hop.KindPrimary)
 
 	// TTL 3 = gap hop (no samples)
 	t.GetOrCreate(3)
 
 	h4 := t.GetOrCreate(4)
-	h4.AddSample(net.ParseIP("8.8.8.8"), 20*time.Millisecond, 0)
+	h4.AddSample(net.ParseIP("8.8.8.8"), 20*time.Millisecond, 0, hop.KindPrimary)
 
 	return t
 }
@@ -205,17 +205,18 @@ func TestBuildReport_HopWithNoNodes(t *testing.T) {
 
 	// TTL 1: real hop with data
 	h1 := table.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0)
-	h1.IncrementSent()
+	h1.MarkRoundSent()
+	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.MarkRoundEnd()
 
-	// TTL 2: hop created in table but never receives any probe replies
-	// GetOrCreate creates it; IncrementSent makes sentTotal non-zero so
-	// LossPercent() would be non-zero. This ensures the gap path
-	// (Hop{TTL: ttl}) gives zero loss, while the non-gap path would give
-	// non-zero loss — making the two paths distinguishable.
+	// TTL 2: hop created in table but never receives any probe replies.
+	// MarkRoundSent makes roundsSent non-zero so LossPercent() would be 100%.
+	// This ensures the gap path (Hop{TTL: ttl}) gives zero loss, while the
+	// non-gap path would give non-zero loss — making the two paths distinguishable.
 	h2 := table.GetOrCreate(2)
 	for i := 0; i < 10; i++ {
-		h2.IncrementSent()
+		h2.MarkRoundSent()
+		h2.MarkRoundEnd()
 	}
 	// h2 has no AddSample calls → GetIP() returns nil → must be treated as gap.
 

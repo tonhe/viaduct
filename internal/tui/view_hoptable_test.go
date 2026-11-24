@@ -24,12 +24,12 @@ func hopsSingle() testOpt {
 	)
 }
 
-// withTargetHit sets m.targetHit = true and m.maxTTLHit = ttl so the status
+// withTargetHit sets targetHit = true and maxTTLHit = ttl so the status
 // bar renders the "Tracing... N/M hops" form used when the destination is reached.
 func withTargetHit(ttl int) testOpt {
 	return func(m *Model) {
-		m.targetHit = true
-		m.maxTTLHit = ttl
+		m.sessions[0].targetHit = true
+		m.sessions[0].maxTTLHit = ttl
 	}
 }
 

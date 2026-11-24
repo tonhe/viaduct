@@ -5,9 +5,10 @@ import (
 )
 
 func TestAutoSelector_StartsWithPrimary(t *testing.T) {
+	cfg := DefaultConfig()
 	auto := NewAutoSelector(
 		NewUDPProtocol(33434),
-		NewICMPProtocol(),
+		NewICMPProtocol(cfg),
 	)
 	if auto.Name() != "udp" {
 		t.Errorf("expected 'udp', got %q", auto.Name())
@@ -21,9 +22,10 @@ func TestAutoSelector_StartsWithPrimary(t *testing.T) {
 }
 
 func TestAutoSelector_FallbackSwitchesProtocol(t *testing.T) {
+	cfg := DefaultConfig()
 	auto := NewAutoSelector(
 		NewUDPProtocol(33434),
-		NewICMPProtocol(),
+		NewICMPProtocol(cfg),
 	)
 	auto.Fallback()
 	if auto.Name() != "icmp" {
@@ -38,11 +40,11 @@ func TestAutoSelector_FallbackSwitchesProtocol(t *testing.T) {
 }
 
 func TestAutoSelector_DelegatesToActive(t *testing.T) {
+	cfg := DefaultConfig()
 	auto := NewAutoSelector(
 		NewUDPProtocol(33434),
-		NewICMPProtocol(),
+		NewICMPProtocol(cfg),
 	)
-	cfg := DefaultConfig()
 
 	// Before fallback: should build UDP probes
 	pkt, _, err := auto.BuildProbe(0, 5, 10, cfg)
@@ -65,9 +67,10 @@ func TestAutoSelector_DelegatesToActive(t *testing.T) {
 }
 
 func TestAutoSelector_FallbackIsOneWay(t *testing.T) {
+	cfg := DefaultConfig()
 	auto := NewAutoSelector(
 		NewUDPProtocol(33434),
-		NewICMPProtocol(),
+		NewICMPProtocol(cfg),
 	)
 	auto.Fallback()
 	if auto.Name() != "icmp" {
@@ -81,9 +84,10 @@ func TestAutoSelector_FallbackIsOneWay(t *testing.T) {
 }
 
 func TestAutoSelector_IsDestReachedICMP_Delegates(t *testing.T) {
+	cfg := DefaultConfig()
 	auto := NewAutoSelector(
 		NewUDPProtocol(33434),
-		NewICMPProtocol(),
+		NewICMPProtocol(cfg),
 	)
 	// UDP: port unreachable (type 3, code 3) means dest reached
 	if !auto.IsDestReachedICMP(3, 3) {

@@ -14,6 +14,12 @@ clean:
 
 install: build
 	mkdir -p $(HOME)/bin
+	# Unlink before copy so the destination gets a fresh inode. Overwriting an
+	# ad-hoc-signed binary in place (plain cp) leaves AMFI's cached cdhash for
+	# the old inode in force; the new bytes fail that check and every exec is
+	# SIGKILLed ("zsh: killed") even though `codesign -v` passes. rm sidesteps
+	# the cache. BSD `install` does the same unlink-then-write.
+	rm -f $(HOME)/bin/$(BINARY)
 	cp $(BINARY) $(HOME)/bin/$(BINARY)
 
 # Run all tests (fast). Matches what basic CI runs.

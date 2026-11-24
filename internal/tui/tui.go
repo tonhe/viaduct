@@ -16,7 +16,6 @@ import (
 	"github.com/tonhe/viaduct/internal/config"
 	"github.com/tonhe/viaduct/internal/export"
 	"github.com/tonhe/viaduct/internal/hop"
-	"github.com/tonhe/viaduct/internal/ping"
 	"github.com/tonhe/viaduct/internal/probe"
 	"github.com/tonhe/viaduct/internal/resolve"
 	"github.com/tonhe/viaduct/internal/theme"
@@ -83,6 +82,25 @@ func trendImpStyle() lipgloss.Style {
 }
 func alertStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Current.Base08).Bold(true)
+}
+
+// lossStyleFor picks the loss-cell style based on the loss percent: green for
+// 0%, red otherwise. Rate-limited cells bypass this and use rateLimitStyle.
+func lossStyleFor(loss float64) lipgloss.Style {
+	if loss == 0 {
+		return okStyle()
+	}
+	return lossStyle()
+}
+
+// padCell left-aligns plain (unstyled) text to width columns. Styling must be
+// applied AFTER padding: fmt pads by byte length, so styling first garbles
+// real terminals while passing color-stripped tests.
+func padCell(plain string, width int) string {
+	if w := lipgloss.Width(plain); w < width {
+		return plain + strings.Repeat(" ", width-w)
+	}
+	return plain
 }
 
 // hexToANSI converts a lipgloss.Color hex string to a 24-bit ANSI escape.
@@ -162,40 +180,46 @@ func barBg(line string, width int) string {
 	return paintLine(line, width, theme.Current.Base04, theme.Current.Base01)
 }
 
+// dnsSubmitter is the narrow interface used by onHopUpdate to queue IPs for
+// reverse-DNS resolution. The production implementation is *resolve.Resolver;
+// tests may inject a recording fake.
+type dnsSubmitter interface {
+	Submit(ip net.IP) bool
+}
+
 // Model is the bubbletea model for the TUI.
 type Model struct {
-	target     string
-	targetIP   net.IP
-	version    string
-	table      *hop.Table
-	resolver   *resolve.Resolver
-	enricher   *asn.Enricher
-	probeCfg   probe.Config
-	probeCount int
-	startTime  time.Time
-	err        error
-	width      int
-	height     int
-	targetHit    bool
-	maxTTLHit    int
+	// sessions holds one TargetSession per trace target. Single-target mode
+	// always has exactly one session at index 0. The slice is fixed at startup;
+	// indices in target-indexed messages stay valid for the Model's lifetime.
+	sessions   []*TargetSession
+	focusedIdx int
+
+	// Global (non-per-target) fields.
+	version      string
+	resolver     *resolve.Resolver // read-only lookups only; submissions go through dnsSub
+	dnsSub       dnsSubmitter      // used by onHopUpdate; defaults to resolver
+	enricher     *asn.Enricher
+	startTime    time.Time
+	err          error
+	width        int
+	height       int
 	paused       bool
 	dnsEnabled   bool
 	viewMode     ViewMode
-	tracer           *probe.Tracer
-	scrollOffset     int       // number of lines scrolled from bottom (0 = bottom)
-	autoScroll       bool      // true = follow latest data
-	protocolName     string    // "icmp", "udp", "tcp", "auto"
-	switchStatusMsg  string    // transient status for auto mode switch
-	switchStatusTime time.Time // when switch status was set
-	pingStats        map[string]*ping.Stat
-	alertEngine      *AlertEngine
-	config           *config.Config  // reference to persisted config
-	settings         *SettingsModel  // nil when settings closed
-	showSettings     bool
+	columnView   bool // true = side-by-side column layout (multi-target only)
+	scrollOffset int  // number of lines scrolled from bottom (0 = bottom)
+	autoScroll   bool // true = follow latest data
+	config       *config.Config // reference to persisted config
+	settings     *SettingsModel // nil when settings closed
+	showSettings bool
 	exportStatusMsg  string
 	exportStatusTime time.Time
 	nowFunc          func() time.Time // for test determinism; nil defaults to time.Now
 }
+
+// focused returns the currently focused session. Model always has at least one session.
+func (m Model) focused() *TargetSession { return m.sessions[m.focusedIdx] }
 
 // now returns the current time, using the injected nowFunc if set,
 // otherwise time.Now.
@@ -207,36 +231,24 @@ func (m Model) now() time.Time {
 }
 
 // New creates a new TUI model.
-func New(target string, targetIP net.IP, cfg probe.Config, version string, protocolName string, noASN bool, noPing bool, alertLoss float64, alertLatency time.Duration, alertRounds int, noAlert bool, appCfg *config.Config) Model {
-	var ae *AlertEngine
-	if !noAlert {
-		ae = NewAlertEngine(alertLoss, alertLatency, alertRounds)
-	}
+func New(target string, targetIP net.IP, cfg probe.Config, version string, protocolName string, noASN bool, alertLoss float64, alertLatency time.Duration, alertRounds int, noAlert bool, appCfg *config.Config) Model {
+	s := newSession(target, targetIP, cfg, protocolName, alertLoss, alertLatency, alertRounds, noAlert)
+	res := resolve.New(4)
 	return Model{
-		target:       target,
-		targetIP:     targetIP,
-		version:      version,
-		table:        hop.NewTable(cfg.MaxHops),
-		resolver: resolve.New(4),
+		sessions:  []*TargetSession{s},
+		version:   version,
+		resolver:  res,
+		dnsSub:    res,
 		enricher: func() *asn.Enricher {
 			if noASN {
 				return nil
 			}
 			return asn.New(4)
 		}(),
-		probeCfg: cfg,
-		startTime:    time.Now(),
-		dnsEnabled:   !cfg.NoDNS,
-		autoScroll:   true,
-		protocolName: protocolName,
-		pingStats: func() map[string]*ping.Stat {
-			if noPing {
-				return nil
-			}
-			return make(map[string]*ping.Stat)
-		}(),
-		alertEngine: ae,
-		config:      appCfg,
+		startTime:  time.Now(),
+		dnsEnabled: !cfg.NoDNS,
+		autoScroll: true,
+		config:     appCfg,
 	}
 }
 
@@ -245,14 +257,26 @@ func (m *Model) Resolver() *resolve.Resolver {
 	return m.resolver
 }
 
-// Table returns the hop table.
+// Table returns the hop table for the primary (first) session.
 func (m *Model) Table() *hop.Table {
-	return m.table
+	return m.sessions[0].table
 }
 
-// SetTracer sets the probe tracer so the TUI can pause/unpause it.
+// SetTracer sets the probe tracer on the primary (first) session so the TUI
+// can pause/unpause it.
 func (m *Model) SetTracer(t *probe.Tracer) {
-	m.tracer = t
+	m.sessions[0].tracer = t
+}
+
+// SessionTable returns the hop table for session i.
+func (m *Model) SessionTable(i int) *hop.Table {
+	return m.sessions[i].table
+}
+
+// SetSessionTracer sets the probe tracer on session i and wires the echo sink.
+func (m *Model) SetSessionTracer(i int, t *probe.Tracer) {
+	m.sessions[i].tracer = t
+	m.sessions[i].echoSink = t
 }
 
 // Enricher returns the ASN enricher so main.go can start it and submit IPs.
@@ -286,10 +310,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onHostname(msg)
 	case ASNMsg:
 		return m.onASN(msg)
-	case PingUpdateMsg:
-		return m.onPingUpdate(msg)
 	case RoundEndMsg:
 		return m.onRoundEnd(msg)
+	case EchoSentMsg:
+		return m.onEchoSent(msg)
 	case TickMsg:
 		return m.onTick(msg)
 	case ProtocolSwitchMsg:
@@ -308,18 +332,28 @@ func (m Model) View() string {
 		return m.errorView()
 	}
 
+	// Probe Detail view uses a custom full-page renderer.
+	if m.viewMode == ViewProbeDetail {
+		return m.viewProbeDetail()
+	}
+
+	s := m.focused()
 	var b strings.Builder
 
 	// Header bar
-	protoLabel := strings.ToUpper(m.protocolName)
-	if m.protocolName == "auto" {
-		protoLabel = "Auto → " + strings.ToUpper(m.probeCfg.Protocol.Name())
+	protoLabel := strings.ToUpper(s.protocolName)
+	if s.protocolName == "auto" {
+		protoLabel = "Auto → " + strings.ToUpper(s.probeCfg.Protocol.Name())
 	}
-	if m.protocolName != "icmp" && m.probeCfg.NumPaths > 1 {
+	if s.protocolName != "icmp" && s.probeCfg.NumPaths > 1 {
 		protoLabel += "/ECMP"
 	}
+	targetIPStr := "(unresolved)"
+	if s.targetIP != nil {
+		targetIPStr = s.targetIP.String()
+	}
 	header := fmt.Sprintf("via %s   Target: %s (%s)    Proto: %s    Probes: %d",
-		m.version, m.target, m.targetIP.String(), protoLabel, m.probeCount)
+		m.version, s.target, targetIPStr, protoLabel, s.probeCount)
 	if m.viewMode != ViewDefault {
 		header += fmt.Sprintf("    View: %s", m.viewMode.String())
 	}
@@ -330,140 +364,213 @@ func (m Model) View() string {
 	b.WriteString(barBg(dimStyle().Render(strings.Repeat("─", max(m.width, 60))), m.width))
 	b.WriteString("\n")
 
+	// Column comparison view: side-by-side layout when more than one session
+	// is active and the user has toggled column view with 'c'.
+	if len(m.sessions) > 1 && m.columnView {
+		colBlock := m.renderColumns()
+		b.WriteString(colBlock)
+		// Fill remaining space above the status bar.
+		// usedCol = 2 lines already written (title + separator) + lines in colBlock
+		colLines := strings.Count(colBlock, "\n")
+		usedCol := 2 + colLines
+		emptyLine := lineBg("", m.width)
+		if m.height > 0 && usedCol+1 < m.height { // +1 for status bar
+			for i := usedCol + 1; i < m.height; i++ {
+				b.WriteString(emptyLine)
+				b.WriteString("\n")
+			}
+		}
+		// Status bar consistent with summary branch
+		elapsed := m.now().Sub(m.startTime).Truncate(time.Second)
+		traceStatus := fmt.Sprintf("Tracing... %d hops", m.focused().table.MaxTTLSeen())
+		if m.paused {
+			traceStatus = "PAUSED"
+		}
+		dnsLabel := "on"
+		if !m.dnsEnabled {
+			dnsLabel = "off"
+		}
+		// Column view: surface the focus/mark/select keys on the status bar.
+		// space marks the focused target; when any are marked, only marked panes
+		// show — so mark doubles as pane selection.
+		status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s    tab/↑↓:focus  space:mark  c:summary  e:export  p:pause  r:reset  q:quit",
+			traceStatus, elapsed, dnsLabel)
+		b.WriteString(barBg(statusStyle().Render(status), m.width))
+		if m.showSettings && m.settings != nil {
+			return m.settings.View()
+		}
+		return b.String()
+	}
+
+	// Multi-target summary panel: render above the detail pane when more than
+	// one session is active and column view is not in use.
+	multiTarget := len(m.sessions) > 1 && !m.columnView
+	if multiTarget {
+		b.WriteString(m.renderSummary())
+	}
+
 	// Column headers (adaptive to terminal width)
 	layout := m.getLayout()
 	colHeader := m.renderColumnHeader(layout)
 	b.WriteString(lineBg(dimStyle().Render(colHeader), m.width))
 	b.WriteString("\n")
 
-	// Hop rows — iterate by TTL to show gap hops as *
-	hops := m.table.Snapshot()
-	hopMap := make(map[int]*hop.Hop, len(hops))
-	for _, h := range hops {
-		hopMap[h.TTL] = h
+	// Determine how many hop lines we can show.
+	// Fixed lines consumed: 3 header lines (title + separator + col header) + 1 status bar.
+	// In multi-target mode subtract the summary panel (header + one row per session).
+	fixedLines := 4
+	if multiTarget {
+		fixedLines += m.summaryLineCount()
 	}
-	maxTTL := m.table.MaxTTLSeen()
-	if m.maxTTLHit > 0 && m.maxTTLHit < maxTTL {
-		maxTTL = m.maxTTLHit
-	}
-
-	rateLimited := hop.DetectRateLimited(hops, maxTTL)
-
-	// Compute deltas for Health/Latency views
-	deltas := computeDeltas(hopMap, maxTTL)
-	maxDeltaTTL := largestDeltaTTL(deltas)
-
-	// Determine how many hop lines we can show
 	availableRows := 0
-	if m.height > 4 {
-		availableRows = m.height - 4 // 3 header lines + 1 status line
+	if m.height > fixedLines {
+		availableRows = m.height - fixedLines
 	}
 
-	// Compute per-divergent-hop node caps based on available vertical space.
-	// Baseline: 1 line per TTL. Surplus rows are distributed top-down to
-	// divergent hops, expanding each by its extra nodes until space runs out.
-	type divInfo struct {
-		ttl      int
-		maxNodes int
-		total    int // total nodes at this TTL
-	}
-	var divHops []divInfo
-	baseline := maxTTL // 1 line per TTL
-	for ttl := 1; ttl <= maxTTL; ttl++ {
-		if h, ok := hopMap[ttl]; ok && h.IsDivergent() {
-			nodes := h.GetNodes()
-			divHops = append(divHops, divInfo{ttl: ttl, maxNodes: 1, total: len(nodes)})
-		}
-	}
-	surplus := availableRows - baseline
-	if surplus < 0 {
-		surplus = 0
-	}
-	// Distribute surplus rows top-down
-	for i := range divHops {
-		extra := divHops[i].total - 1 // nodes beyond the primary
-		if extra > surplus {
-			extra = surplus
-		}
-		divHops[i].maxNodes += extra
-		surplus -= extra
-		if surplus <= 0 {
-			break
-		}
-	}
-	// Build a TTL→maxNodes lookup
-	divCap := make(map[int]int, len(divHops))
-	for _, d := range divHops {
-		divCap[d.ttl] = d.maxNodes
-	}
-
-	// Build all hop lines
+	// hopLines holds all rendered hop rows before viewport clipping.
+	// displayLines is the subset actually written to the builder.
 	var hopLines []string
-	for ttl := 1; ttl <= maxTTL; ttl++ {
-		h, ok := hopMap[ttl]
-		if !ok || h.GetIP() == nil {
-			star := starStyle().Render("*")
-			treeGap := ""
-			if m.probeCfg.NumPaths > 1 {
-				treeGap = "     " // 4 chars + 1 space separator
-			}
-			hopLines = append(hopLines, fmt.Sprintf("%s %s%s", dimStyle().Render(fmt.Sprintf("%-3d", ttl)), treeGap, star))
-			continue
+	var displayLines []string
+
+	// When the focused session failed to start, render an error detail pane
+	// in place of the hop table and skip all hop-rendering logic.
+	if s.startErr != nil {
+		b.WriteString(m.renderFocusedError(s, availableRows))
+		// displayLines stays nil; displayCount below will be 0 because
+		// renderFocusedError already filled availableRows lines.
+		displayLines = nil
+	} else {
+		// Hop rows — iterate by TTL to show gap hops as *
+		hops := s.table.Snapshot()
+		hopMap := make(map[int]*hop.Hop, len(hops))
+		for _, h := range hops {
+			hopMap[h.TTL] = h
 		}
-		if h.IsDivergent() {
-			cap := divCap[ttl]
-			if cap < 1 {
-				cap = 1
+		hopMaxTTL := s.table.MaxTTLSeen()
+		if s.maxTTLHit > 0 && s.maxTTLHit < hopMaxTTL {
+			hopMaxTTL = s.maxTTLHit
+		}
+
+		// Compute deltas for Health/Latency views
+		deltas := computeDeltas(hopMap, hopMaxTTL)
+		maxDeltaTTL := largestDeltaTTL(deltas)
+
+		// Compute per-divergent-hop node caps based on available vertical space.
+		// Baseline: 1 line per TTL. Surplus rows are distributed top-down to
+		// divergent hops, expanding each by its extra nodes until space runs out.
+		type divInfo struct {
+			ttl      int
+			maxNodes int
+			total    int // total nodes at this TTL
+		}
+		var divHops []divInfo
+		baseline := hopMaxTTL // 1 line per TTL
+		for ttl := 1; ttl <= hopMaxTTL; ttl++ {
+			if h, ok := hopMap[ttl]; ok && h.IsDivergent() {
+				nodes := h.GetNodes()
+				divHops = append(divHops, divInfo{ttl: ttl, maxNodes: 1, total: len(nodes)})
 			}
-			hopLines = append(hopLines, m.renderDivergentHop(h, rateLimited[ttl], deltas, maxDeltaTTL, cap)...)
-		} else {
-			hopLines = append(hopLines, m.renderHop(h, rateLimited[ttl], deltas, maxDeltaTTL))
+		}
+		surplus := availableRows - baseline
+		if surplus < 0 {
+			surplus = 0
+		}
+		// Distribute surplus rows top-down
+		for i := range divHops {
+			extra := divHops[i].total - 1 // nodes beyond the primary
+			if extra > surplus {
+				extra = surplus
+			}
+			divHops[i].maxNodes += extra
+			surplus -= extra
+			if surplus <= 0 {
+				break
+			}
+		}
+		// Build a TTL→maxNodes lookup
+		divCap := make(map[int]int, len(divHops))
+		for _, d := range divHops {
+			divCap[d.ttl] = d.maxNodes
+		}
+
+		// Build all hop lines
+		for ttl := 1; ttl <= hopMaxTTL; ttl++ {
+			h, ok := hopMap[ttl]
+			if !ok || h.GetIP() == nil {
+				star := starStyle().Render("*")
+				treeGap := ""
+				if s.probeCfg.NumPaths > 1 {
+					treeGap = "     " // 4 chars + 1 space separator
+				}
+				hopLines = append(hopLines, fmt.Sprintf("%s %s%s", dimStyle().Render(fmt.Sprintf("%-3d", ttl)), treeGap, star))
+				continue
+			}
+			if h.IsDivergent() {
+				cap := divCap[ttl]
+				if cap < 1 {
+					cap = 1
+				}
+				hopLines = append(hopLines, m.renderDivergentHop(h, deltas, maxDeltaTTL, cap)...)
+			} else {
+				hopLines = append(hopLines, m.renderHop(h, deltas, maxDeltaTTL))
+			}
+		}
+
+		displayLines = hopLines
+		if availableRows > 0 && len(hopLines) > availableRows {
+			if m.autoScroll {
+				// Auto-scroll: show the last N lines
+				displayLines = hopLines[len(hopLines)-availableRows:]
+			} else {
+				// Manual scroll: offset from bottom
+				offset := m.scrollOffset
+				maxOffset := len(hopLines) - availableRows
+				if maxOffset < 0 {
+					maxOffset = 0
+				}
+				if offset > maxOffset {
+					offset = maxOffset
+				}
+				end := len(hopLines) - offset
+				start := end - availableRows
+				if start < 0 {
+					start = 0
+				}
+				displayLines = hopLines[start:end]
+			}
+		}
+
+		for _, line := range displayLines {
+			b.WriteString(lineBg(line, m.width))
+			b.WriteString("\n")
 		}
 	}
 
-	displayLines := hopLines
-	if availableRows > 0 && len(hopLines) > availableRows {
-		if m.autoScroll {
-			// Auto-scroll: show the last N lines
-			displayLines = hopLines[len(hopLines)-availableRows:]
-		} else {
-			// Manual scroll: offset from bottom
-			offset := m.scrollOffset
-			maxOffset := len(hopLines) - availableRows
-			if maxOffset < 0 {
-				maxOffset = 0
-			}
-			if offset > maxOffset {
-				offset = maxOffset
-			}
-			end := len(hopLines) - offset
-			start := end - availableRows
-			if start < 0 {
-				start = 0
-			}
-			displayLines = hopLines[start:end]
-		}
-	}
-
-	for _, line := range displayLines {
-		b.WriteString(lineBg(line, m.width))
-		b.WriteString("\n")
-	}
-
-	// Alert bar (if degraded)
+	// Alert bar (if degraded). In multi-target mode, prefix with the target
+	// name so the operator knows which trace is degraded.
 	alertLine := ""
-	if m.alertEngine != nil {
-		alertLine = m.alertEngine.Message()
+	if s.alertEngine != nil {
+		alertLine = s.alertEngine.Message()
+		if alertLine != "" && multiTarget {
+			alertLine = s.target + ": " + alertLine
+		}
 	}
 
-	// Fill remaining space with themed background
+	// Fill remaining space with themed background.
+	// usedLines accounts for: 3 header lines, summary panel (if any),
+	// 1 col-header line (already in fixedLines), displayed hop lines,
+	// optional alert bar, 1 status bar.
 	emptyLine := lineBg("", m.width)
 	displayCount := len(displayLines)
+	if s.startErr != nil {
+		// renderFocusedError already wrote availableRows lines.
+		displayCount = availableRows
+	}
 	extraLines := 0
 	if alertLine != "" {
 		extraLines = 1
 	}
-	usedLines := 3 + displayCount + extraLines + 1
+	usedLines := fixedLines + displayCount + extraLines
 	if m.height > 0 && usedLines < m.height {
 		for i := 0; i < m.height-usedLines; i++ {
 			b.WriteString(emptyLine)
@@ -477,13 +584,13 @@ func (m Model) View() string {
 	}
 
 	// Status bar
-	maxTTL = m.table.MaxTTLSeen()
+	maxTTL := s.table.MaxTTLSeen()
 	elapsed := m.now().Sub(m.startTime).Truncate(time.Second)
 	var traceStatus string
 	if m.paused {
 		traceStatus = "PAUSED"
-	} else if m.targetHit {
-		traceStatus = fmt.Sprintf("Tracing... %d/%d hops", maxTTL, m.maxTTLHit)
+	} else if s.targetHit {
+		traceStatus = fmt.Sprintf("Tracing... %d/%d hops", maxTTL, s.maxTTLHit)
 	} else {
 		traceStatus = fmt.Sprintf("Tracing... %d hops", maxTTL)
 	}
@@ -493,12 +600,12 @@ func (m Model) View() string {
 		dnsLabel = "off"
 	}
 	flowLabel := ""
-	if m.probeCfg.NumPaths > 1 {
-		flowLabel = fmt.Sprintf("    %d flows", m.probeCfg.NumPaths)
+	if s.probeCfg.NumPaths > 1 {
+		flowLabel = fmt.Sprintf("    %d flows", s.probeCfg.NumPaths)
 	}
 	switchHint := ""
-	if m.switchStatusMsg != "" && m.now().Sub(m.switchStatusTime) < 5*time.Second {
-		switchHint = "    " + m.switchStatusMsg
+	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
+		switchHint = "    " + s.switchStatusMsg
 	}
 	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
 		switchHint = "    " + m.exportStatusMsg
@@ -507,8 +614,12 @@ func (m Model) View() string {
 	if !m.autoScroll && len(hopLines) > availableRows {
 		scrollHint = " [scrolled] G:bottom g:top"
 	}
-	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset [d] %s q:quit%s",
-		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, m.viewMode.Next().String(), scrollHint)
+	multiHint := ""
+	if len(m.sessions) > 1 {
+		multiHint = "    ↑/↓:target space:mark c:columns"
+	}
+	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset [d] %s q:quit%s%s",
+		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, m.viewMode.Next().String(), scrollHint, multiHint)
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
 
 	// Settings overlay — rendered on top of everything else.
@@ -525,7 +636,7 @@ type columnLayout struct {
 	showTree      bool // ECMP tree connector column (4 chars)
 	showHostname  bool
 	hostnameWidth int
-	showSnt       bool
+	showRnd       bool
 	showBest      bool
 	showWrst      bool
 	showStDev     bool
@@ -549,8 +660,9 @@ func (m Model) asnColumnWidth(full bool) int {
 	if m.enricher == nil {
 		return min
 	}
+	s := m.focused()
 	maxLen := 0
-	for _, h := range m.table.Snapshot() {
+	for _, h := range s.table.Snapshot() {
 		ip := h.GetIP()
 		if ip == nil {
 			continue
@@ -581,12 +693,13 @@ func (m Model) getLayout() columnLayout {
 		w = 40
 	}
 
+	s := m.focused()
 	// Compute IP column width based on actual hops (handles IPv6 addresses).
-	hops := m.table.Snapshot()
+	hops := s.table.Snapshot()
 	ipWidth := computeIPColWidth(hops)
 	layout := columnLayout{ipWidth: ipWidth}
 
-	if m.probeCfg.NumPaths > 1 {
+	if s.probeCfg.NumPaths > 1 {
 		layout.showTree = true
 	}
 
@@ -596,7 +709,7 @@ func (m Model) getLayout() columnLayout {
 	//
 	// Column widths (from renderColumnHeader / renderHopRow):
 	//   # = 3, tree = 4, IP = ipWidth, Hostname = hostnameWidth,
-	//   ASN = asnWidth, Loss% = 8, Snt = 5, Avg/Best/Wrst/StDev/Last/Delta/GMean/Jttr/Javg = 7,
+	//   ASN = asnWidth, Loss% = 8, Rnd = 5, Avg/Best/Wrst/StDev/Last/Delta/GMean/Jttr/Javg = 7,
 	//   Spark = 14, Trend = 9
 	// Parts are joined with " " (1 char per gap), so total separators = numParts - 1.
 	//
@@ -730,13 +843,13 @@ func (m Model) getLayout() columnLayout {
 		}
 
 	default: // ViewDefault
-		// Priority: Hostname, Snt, Last, ASN(short), Best, Wrst, StDev, host grow, host grow, ASN(full)
+		// Priority: Hostname, Rnd, Last, ASN(short), Best, Wrst, StDev, host grow, host grow, ASN(full)
 		if tryAdd(15 + 1) {
 			layout.showHostname = true
 			layout.hostnameWidth = 15
 		}
 		if tryAdd(5 + 1) {
-			layout.showSnt = true
+			layout.showRnd = true
 		}
 		if tryAdd(7 + 1) {
 			layout.showLast = true
@@ -793,7 +906,7 @@ func (l *columnLayout) computeWidth() int {
 		w += l.asnWidth
 		parts++
 	}
-	if l.showSnt {
+	if l.showRnd {
 		w += 5
 		parts++
 	}
@@ -904,8 +1017,8 @@ func (l *columnLayout) clampToWidth(maxWidth int) {
 			l.showLast = false
 			continue
 		}
-		if l.showSnt {
-			l.showSnt = false
+		if l.showRnd {
+			l.showRnd = false
 			continue
 		}
 		if l.showASN {
@@ -941,8 +1054,8 @@ func (m Model) renderColumnHeader(layout columnLayout) string {
 		parts = append(parts, fmt.Sprintf("%-*s", layout.asnWidth, "ASN"))
 	}
 	parts = append(parts, fmt.Sprintf("%-8s", "Loss%"))
-	if layout.showSnt {
-		parts = append(parts, fmt.Sprintf("%-5s", "Snt"))
+	if layout.showRnd {
+		parts = append(parts, fmt.Sprintf("%-5s", "Rnd"))
 	}
 	parts = append(parts, fmt.Sprintf("%-7s", "Avg"))
 	if layout.showBest {
@@ -1018,7 +1131,7 @@ func largestDeltaTTL(deltas []time.Duration) int {
 	return maxTTL
 }
 
-func (m Model) renderHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration, maxDeltaTTL int) string {
+func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) string {
 	layout := m.getLayout()
 	ttlStr := fmt.Sprintf("%-3d", h.TTL)
 
@@ -1057,85 +1170,52 @@ func (m Model) renderHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration,
 		parts = append(parts, m.renderASNCell(ip, m.prevASNForTTL(h.TTL), layout.asnWidth, layout.asnFull))
 	}
 
-	// Check for ping supplement data
-	var ps *ping.Stat
-	if isRateLimited && m.pingStats != nil {
-		ps = m.pingStats[ip.String()]
+	// Loss cell — rate-limited nodes report echo-based ground truth with a "†"
+	// dagger; all other cells use the hop-level TTL-probe loss percent.
+	pn := h.PrimaryNode()
+	state := hop.RateLimitUndetermined
+	if pn != nil {
+		state = pn.RateLimitState()
 	}
-
-	// Loss%
-	if ps != nil && ps.Sent > 0 {
-		loss := ps.LossPercent()
-		if loss == 0 {
-			parts = append(parts, okStyle().Render(fmt.Sprintf("%-8s", "0.0%")))
-		} else {
-			parts = append(parts, lossStyle().Render(fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))))
-		}
+	if state == hop.RateLimitYes {
+		echo := pn.EchoStats()
+		echoLoss := echo.ProbeLossPercent()
+		plain := fmt.Sprintf("~%.0f%%†", echoLoss)
+		parts = append(parts, rateLimitStyle().Render(padCell(plain, 8)))
 	} else {
 		loss := h.LossPercent()
+		plain := fmt.Sprintf("%.1f%%", loss)
 		if loss == 0 {
-			parts = append(parts, okStyle().Render(fmt.Sprintf("%-8s", "0.0%")))
-		} else if isRateLimited {
-			parts = append(parts, rateLimitStyle().Render(fmt.Sprintf("%-8s", fmt.Sprintf("~%.0f%%", loss))))
+			plain = "0.0%"
+		}
+		parts = append(parts, lossStyleFor(loss).Render(padCell(plain, 8)))
+	}
+
+	// RTT stats — hop-level for everyone; echo tier already contributes to
+	// PathNode stats so no separate ping branch is needed.
+	if layout.showRnd {
+		parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
+	}
+	parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.AvgRTT())))
+	if layout.showBest {
+		parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.GetMinRTT())))
+	}
+	if layout.showWrst {
+		parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.GetMaxRTT())))
+	}
+	if layout.showStDev {
+		stdev := h.StDev()
+		if stdev == 0 {
+			parts = append(parts, fmt.Sprintf("%-7s", "-"))
 		} else {
-			parts = append(parts, lossStyle().Render(fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))))
+			parts = append(parts, fmt.Sprintf("%-7s", fmt.Sprintf("%.1f", stdev)))
 		}
 	}
-
-	// RTT stats — use ping stats when available; "†" on Snt indicates ping supplement
-	if ps != nil && ps.Received > 0 {
-		if layout.showSnt {
-			sntNum := fmt.Sprintf("%d", ps.Sent)
-			pad := 5 - len(sntNum) - 1
-			if pad < 0 {
-				pad = 0
-			}
-			parts = append(parts, sntNum+pingBadgeStyle().Render("†")+strings.Repeat(" ", pad))
-		}
-		parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.AvgRTT())))
-		if layout.showBest {
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.MinRTT)))
-		}
-		if layout.showWrst {
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.MaxRTT)))
-		}
-		if layout.showStDev {
-			stdev := ps.StDev()
-			if stdev == 0 {
-				parts = append(parts, fmt.Sprintf("%-7s", "-"))
-			} else {
-				parts = append(parts, fmt.Sprintf("%-7s", fmt.Sprintf("%.1f", stdev)))
-			}
-		}
-		if layout.showLast {
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.LastRTT)))
-		}
-	} else {
-		if layout.showSnt {
-			parts = append(parts, fmt.Sprintf("%-5d", h.GetSent()))
-		}
-		parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.AvgRTT())))
-		if layout.showBest {
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.GetMinRTT())))
-		}
-		if layout.showWrst {
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.GetMaxRTT())))
-		}
-		if layout.showStDev {
-			stdev := h.StDev()
-			if stdev == 0 {
-				parts = append(parts, fmt.Sprintf("%-7s", "-"))
-			} else {
-				parts = append(parts, fmt.Sprintf("%-7s", fmt.Sprintf("%.1f", stdev)))
-			}
-		}
-		if layout.showLast {
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.GetLastRTT())))
-		}
+	if layout.showLast {
+		parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.GetLastRTT())))
 	}
 
-	// New columns from M4
-	pn := h.PrimaryNode()
+	// New columns from M4 (reuse the primary node computed above for the loss cell).
 
 	if layout.showDelta {
 		if h.TTL < len(deltas) && deltas[h.TTL] != 0 {
@@ -1172,9 +1252,7 @@ func (m Model) renderHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration,
 		}
 	}
 	if layout.showSpark {
-		if ps != nil && ps.Received > 0 {
-			parts = append(parts, renderSparkline(ps.SparklineData(), 14))
-		} else if pn != nil {
+		if pn != nil {
 			parts = append(parts, renderSparkline(pn.SparklineData(), 14))
 		} else {
 			parts = append(parts, renderSparkline(nil, 14))
@@ -1199,7 +1277,7 @@ func (m Model) renderHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration,
 	return strings.Join(parts, " ")
 }
 
-func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool, deltas []time.Duration, maxDeltaTTL int, maxNodes int) []string {
+func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int, maxNodes int) []string {
 	layout := m.getLayout()
 	nodes := h.GetNodes()
 
@@ -1265,89 +1343,53 @@ func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool, deltas []time.
 			}
 		}
 
-		// Check for ping supplement data (first node only)
-		var ps *ping.Stat
-		if i == 0 && isRateLimited && m.pingStats != nil {
-			ps = m.pingStats[ip.String()]
-		}
-
-		// Loss: show hop-level aggregate on first node, "-" on subsequent
+		// Loss cell (first node only). Rate-limited nodes report echo-based
+		// ground truth with a "†" dagger; other cells show hop-level TTL loss.
 		if i == 0 {
-			if ps != nil && ps.Sent > 0 {
-				loss := ps.LossPercent()
-				if loss == 0 {
-					parts = append(parts, okStyle().Render(fmt.Sprintf("%-8s", "0.0%")))
-				} else {
-					parts = append(parts, lossStyle().Render(fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))))
-				}
+			state := node.RateLimitState()
+			if state == hop.RateLimitYes {
+				echo := node.EchoStats()
+				echoLoss := echo.ProbeLossPercent()
+				plain := fmt.Sprintf("~%.0f%%†", echoLoss)
+				parts = append(parts, rateLimitStyle().Render(padCell(plain, 8)))
 			} else {
 				loss := h.LossPercent()
+				plain := fmt.Sprintf("%.1f%%", loss)
 				if loss == 0 {
-					parts = append(parts, okStyle().Render(fmt.Sprintf("%-8s", "0.0%")))
-				} else if isRateLimited {
-					parts = append(parts, rateLimitStyle().Render(fmt.Sprintf("%-8s", fmt.Sprintf("~%.0f%%", loss))))
-				} else {
-					parts = append(parts, lossStyle().Render(fmt.Sprintf("%-8s", fmt.Sprintf("%.1f%%", loss))))
+					plain = "0.0%"
 				}
+				parts = append(parts, lossStyleFor(loss).Render(padCell(plain, 8)))
 			}
 		} else {
 			parts = append(parts, dimStyle().Render(fmt.Sprintf("%-8s", "-")))
 		}
 
-		// Sent count and RTT stats; "†" on Snt indicates ping supplement
-		if i == 0 && ps != nil && ps.Received > 0 {
-			if layout.showSnt {
-				sntNum := fmt.Sprintf("%d", ps.Sent)
-				pad := 5 - len(sntNum) - 1
-				if pad < 0 {
-					pad = 0
-				}
-				parts = append(parts, sntNum+pingBadgeStyle().Render("†")+strings.Repeat(" ", pad))
+		// Sent count and RTT stats — hop/node-level only; echo tier is folded
+		// into PathNode stats and needs no separate branch.
+		if layout.showRnd {
+			if i == 0 {
+				parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
+			} else {
+				parts = append(parts, fmt.Sprintf("%-5s", "-"))
 			}
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.AvgRTT())))
-			if layout.showBest {
-				parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.MinRTT)))
+		}
+		parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.AvgRTT())))
+		if layout.showBest {
+			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.GetMinRTT())))
+		}
+		if layout.showWrst {
+			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.GetMaxRTT())))
+		}
+		if layout.showStDev {
+			stdev := node.StDev()
+			if stdev == 0 {
+				parts = append(parts, fmt.Sprintf("%-7s", "-"))
+			} else {
+				parts = append(parts, fmt.Sprintf("%-7s", fmt.Sprintf("%.1f", stdev)))
 			}
-			if layout.showWrst {
-				parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.MaxRTT)))
-			}
-			if layout.showStDev {
-				stdev := ps.StDev()
-				if stdev == 0 {
-					parts = append(parts, fmt.Sprintf("%-7s", "-"))
-				} else {
-					parts = append(parts, fmt.Sprintf("%-7s", fmt.Sprintf("%.1f", stdev)))
-				}
-			}
-			if layout.showLast {
-				parts = append(parts, fmt.Sprintf("%-7s", formatDuration(ps.LastRTT)))
-			}
-		} else {
-			if layout.showSnt {
-				if i == 0 {
-					parts = append(parts, fmt.Sprintf("%-5d", h.GetSent()))
-				} else {
-					parts = append(parts, fmt.Sprintf("%-5s", "-"))
-				}
-			}
-			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.AvgRTT())))
-			if layout.showBest {
-				parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.GetMinRTT())))
-			}
-			if layout.showWrst {
-				parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.GetMaxRTT())))
-			}
-			if layout.showStDev {
-				stdev := node.StDev()
-				if stdev == 0 {
-					parts = append(parts, fmt.Sprintf("%-7s", "-"))
-				} else {
-					parts = append(parts, fmt.Sprintf("%-7s", fmt.Sprintf("%.1f", stdev)))
-				}
-			}
-			if layout.showLast {
-				parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.GetLastRTT())))
-			}
+		}
+		if layout.showLast {
+			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.GetLastRTT())))
 		}
 
 		// New columns from M4
@@ -1374,11 +1416,7 @@ func (m Model) renderDivergentHop(h *hop.Hop, isRateLimited bool, deltas []time.
 			parts = append(parts, fmt.Sprintf("%-7s", formatDuration(node.JitterMean())))
 		}
 		if layout.showSpark {
-			if ps != nil && ps.Received > 0 {
-				parts = append(parts, renderSparkline(ps.SparklineData(), 14))
-			} else {
-				parts = append(parts, renderSparkline(node.SparklineData(), 14))
-			}
+			parts = append(parts, renderSparkline(node.SparklineData(), 14))
 		}
 		if layout.showTrend {
 			if i == 0 {
@@ -1412,7 +1450,8 @@ func (m Model) prevASNForTTL(ttl int) int {
 	if m.enricher == nil {
 		return 0
 	}
-	hops := m.table.Snapshot()
+	s := m.focused()
+	hops := s.table.Snapshot()
 	hopMap := make(map[int]*hop.Hop, len(hops))
 	for _, h := range hops {
 		hopMap[h.TTL] = h
@@ -1507,31 +1546,44 @@ func computeIPColWidth(hops []*hop.Hop) int {
 
 // FinalSummary returns a plain-text summary table for printing to stdout after the TUI exits.
 func (m Model) FinalSummary() string {
+	s := m.focused()
 	var b strings.Builder
-	multipath := m.probeCfg.NumPaths > 1
+
+	// Guard: if the session failed to resolve (errored spec), emit a short error
+	// line and return early. Avoids nil-dereference on s.targetIP.String().
+	if s.startErr != nil {
+		b.WriteString(fmt.Sprintf("via — %s — error: %v\n", s.target, s.startErr))
+		return b.String()
+	}
+
+	multipath := s.probeCfg.NumPaths > 1
 
 	// Header
-	protoLabel := strings.ToUpper(m.protocolName)
-	if m.protocolName == "auto" {
-		protoLabel = "Auto → " + strings.ToUpper(m.probeCfg.Protocol.Name())
+	protoLabel := strings.ToUpper(s.protocolName)
+	if s.protocolName == "auto" {
+		protoLabel = "Auto → " + strings.ToUpper(s.probeCfg.Protocol.Name())
 	}
-	if m.protocolName != "icmp" && m.probeCfg.NumPaths > 1 {
+	if s.protocolName != "icmp" && s.probeCfg.NumPaths > 1 {
 		protoLabel += "/ECMP"
 	}
+	targetIPStr := "(unresolved)"
+	if s.targetIP != nil {
+		targetIPStr = s.targetIP.String()
+	}
 	if multipath {
-		b.WriteString(fmt.Sprintf("via — %s (%s) — %s — %d flows\n", m.target, m.targetIP.String(), protoLabel, m.probeCfg.NumPaths))
+		b.WriteString(fmt.Sprintf("via — %s (%s) — %s — %d flows\n", s.target, targetIPStr, protoLabel, s.probeCfg.NumPaths))
 	} else {
-		b.WriteString(fmt.Sprintf("via — %s (%s) — %s\n", m.target, m.targetIP.String(), protoLabel))
+		b.WriteString(fmt.Sprintf("via — %s (%s) — %s\n", s.target, targetIPStr, protoLabel))
 	}
 
 	// Determine max TTL to display
-	maxTTL := m.table.MaxTTLSeen()
-	if m.maxTTLHit > 0 && m.maxTTLHit < maxTTL {
-		maxTTL = m.maxTTLHit
+	maxTTL := s.table.MaxTTLSeen()
+	if s.maxTTLHit > 0 && s.maxTTLHit < maxTTL {
+		maxTTL = s.maxTTLHit
 	}
 
 	// Hop rows
-	hops := m.table.Snapshot()
+	hops := s.table.Snapshot()
 	hopMap := make(map[int]*hop.Hop, len(hops))
 	for _, h := range hops {
 		hopMap[h.TTL] = h
@@ -1544,13 +1596,12 @@ func (m Model) FinalSummary() string {
 	// Column headers
 	if multipath {
 		b.WriteString(fmt.Sprintf("%-3s "+ipFmt+" %-22s %-20s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
-			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab"))
+			"#", "IP", "Hostname", "ASN", "Loss%", "Rnd", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab"))
 	} else {
 		b.WriteString(fmt.Sprintf("%-3s "+ipFmt+" %-22s %-20s %-8s %-5s %-7s %-7s %-7s %-7s %-7s\n",
-			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last"))
+			"#", "IP", "Hostname", "ASN", "Loss%", "Rnd", "Avg", "Best", "Wrst", "StDev", "Last"))
 	}
 
-	rateLimited := hop.DetectRateLimited(hops, maxTTL)
 	prevASN := 0
 
 	for ttl := 1; ttl <= maxTTL; ttl++ {
@@ -1560,13 +1611,15 @@ func (m Model) FinalSummary() string {
 			continue
 		}
 
+		rateLimited := h.PrimaryNode() != nil && h.PrimaryNode().RateLimitState() == hop.RateLimitYes
+
 		if multipath && h.IsDivergent() {
 			nodes := h.GetNodes()
 			sort.Slice(nodes, func(i, j int) bool {
 				return nodes[i].GetReceived() > nodes[j].GetReceived()
 			})
 			hopLoss := h.LossPercent()
-			sent := h.GetSent()
+			sent := h.Rounds()
 			nodeIdx := 0
 			for _, node := range nodes {
 				ip := node.GetIP()
@@ -1598,40 +1651,20 @@ func (m Model) FinalSummary() string {
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
-					if ps, ok := m.pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
-						lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
-						sntStr = fmt.Sprintf("%d", ps.Sent)
-					} else if rateLimited[ttl] {
-						lossStr = fmt.Sprintf("~%.0f%%", hopLoss)
-						sntStr = fmt.Sprintf("%d", sent)
+					if rateLimited {
+						echo := node.EchoStats()
+						lossStr = fmt.Sprintf("~%.0f%%†", echo.ProbeLossPercent())
 					} else {
 						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
-						sntStr = fmt.Sprintf("%d", sent)
 					}
+					sntStr = fmt.Sprintf("%d", sent)
 				}
 
-				var avg, minRTT, maxRTT, stdev, last float64
-				if nodeIdx == 0 {
-					if ps, ok := m.pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Received > 0 {
-						avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
-						minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
-						maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
-						stdev = ps.StDev()
-						last = float64(ps.LastRTT.Microseconds()) / 1000.0
-					} else {
-						avg = float64(node.AvgRTT().Microseconds()) / 1000.0
-						minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
-						maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
-						stdev = node.StDev()
-						last = float64(node.GetLastRTT().Microseconds()) / 1000.0
-					}
-				} else {
-					avg = float64(node.AvgRTT().Microseconds()) / 1000.0
-					minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
-					maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
-					stdev = node.StDev()
-					last = float64(node.GetLastRTT().Microseconds()) / 1000.0
-				}
+				avg := float64(node.AvgRTT().Microseconds()) / 1000.0
+				minRTT := float64(node.GetMinRTT().Microseconds()) / 1000.0
+				maxRTT := float64(node.GetMaxRTT().Microseconds()) / 1000.0
+				stdev := node.StDev()
+				last := float64(node.GetLastRTT().Microseconds()) / 1000.0
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
@@ -1680,35 +1713,18 @@ func (m Model) FinalSummary() string {
 			}
 
 			var lossStr string
-			var avg, minRTT, maxRTT, stdev, last float64
-			var sent int
-			if ps, ok := m.pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
-				lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
-				sent = ps.Sent
-				if ps.Received > 0 {
-					avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
-					minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
-					maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
-					stdev = ps.StDev()
-					last = float64(ps.LastRTT.Microseconds()) / 1000.0
-				}
-			} else if rateLimited[ttl] {
-				lossStr = fmt.Sprintf("~%.0f%%", h.LossPercent())
-				sent = h.GetSent()
-				avg = float64(h.AvgRTT().Microseconds()) / 1000.0
-				minRTT = float64(h.GetMinRTT().Microseconds()) / 1000.0
-				maxRTT = float64(h.GetMaxRTT().Microseconds()) / 1000.0
-				stdev = h.StDev()
-				last = float64(h.GetLastRTT().Microseconds()) / 1000.0
+			if rateLimited {
+				echo := h.PrimaryNode().EchoStats()
+				lossStr = fmt.Sprintf("~%.0f%%†", echo.ProbeLossPercent())
 			} else {
 				lossStr = fmt.Sprintf("%.1f%%", h.LossPercent())
-				sent = h.GetSent()
-				avg = float64(h.AvgRTT().Microseconds()) / 1000.0
-				minRTT = float64(h.GetMinRTT().Microseconds()) / 1000.0
-				maxRTT = float64(h.GetMaxRTT().Microseconds()) / 1000.0
-				stdev = h.StDev()
-				last = float64(h.GetLastRTT().Microseconds()) / 1000.0
 			}
+			sent := h.Rounds()
+			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
+			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0
+			maxRTT := float64(h.GetMaxRTT().Microseconds()) / 1000.0
+			stdev := h.StDev()
+			last := float64(h.GetLastRTT().Microseconds()) / 1000.0
 
 			if multipath {
 				nodes := h.GetNodes()
@@ -1774,14 +1790,15 @@ func (m Model) maxScrollOffset() int {
 
 // countHopLines returns the total number of display lines for all hops.
 func (m Model) countHopLines() int {
-	hops := m.table.Snapshot()
+	s := m.focused()
+	hops := s.table.Snapshot()
 	hopMap := make(map[int]*hop.Hop, len(hops))
 	for _, h := range hops {
 		hopMap[h.TTL] = h
 	}
-	maxTTL := m.table.MaxTTLSeen()
-	if m.maxTTLHit > 0 && m.maxTTLHit < maxTTL {
-		maxTTL = m.maxTTLHit
+	maxTTL := s.table.MaxTTLSeen()
+	if s.maxTTLHit > 0 && s.maxTTLHit < maxTTL {
+		maxTTL = s.maxTTLHit
 	}
 	count := 0
 	for ttl := 1; ttl <= maxTTL; ttl++ {
@@ -1826,14 +1843,107 @@ func (m Model) errorView() string {
 	return b.String()
 }
 
+// exportSessionSnapshot holds a data-race-safe snapshot of a single session's
+// scalar fields. The snapshot is captured synchronously in exportCmd before the
+// closure is returned; the closure then reads only these locals, never the live
+// *TargetSession pointer.
+type exportSessionSnapshot struct {
+	target       string
+	targetIP     net.IP
+	protocolName string
+	probeCount   int
+	maxTTLHit    int
+	table        *hop.Table
+}
+
 func (m Model) exportCmd() tea.Cmd {
-	return func() tea.Msg {
-		maxTTL := m.table.MaxTTLSeen()
-		if m.maxTTLHit > 0 && m.maxTTLHit < maxTTL {
-			maxTTL = m.maxTTLHit
+	// Snapshot all scalar fields from every session before the closure is
+	// returned. The closure runs asynchronously as a tea.Cmd goroutine while
+	// the update loop may concurrently mutate these fields — capturing live
+	// *TargetSession pointers and reading through them inside the goroutine
+	// is a data race. m.version, m.resolver, m.enricher are on the Model
+	// value copy and are safe as-is.
+	if len(m.sessions) > 1 {
+		// Multi-target path: build a MultiReport from all non-errored sessions.
+		snaps := make([]exportSessionSnapshot, 0, len(m.sessions))
+		for _, s := range m.sessions {
+			if s.startErr != nil {
+				continue
+			}
+			snaps = append(snaps, exportSessionSnapshot{
+				target:       s.target,
+				targetIP:     s.targetIP,
+				protocolName: s.protocolName,
+				probeCount:   s.probeCount,
+				maxTTLHit:    s.maxTTLHit,
+				table:        s.table,
+			})
 		}
-		report := export.BuildReport(m.version, m.target, m.targetIP,
-			m.protocolName, m.probeCount, m.table, m.resolver, m.enricher, maxTTL)
+		if len(snaps) == 0 {
+			return func() tea.Msg {
+				return ExportDoneMsg{Err: fmt.Errorf("no active sessions to export")}
+			}
+		}
+		return func() tea.Msg {
+			now := time.Now()
+			mr := export.MultiReport{
+				Version:   m.version,
+				Timestamp: now,
+				Targets:   make([]export.Report, 0, len(snaps)),
+			}
+			for _, snap := range snaps {
+				maxTTL := snap.table.MaxTTLSeen()
+				if snap.maxTTLHit > 0 && snap.maxTTLHit < maxTTL {
+					maxTTL = snap.maxTTLHit
+				}
+				mr.Targets = append(mr.Targets, export.BuildReport(
+					m.version, snap.target, snap.targetIP,
+					snap.protocolName, snap.probeCount, snap.table,
+					m.resolver, m.enricher, maxTTL,
+				))
+			}
+
+			format := "json"
+			if m.config != nil && m.config.ExportFormat != "" {
+				format = m.config.ExportFormat
+			}
+
+			ts := now.Format("20060102-1504")
+			filename := fmt.Sprintf("via-multi-%s.%s", ts, format)
+
+			f, err := os.Create(filename)
+			if err != nil {
+				return ExportDoneMsg{Err: err}
+			}
+			defer f.Close()
+
+			switch format {
+			case "json":
+				err = export.WriteJSONMulti(f, mr)
+			case "csv":
+				err = export.WriteCSVMulti(f, mr)
+			case "dot":
+				err = export.WriteDOTMulti(f, mr)
+			}
+			return ExportDoneMsg{Path: filename, Err: err}
+		}
+	}
+
+	// Single-target path: unchanged from original implementation.
+	s := m.focused()
+	target := s.target
+	targetIP := s.targetIP
+	protocolName := s.protocolName
+	probeCount := s.probeCount
+	maxTTLHit := s.maxTTLHit
+	table := s.table
+	return func() tea.Msg {
+		maxTTL := table.MaxTTLSeen()
+		if maxTTLHit > 0 && maxTTLHit < maxTTL {
+			maxTTL = maxTTLHit
+		}
+		report := export.BuildReport(m.version, target, targetIP,
+			protocolName, probeCount, table, m.resolver, m.enricher, maxTTL)
 
 		format := "json"
 		if m.config != nil && m.config.ExportFormat != "" {
@@ -1841,7 +1951,7 @@ func (m Model) exportCmd() tea.Cmd {
 		}
 
 		ts := time.Now().Format("20060102-1504")
-		filename := fmt.Sprintf("via-%s-%s.%s", m.target, ts, format)
+		filename := fmt.Sprintf("via-%s-%s.%s", target, ts, format)
 
 		f, err := os.Create(filename)
 		if err != nil {

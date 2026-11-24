@@ -119,8 +119,9 @@ func TestTCPIdentifyResponse_WrongProto_ICMP(t *testing.T) {
 // --- ICMP IdentifyResponse with wrong type byte ---
 
 func TestICMPIdentifyResponse_WrongType_EchoReply(t *testing.T) {
-	p := NewICMPProtocol()
-	p.sessionID = 0xabcd
+	cfg := DefaultConfig()
+	cfg.ICMPID = 0xabcd
+	p := NewICMPProtocol(cfg)
 
 	// Build inner header where ICMP type is 0 (Echo Reply, v4) instead of 8 (Echo Request).
 	// IdentifyResponse should reject it (wrong type).
@@ -150,8 +151,9 @@ func TestICMPIdentifyResponse_WrongType_EchoReply(t *testing.T) {
 }
 
 func TestICMPIdentifyResponse_V6_WrongType_NotEchoRequest(t *testing.T) {
-	p := NewICMPProtocol()
-	p.sessionID = 0x1234
+	cfg := DefaultConfig()
+	cfg.ICMPID = 0x1234
+	p := NewICMPProtocol(cfg)
 
 	// IPv6 ICMP inner with type=129 (Echo Reply = type 129 for v6).
 	// IdentifyResponse for v6 wants type 128 (Echo Request).
@@ -211,7 +213,8 @@ func TestTCPIdentifyResponse_SubMinimumLength(t *testing.T) {
 }
 
 func TestICMPIdentifyResponse_SubMinimumLength(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	// Only 1 byte
 	inner := []byte{0x45}
 	key, err := p.IdentifyResponse(inner)
@@ -224,7 +227,8 @@ func TestICMPIdentifyResponse_SubMinimumLength(t *testing.T) {
 }
 
 func TestICMPIdentifyResponse_EmptyInput(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	key, err := p.IdentifyResponse([]byte{})
 	if err != nil {
 		t.Fatalf("unexpected error on empty input: %v", err)
@@ -272,7 +276,7 @@ func TestProbeMap_MatchNonExistentKey(t *testing.T) {
 func TestProbeMap_MatchConsumesEntry(t *testing.T) {
 	pm := newProbeMap()
 	key := probeKey{SrcPort: 100, DstPort: 200, Seq: 1}
-	pm.add(key, 5, 0, time.Now())
+	pm.add(key, 5, 0, time.Now(), ProbeICMPTTL)
 
 	_, ok := pm.match(key)
 	if !ok {
@@ -292,8 +296,8 @@ func TestProbeMap_SweepKeepsNewEntries(t *testing.T) {
 
 	staleKey := probeKey{SrcPort: 1, DstPort: 2, Seq: 3}
 	freshKey := probeKey{SrcPort: 4, DstPort: 5, Seq: 6}
-	pm.add(staleKey, 1, 0, staleTime)
-	pm.add(freshKey, 2, 1, freshTime)
+	pm.add(staleKey, 1, 0, staleTime, ProbeICMPTTL)
+	pm.add(freshKey, 2, 1, freshTime, ProbeICMPTTL)
 
 	pm.sweep(5 * time.Second) // entries older than 5s removed
 
@@ -315,7 +319,7 @@ func TestProbeMap_SweepPreservesAllIfNoneStale(t *testing.T) {
 	pm := newProbeMap()
 	for i := 0; i < 5; i++ {
 		k := probeKey{SrcPort: i, DstPort: i + 100, Seq: 0}
-		pm.add(k, i+1, i, time.Now())
+		pm.add(k, i+1, i, time.Now(), ProbeICMPTTL)
 	}
 
 	pm.sweep(60 * time.Second) // nothing is older than 60s
@@ -341,7 +345,7 @@ func TestProbeMap_ConcurrentAddMatch(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			key := probeKey{SrcPort: i, DstPort: i + 1000, Seq: i % 10}
-			pm.add(key, i%30+1, i%6, time.Now())
+			pm.add(key, i%30+1, i%6, time.Now(), ProbeICMPTTL)
 		}()
 	}
 	wg.Wait()
@@ -523,7 +527,8 @@ func TestBuildUDPProbe_LengthFieldMatchesPacket(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAutoSelector_IdentifyResponse_PreFallback(t *testing.T) {
-	auto := NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol())
+	cfg := DefaultConfig()
+	auto := NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol(cfg))
 	// Before fallback: should use UDP IdentifyResponse — inner TCP should yield nil
 	inner := buildV4InnerForProto(6 /*TCP*/, 44000, 33434)
 	key, err := auto.IdentifyResponse(inner)
@@ -536,7 +541,8 @@ func TestAutoSelector_IdentifyResponse_PreFallback(t *testing.T) {
 }
 
 func TestAutoSelector_IdentifyResponse_PostFallback(t *testing.T) {
-	auto := NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol())
+	cfg := DefaultConfig()
+	auto := NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol(cfg))
 	auto.Fallback()
 
 	// After fallback to ICMP: should use ICMP IdentifyResponse
@@ -574,7 +580,8 @@ func TestAutoSelector_IdentifyResponse_PostFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestICMPIdentifyResponse_BadVersionByte(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	// Version nibble = 3 — neither 4 nor 6; should return nil immediately.
 	inner := make([]byte, 28)
 	inner[0] = 0x30 // version=3
@@ -663,7 +670,7 @@ func TestNewTracer_FieldsSet(t *testing.T) {
 func TestCheckAutoFallback_SwitchesWhenNoResponses(t *testing.T) {
 	switched := false
 	cfg := DefaultConfig()
-	cfg.Protocol = NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol())
+	cfg.Protocol = NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol(cfg))
 	cfg.OnProtocolSwitch = func(p string) { switched = true }
 
 	tr := NewTracer(net.ParseIP("192.0.2.1"), cfg)
@@ -684,7 +691,7 @@ func TestCheckAutoFallback_SwitchesWhenNoResponses(t *testing.T) {
 
 func TestCheckAutoFallback_NoSwitchWhenResponsesReceived(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Protocol = NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol())
+	cfg.Protocol = NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol(cfg))
 
 	tr := NewTracer(net.ParseIP("192.0.2.1"), cfg)
 	atomic.StoreInt32(&tr.responseCount, 5) // simulate received responses
@@ -708,7 +715,7 @@ func TestCheckAutoFallback_NoopWhenNotAutoSelector(t *testing.T) {
 
 func TestCheckAutoFallback_NoopWhenAlreadySwitched(t *testing.T) {
 	cfg := DefaultConfig()
-	auto := NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol())
+	auto := NewAutoSelector(NewUDPProtocol(33434), NewICMPProtocol(cfg))
 	auto.Fallback() // already switched
 	cfg.Protocol = auto
 
@@ -777,61 +784,11 @@ func TestICMPTypeNum_DefaultBranch(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Tracer.Discover — early return and socket-fail paths
-// ---------------------------------------------------------------------------
-
-func TestTracer_Discover_ICMPEarlyReturn(t *testing.T) {
-	// With ICMP protocol, Discover returns immediately without opening sockets.
-	cfg := DefaultConfig()
-	cfg.Protocol = NewICMPProtocol()
-	tr := NewTracer(net.ParseIP("192.0.2.1"), cfg)
-
-	results := make(chan Result, 10)
-	ctx := context.Background()
-	// Should return immediately and not block
-	done := make(chan struct{})
-	go func() {
-		tr.Discover(ctx, results)
-		close(done)
-	}()
-	select {
-	case <-done:
-		// OK: returned quickly
-	case <-time.After(2 * time.Second):
-		t.Error("Discover with ICMP protocol should return immediately")
-	}
-}
-
-func TestTracer_Discover_NonICMP_NoSocket(t *testing.T) {
-	// With UDP protocol in a test environment (no raw socket), Discover
-	// will fail to open the ICMP listener and return non-fatally.
-	cfg := DefaultConfig()
-	cfg.Protocol = NewUDPProtocol(33434)
-	cfg.Timeout = 10 * time.Millisecond
-	tr := NewTracer(net.ParseIP("192.0.2.1"), cfg)
-
-	results := make(chan Result, 10)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		tr.Discover(ctx, results)
-		close(done)
-	}()
-	select {
-	case <-done:
-		// OK: returned (either opened or failed to open socket)
-	case <-time.After(5 * time.Second):
-		t.Error("Discover should not hang indefinitely")
-	}
-}
-
 func TestTracer_Run_NoSocket(t *testing.T) {
 	// In a test environment without raw socket privileges, Run should return an error.
 	// This covers the icmp.ListenPacket failure path in Run.
 	cfg := DefaultConfig()
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxRounds = 1
 	tr := NewTracer(net.ParseIP("192.0.2.1"), cfg)
 
@@ -894,7 +851,7 @@ func TestListenTCP_ViaFakeConn_MatchesSYNACK(t *testing.T) {
 
 	pm := newProbeMap()
 	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 0}
-	pm.add(key, 7, 2, time.Now())
+	pm.add(key, 7, 2, time.Now(), ProbeTCPTTL)
 
 	results := make(chan Result, 10)
 	cfg := DefaultConfig()
@@ -1051,7 +1008,7 @@ func TestListenTCP_ViaFakeConn_ResultCtxCancelRace(t *testing.T) {
 
 	pm := newProbeMap()
 	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 0}
-	pm.add(key, 5, 0, time.Now())
+	pm.add(key, 5, 0, time.Now(), ProbeTCPTTL)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

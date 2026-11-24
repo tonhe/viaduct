@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tonhe/viaduct/internal/config"
 	"github.com/tonhe/viaduct/internal/hop"
-	"github.com/tonhe/viaduct/internal/ping"
 	"github.com/tonhe/viaduct/internal/probe"
 	"github.com/tonhe/viaduct/internal/resolve"
 )
@@ -43,21 +42,28 @@ func newTestModel(opts ...testOpt) Model {
 	cfg := probe.DefaultConfig()
 	cfg.IPVersion = 4
 
-	m := Model{
+	sess := &TargetSession{
 		target:       "example.com",
 		targetIP:     net.ParseIP("192.0.2.1"),
-		version:      "0.0.0-test",
 		table:        hop.NewTable(cfg.MaxHops),
 		probeCfg:     cfg,
-		startTime:    time.Unix(0, 0),
-		width:        100,
-		height:       24,
-		config:       config.Default(),
-		viewMode:     ViewDefault,
 		protocolName: "udp",
-		autoScroll:   true,
-		resolver:     resolve.New(4),
-		nowFunc:      func() time.Time { return time.Unix(0, 0) },
+	}
+
+	testResolver := resolve.New(4)
+	m := Model{
+		sessions:   []*TargetSession{sess},
+		focusedIdx: 0,
+		version:    "0.0.0-test",
+		startTime:  time.Unix(0, 0),
+		width:      100,
+		height:     24,
+		config:     config.Default(),
+		viewMode:   ViewDefault,
+		autoScroll: true,
+		resolver:   testResolver,
+		dnsSub:     testResolver,
+		nowFunc:    func() time.Time { return time.Unix(0, 0) },
 	}
 
 	for _, opt := range opts {
@@ -78,9 +84,9 @@ func withNow(t time.Time) testOpt {
 // Each sample carries a TTL, IP string, and RTT; flowID is always 0.
 func withHops(samples ...hopSampleFixture) testOpt {
 	return func(m *Model) {
-		for _, s := range samples {
-			ip := net.ParseIP(s.ip)
-			m.table.GetOrCreate(s.ttl).AddSample(ip, s.rtt, 0)
+		for _, fix := range samples {
+			ip := net.ParseIP(fix.ip)
+			m.sessions[0].table.GetOrCreate(fix.ttl).AddSample(ip, fix.rtt, 0, hop.KindPrimary)
 		}
 	}
 }
@@ -103,9 +109,9 @@ func withView(v ViewMode) testOpt {
 // The target hostname remains "example.com" in both cases (documentation domain).
 func withIPVersion(v int) testOpt {
 	return func(m *Model) {
-		m.probeCfg.IPVersion = v
+		m.sessions[0].probeCfg.IPVersion = v
 		if v == 6 {
-			m.targetIP = net.ParseIP("2001:db8::1")
+			m.sessions[0].targetIP = net.ParseIP("2001:db8::1")
 		}
 	}
 }
@@ -124,23 +130,13 @@ func withSettingsOpen(state settingsState) testOpt {
 // withAlertEngine attaches an alert engine with given thresholds.
 func withAlertEngine(lossPct float64, latency time.Duration, rounds int) testOpt {
 	return func(m *Model) {
-		m.alertEngine = NewAlertEngine(lossPct, latency, rounds)
+		m.sessions[0].alertEngine = NewAlertEngine(lossPct, latency, rounds)
 	}
 }
 
 // withConfig replaces the model's config reference.
 func withConfig(cfg *config.Config) testOpt {
 	return func(m *Model) { m.config = cfg }
-}
-
-// withPingStats initialises the pingStats map so ping-related code paths
-// don't treat it as a disabled/nil map.
-func withPingStats() testOpt {
-	return func(m *Model) {
-		if m.pingStats == nil {
-			m.pingStats = make(map[string]*ping.Stat) //nolint:staticcheck
-		}
-	}
 }
 
 // withEnricher is intentionally a no-op: leaving enricher nil exercises the
@@ -222,14 +218,14 @@ func normalizeLE(s string) string {
 func TestHelpers_Compile(t *testing.T) {
 	// Default model
 	m := newTestModel()
-	if m.target != "example.com" {
-		t.Errorf("default target = %q, want example.com", m.target)
+	if m.sessions[0].target != "example.com" {
+		t.Errorf("default target = %q, want example.com", m.sessions[0].target)
 	}
 	if m.width != 100 || m.height != 24 {
 		t.Errorf("default size = %dx%d, want 100x24", m.width, m.height)
 	}
-	if m.probeCfg.IPVersion != 4 {
-		t.Errorf("default IPVersion = %d, want 4", m.probeCfg.IPVersion)
+	if m.sessions[0].probeCfg.IPVersion != 4 {
+		t.Errorf("default IPVersion = %d, want 4", m.sessions[0].probeCfg.IPVersion)
 	}
 	if m.viewMode != ViewDefault {
 		t.Errorf("default viewMode = %v, want ViewDefault", m.viewMode)
@@ -240,7 +236,7 @@ func TestHelpers_Compile(t *testing.T) {
 	if m.config == nil {
 		t.Error("default config should not be nil")
 	}
-	if m.table == nil {
+	if m.sessions[0].table == nil {
 		t.Error("default table should not be nil")
 	}
 
@@ -249,7 +245,6 @@ func TestHelpers_Compile(t *testing.T) {
 		withSize(160, 48),
 		withView(ViewHealth),
 		withIPVersion(6),
-		withPingStats(),
 	)
 	if m2.width != 160 || m2.height != 48 {
 		t.Error("withSize did not apply")
@@ -257,15 +252,12 @@ func TestHelpers_Compile(t *testing.T) {
 	if m2.viewMode != ViewHealth {
 		t.Error("withView did not apply")
 	}
-	if m2.probeCfg.IPVersion != 6 {
+	if m2.sessions[0].probeCfg.IPVersion != 6 {
 		t.Error("withIPVersion did not apply")
 	}
-	if m2.pingStats == nil {
-		t.Error("withPingStats did not apply")
-	}
 	wantIP := net.ParseIP("2001:db8::1")
-	if !m2.targetIP.Equal(wantIP) {
-		t.Errorf("withIPVersion(6) targetIP = %v, want %v", m2.targetIP, wantIP)
+	if !m2.sessions[0].targetIP.Equal(wantIP) {
+		t.Errorf("withIPVersion(6) targetIP = %v, want %v", m2.sessions[0].targetIP, wantIP)
 	}
 
 	// hop fixture
@@ -273,7 +265,7 @@ func TestHelpers_Compile(t *testing.T) {
 		hopSample(1, "192.0.2.1", 10*time.Millisecond),
 		hopSample(2, "192.0.2.2", 20*time.Millisecond),
 	))
-	snap := m3.table.Snapshot()
+	snap := m3.sessions[0].table.Snapshot()
 	if len(snap) != 2 {
 		t.Errorf("table snapshot len = %d, want 2", len(snap))
 	}
@@ -286,7 +278,7 @@ func TestHelpers_Compile(t *testing.T) {
 
 	// alert engine option
 	m4 := newTestModel(withAlertEngine(5.0, 100*time.Millisecond, 3))
-	if m4.alertEngine == nil {
+	if m4.sessions[0].alertEngine == nil {
 		t.Error("withAlertEngine did not attach alertEngine")
 	}
 

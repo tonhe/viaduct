@@ -13,7 +13,7 @@
 
 Traditional `traceroute` shows one path. Real networks aren't single paths — they're forests of parallel ECMP links, rate-limiting routers, and load balancers that return different answers every probe. `via` sees all of it.
 
-`via` replaces `traceroute`, `mtr`, and `paris-traceroute` with a live-updating TUI that shows packet loss, latency stats, reverse DNS, ASN enrichment, and all parallel paths through load-balanced networks.
+`via` replaces `traceroute`, `mtr`, and `paris-traceroute` with a live-updating TUI that shows packet loss, latency stats, reverse DNS, ASN enrichment, and all parallel paths through load-balanced networks. Trace up to 16 targets simultaneously — each gets its own session with independent port blocks and family selection.
 
 <img src="img/demo.gif" alt="via showing ECMP multipath trace with sparklines and ASN enrichment" width="900">
 
@@ -30,7 +30,8 @@ Traditional `traceroute` shows one path. Real networks aren't single paths — t
 | ASN enrichment | — | — | — | **Yes** |
 | Rate-limit detection | — | — | — | **Yes** |
 | TCP/UDP/ICMP probes | Partial | ICMP | UDP/ICMP | **All + Auto** |
-| Display modes & sparklines | — | — | — | **4 modes** |
+| Multi-target simultaneous | — | — | — | **Up to 16** |
+| Display modes & sparklines | — | — | — | **5 modes** |
 | Destination alerting | — | — | — | **Yes** |
 | Color themes | — | — | — | **61** |
 | Settings persistence | — | — | — | **Yes** |
@@ -85,8 +86,8 @@ via -r google.com
 ## Features
 
 - **ECMP multipath** — Paris-traceroute-style probing reveals all parallel paths through load-balanced networks with tree-view divergence (`├──`/`└──` connectors)
-- **Automatic rate-limit detection** — detects routers that rate-limit ICMP TTL Exceeded and silently switches to direct ping, replacing phantom loss with real data (`†` marker)
-- **4 display modes** — cycle with <kbd>d</kbd>: Default, Health, Latency, Variability — each with sparklines, trend detection, and hop-to-hop deltas
+- **Automatic rate-limit detection** — detects routers that rate-limit ICMP TTL Exceeded by interleaving direct ICMP echo probes; replaces phantom loss with real data (`†` marker)
+- **5 display modes** — cycle with <kbd>d</kbd>: Default, Health, Latency, Variability, Probe Detail — each with sparklines, trend detection, hop-to-hop deltas, and per-probe-type stats
 - **Destination alerting** — monitors loss% and latency thresholds; identifies the responsible hop and ASN when alerts fire
 - **ASN enrichment** — each hop shows its AS number with boundary transitions highlighted; full org name at wide widths
 - **3 probe protocols + auto** — UDP (ECMP), TCP SYN (firewall bypass), ICMP (classic), and Auto (UDP with ICMP fallback)
@@ -122,26 +123,27 @@ If `-6` is requested and the target has no AAAA record (or the host has no IPv6 
 
 ---
 
-## Rate-Limit Detection & Ping Supplement
+## Rate-Limit Detection
 
 Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` and `traceroute` to show phantom packet loss at intermediate hops. This is the single most common source of misdiagnosis in traceroute output — operators see 60% loss at hop 3 and assume a problem, when the router is simply deprioritizing TTL Exceeded replies.
 
-`via` automagically detects this. After a few probe rounds, it identifies hops where loss is high but all downstream hops are healthy — the hallmark of rate-limiting, not real packet loss. It then launches direct ICMP Echo Requests (pings) to those hops in the background, on a separate socket, and replaces the misleading TTL Exceeded stats with accurate ping-derived data.
+`via` automagically detects this. The tracer interleaves per-round probes with budgeted direct ICMP Echo Requests sent to each discovered hop. When TTL-probe loss is high but the direct echo responses remain healthy, `via` marks the hop rate-limited and reports echo-derived stats instead of the misleading TTL Exceeded data.
 
-The `†` dagger on the Snt column indicates a hop whose stats come from direct ping rather than TTL Exceeded replies. No configuration needed — it just works. Disable with `--no-ping` if you prefer raw TTL Exceeded data.
+The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come from direct echo probes rather than TTL Exceeded replies. No configuration needed — it just works.
 
 ---
 
 ## Display Modes
 
-Press <kbd>d</kbd> to cycle through four view presets:
+Press <kbd>d</kbd> to cycle through five view presets:
 
 | Mode | Columns | Best For |
 |------|---------|----------|
-| **Default** | Loss%, Snt, Avg, Best, Wrst, StDev, Last | General overview (mtr-equivalent) |
+| **Default** | Loss%, Rnd, Avg, Best, Wrst, StDev, Last | General overview (mtr-equivalent) |
 | **Health** | Loss%, Avg, Delta, Sparkline, Trend | Quick health assessment |
 | **Latency** | Avg, Best, Wrst, GMean, Delta, Sparkline | Detailed latency analysis |
 | **Variability** | StDev, Jitter, Jitter Mean, Sparkline, Trend | Stability analysis |
+| **Probe Detail** | ICMP-TTL, UDP/TCP-TTL, Echo (recvd + loss%), Rnd | Per-probe-type diagnostics, rate-limit verification |
 
 **Additional metrics:**
 
@@ -189,6 +191,40 @@ Configure with `--alert-loss`, `--alert-latency`, and `--alert-rounds`. Disable 
 
 ---
 
+## Multi-Target Mode
+
+Trace up to 16 destinations simultaneously in one session:
+
+```bash
+# Two targets side-by-side
+via google.com one.one.one.one
+
+# Targets from a file (one per line, # comments and blank lines ignored)
+via --targets /etc/trace-targets.txt
+
+# Combine positional and file targets — all deduped, max 16 total
+via google.com --targets targets.txt
+```
+
+The TUI switches to a **summary+detail layout**: a header row per target shows target name, hop count, loss%, avg RTT, worst-hop RTT, and alert state. Below the summary, the focused target's full hop table is rendered exactly like single-target mode.
+
+**Navigation (multi-target only):**
+
+| Key | Action |
+|-----|--------|
+| <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>j</kbd> / <kbd>k</kbd> | Move focus between targets |
+| <kbd>Tab</kbd> | Cycle focus to next target |
+| <kbd>Space</kbd> | Mark/unmark target — also selects which panes show in column view |
+| <kbd>c</kbd> | Toggle column view — bordered panes side by side (`# IP Host Avg Loss`), one per target, dividing the terminal width equally; the focused pane has a heavy border |
+
+Global keys (`p` pause, `r` reset, `d` display mode) apply to all targets simultaneously.
+
+Per-target IP family is auto-selected independently. If a target fails to resolve or probe, it is shown as errored in its summary row while all other targets continue tracing. If every target errors at startup, `via` exits 1 with each error on stderr.
+
+Exports in multi-target mode group all targets: JSON uses a `targets` array, CSV adds a leading `target` column, and DOT produces a single digraph with shared-IP node merging. Report mode (`-r`) prints each target's table in sequence.
+
+---
+
 ## Usage
 
 ```bash
@@ -228,9 +264,6 @@ via -r -c 5 -n 8.8.8.8
 # Disable ASN lookups
 via --no-asn google.com
 
-# Disable ping supplement
-via --no-ping google.com
-
 # Set alert thresholds (alert on >10% loss sustained for 5 rounds)
 via --alert-loss 10 --alert-rounds 5 google.com
 
@@ -239,6 +272,21 @@ via --alert-latency 200ms google.com
 
 # Disable alerting entirely
 via --no-alert google.com
+
+# Trace two targets simultaneously in the TUI
+via google.com one.one.one.one
+
+# Trace targets from a file (one per line, # comments ok)
+via --targets /etc/trace-targets.txt
+
+# Combine positional and file targets (deduped, max 16 total)
+via google.com --targets targets.txt
+
+# Multi-target report mode (text)
+via -r -c 3 google.com one.one.one.one
+
+# Multi-target report, JSON export
+via -r -c 3 -o json google.com one.one.one.one
 ```
 
 ---
@@ -257,10 +305,10 @@ via --no-alert google.com
 | `--psize` | `-s` | 64 | Payload size in bytes |
 | `--paths` | | 6 | Number of ECMP flows to probe |
 | `--no-paths` | | | Disable ECMP, single-path mode |
+| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
 | `--report` | `-r` | | Report mode: non-interactive, print table and exit |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
 | `--no-asn` | | | Skip ASN lookups |
-| `--no-ping` | | | Skip ping supplement for rate-limited hops |
 | `--alert-loss` | | 5.0 | Loss% threshold for destination alert (0 = disabled) |
 | `--alert-latency` | | 0 | Latency threshold for destination alert (0 = disabled) |
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
@@ -277,10 +325,19 @@ via --no-alert google.com
 | <kbd>j</kbd> / <kbd>k</kbd> | Scroll up/down |
 | <kbd>g</kbd> / <kbd>G</kbd> | Jump to top/bottom |
 | <kbd>p</kbd> | Pause/resume probing |
-| <kbd>r</kbd> | Reset all hop stats and ping supplement |
-| <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability) |
+| <kbd>r</kbd> | Reset all hop stats |
+| <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability → Probe Detail) |
 | <kbd>q</kbd> | Quit (prints final summary) |
 | <kbd>Esc</kbd> | Open settings menu |
+
+**Multi-target mode only:**
+
+| Key | Action |
+|-----|--------|
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Move focus between targets (also <kbd>j</kbd> / <kbd>k</kbd>) |
+| <kbd>Tab</kbd> | Cycle focus to next target |
+| <kbd>Space</kbd> | Mark/unmark target for column comparison |
+| <kbd>c</kbd> | Toggle column view (bordered panes, one per target) |
 
 ---
 

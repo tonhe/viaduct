@@ -12,8 +12,9 @@ import (
 type Hop struct {
 	TTL       int
 	Nodes     []*PathNode
-	sentTotal int // total probes sent to this TTL (all flows)
-	rounds    int // number of completed probe rounds
+	roundsSent         int  // rounds in which the tracer probed this TTL
+	roundsRecvd        int  // rounds with >=1 non-echo response
+	respondedThisRound bool // true if a non-echo reply arrived in the current round
 
 	mu sync.RWMutex
 }
@@ -24,7 +25,7 @@ func NewHop(ttl int) *Hop {
 }
 
 // AddSample records an RTT measurement from the given IP with a flow identifier.
-func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int) {
+func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -40,7 +41,10 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int) {
 		node = NewPathNode(ip)
 		h.Nodes = append(h.Nodes, node)
 	}
-	node.AddSample(rtt, flowID)
+	if kind != KindEcho {
+		h.respondedThisRound = true
+	}
+	node.AddSample(rtt, flowID, kind)
 }
 
 // IsDivergent returns true if more than one IP has been seen at this TTL.
@@ -83,14 +87,27 @@ func (h *Hop) GetNodes() []*PathNode {
 	return out
 }
 
-// MarkRoundEnd advances stability tracking for all nodes and increments the round counter.
+// MarkRoundSent records that the tracer probed this TTL this round.
+// Called once per hop per round (probe.RoundMarker via Table).
+func (h *Hop) MarkRoundSent() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.roundsSent++
+}
+
+// MarkRoundEnd closes a probe round: records whether any non-echo reply
+// arrived, then advances stability tracking for all nodes.
 func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.rounds++
+	if h.respondedThisRound {
+		h.roundsRecvd++
+	}
+	h.respondedThisRound = false
 	for _, n := range h.Nodes {
 		n.RecordRoundAvg()
 		n.AdvanceRound()
+		n.MarkProbeRoundEnd()
 	}
 }
 
@@ -150,19 +167,15 @@ func (h *Hop) StDev() float64 {
 	return pn.StDev()
 }
 
-// LossPercent returns the packet loss percentage across all nodes.
-// Loss = (sentTotal - totalReceivedAllNodes) / sentTotal * 100
+// LossPercent returns round-based loss: rounds with no response over rounds
+// probed. ECMP-agnostic — six flows answering in one round count once.
 func (h *Hop) LossPercent() float64 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.sentTotal == 0 {
+	if h.roundsSent == 0 {
 		return 0
 	}
-	totalReceived := 0
-	for _, n := range h.Nodes {
-		totalReceived += n.GetReceived()
-	}
-	return float64(h.sentTotal-totalReceived) / float64(h.sentTotal) * 100
+	return float64(h.roundsSent-h.roundsRecvd) / float64(h.roundsSent) * 100
 }
 
 // GetMinRTT returns the primary node's minimum RTT.
@@ -198,19 +211,12 @@ func (h *Hop) GetLastRTT() time.Duration {
 	return pn.GetLastRTT()
 }
 
-// GetSent returns the number of completed rounds for this hop (thread-safe).
-// This is what the user-facing Snt column displays.
-func (h *Hop) GetSent() int {
+// Rounds returns the number of probe rounds sent to this hop (thread-safe).
+// This is what the user-facing Rnd column displays.
+func (h *Hop) Rounds() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.rounds
-}
-
-// IncrementSent increments the total sent probe count.
-func (h *Hop) IncrementSent() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.sentTotal++
+	return h.roundsSent
 }
 
 // Reset clears all nodes and zeroes counters, preserving TTL.
@@ -218,8 +224,9 @@ func (h *Hop) Reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Nodes = nil
-	h.sentTotal = 0
-	h.rounds = 0
+	h.roundsSent = 0
+	h.roundsRecvd = 0
+	h.respondedThisRound = false
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.
@@ -237,6 +244,14 @@ func NewTable(maxHops int) *Table {
 	}
 }
 
+// Get returns the hop at ttl, or nil if none exists. Unlike GetOrCreate it
+// never creates a row, so lookups for unseen TTLs stay invisible.
+func (t *Table) Get(ttl int) *Hop {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.hops[ttl]
+}
+
 // GetOrCreate returns the hop for the given TTL, creating it if needed.
 func (t *Table) GetOrCreate(ttl int) *Hop {
 	t.mu.Lock()
@@ -250,10 +265,10 @@ func (t *Table) GetOrCreate(ttl int) *Hop {
 	return h
 }
 
-// IncrementSent increments the sent count for a given TTL.
-// Implements probe.SentCounter.
-func (t *Table) IncrementSent(ttl int) {
-	t.GetOrCreate(ttl).IncrementSent()
+// MarkRoundSent records that a probe round was sent to the given TTL.
+// Implements probe.RoundMarker.
+func (t *Table) MarkRoundSent(ttl int) {
+	t.GetOrCreate(ttl).MarkRoundSent()
 }
 
 // Snapshot returns a sorted slice of hops from TTL 1 to MaxTTLSeen.

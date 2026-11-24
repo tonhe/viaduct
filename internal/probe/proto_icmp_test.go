@@ -9,22 +9,24 @@ import (
 )
 
 func TestICMPProtocol_SupportsMultipath(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	if p.SupportsMultipath() {
 		t.Fatal("ICMP should not support multipath")
 	}
 }
 
 func TestICMPProtocol_Name(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	if got := p.Name(); got != "icmp" {
 		t.Fatalf("Name() = %q, want %q", got, "icmp")
 	}
 }
 
 func TestICMPProtocol_BuildProbe(t *testing.T) {
-	p := NewICMPProtocol()
 	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	seq := 42
 
 	pkt, key, err := p.BuildProbe(0, 5, seq, cfg)
@@ -64,8 +66,8 @@ func TestICMPProtocol_BuildProbe(t *testing.T) {
 }
 
 func TestICMPProtocol_BuildProbe_ConsistentSessionID(t *testing.T) {
-	p := NewICMPProtocol()
 	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 
 	_, key1, err := p.BuildProbe(0, 1, 1, cfg)
 	if err != nil {
@@ -82,8 +84,8 @@ func TestICMPProtocol_BuildProbe_ConsistentSessionID(t *testing.T) {
 }
 
 func TestICMPProtocol_IdentifyResponse(t *testing.T) {
-	p := NewICMPProtocol()
 	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 	seq := 7
 
 	pkt, wantKey, err := p.BuildProbe(0, 3, seq, cfg)
@@ -110,7 +112,8 @@ func TestICMPProtocol_IdentifyResponse(t *testing.T) {
 }
 
 func TestICMPProtocol_IdentifyResponse_RejectsNonICMP(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 
 	// Build inner header with UDP protocol (17) instead of ICMP (1)
 	innerHeader := make([]byte, 28)
@@ -127,7 +130,8 @@ func TestICMPProtocol_IdentifyResponse_RejectsNonICMP(t *testing.T) {
 }
 
 func TestICMPProtocol_IsDestReachedICMP(t *testing.T) {
-	p := NewICMPProtocol()
+	cfg := DefaultConfig()
+	p := NewICMPProtocol(cfg)
 
 	// Echo Reply (type 0) = destination reached
 	if !p.IsDestReachedICMP(int(ipv4.ICMPTypeEchoReply), 0) {
@@ -141,8 +145,9 @@ func TestICMPProtocol_IsDestReachedICMP(t *testing.T) {
 }
 
 func TestICMPProtocol_IdentifyResponse_IPv6(t *testing.T) {
-	p := NewICMPProtocol()
-	p.sessionID = 0x1234
+	cfg := DefaultConfig()
+	cfg.ICMPID = 0x1234
+	p := NewICMPProtocol(cfg)
 
 	inner := []byte{
 		0x60, 0, 0, 0, 0, 8, 58, 64,
@@ -158,6 +163,26 @@ func TestICMPProtocol_IdentifyResponse_IPv6(t *testing.T) {
 	}
 	if key.SrcPort != 0x1234 || key.DstPort != 5 {
 		t.Errorf("key = %+v, want SrcPort=0x1234 DstPort=5", key)
+	}
+}
+
+func TestICMPProtocol_UsesConfiguredID(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.IPVersion = 4
+	cfg.ICMPID = 1007
+	p := NewICMPProtocol(cfg)
+	if got := p.sessionID; got != 1007 {
+		t.Fatalf("sessionID = %d, want 1007", got)
+	}
+}
+
+func TestICMPProtocol_RandomIDWhenUnset(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.IPVersion = 4
+	cfg.ICMPID = 0
+	p := NewICMPProtocol(cfg)
+	if p.sessionID < 1 || p.sessionID > 65534 {
+		t.Fatalf("sessionID = %d, want 1..65534", p.sessionID)
 	}
 }
 

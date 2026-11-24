@@ -90,7 +90,7 @@ func BuildReport(version string, target string, targetIP net.IP,
 		eh := Hop{
 			TTL:  ttl,
 			Loss: h.LossPercent(),
-			Sent: h.GetSent(),
+			Sent: h.Rounds(),
 		}
 
 		for _, node := range h.GetNodes() {
@@ -110,8 +110,8 @@ func BuildReport(version string, target string, targetIP net.IP,
 					StDev:  node.StDev(),
 					Jitter: msFromDuration(node.Jitter()),
 				},
-				Loss:      node.LossPercent(),
-				Sent:      node.GetSent(),
+				Loss:      h.LossPercent(),
+				Sent:      h.Rounds(),
 				Received:  node.GetReceived(),
 				FlowIDs:   node.GetFlowIDs(),
 				Stability: node.StabilityPercent(),

@@ -12,8 +12,8 @@ func TestNewHop(t *testing.T) {
 	if h.TTL != 3 {
 		t.Fatalf("expected TTL 3, got %d", h.TTL)
 	}
-	if h.GetSent() != 0 {
-		t.Fatal("new hop should have zero sent")
+	if h.Rounds() != 0 {
+		t.Fatal("new hop should have zero rounds")
 	}
 }
 
@@ -21,9 +21,9 @@ func TestHopAddSample(t *testing.T) {
 	h := NewHop(1)
 	ip := net.ParseIP("10.0.0.1")
 
-	h.AddSample(ip, 10*time.Millisecond, 0)
-	h.AddSample(ip, 20*time.Millisecond, 0)
-	h.AddSample(ip, 15*time.Millisecond, 0)
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip, 20*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip, 15*time.Millisecond, 0, KindPrimary)
 
 	if h.GetIP().String() != "10.0.0.1" {
 		t.Fatalf("expected IP 10.0.0.1, got %s", h.GetIP())
@@ -49,12 +49,15 @@ func TestHopAddSample(t *testing.T) {
 func TestHopLossPercent(t *testing.T) {
 	h := NewHop(1)
 	ip := net.ParseIP("10.0.0.1")
-	// Simulate 10 sent, 7 received
-	for i := 0; i < 10; i++ {
-		h.IncrementSent()
-	}
+	// 10 rounds sent; 7 had at least one response => 30% loss
 	for i := 0; i < 7; i++ {
-		h.AddSample(ip, 10*time.Millisecond, 0)
+		h.MarkRoundSent()
+		h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
+		h.MarkRoundEnd()
+	}
+	for i := 0; i < 3; i++ {
+		h.MarkRoundSent()
+		h.MarkRoundEnd()
 	}
 	loss := h.LossPercent()
 	if loss != 30.0 {
@@ -72,7 +75,7 @@ func TestHopLossPercentZeroSent(t *testing.T) {
 func TestHopSetHostname(t *testing.T) {
 	h := NewHop(1)
 	ip := net.ParseIP("10.0.0.1")
-	h.AddSample(ip, 10*time.Millisecond, 0)
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 	h.SetHostname("router.local")
 	if h.GetHostname() != "router.local" {
 		t.Fatalf("expected router.local, got %s", h.GetHostname())
@@ -94,8 +97,8 @@ func TestTableGetOrCreate(t *testing.T) {
 func TestTableSnapshot(t *testing.T) {
 	tbl := NewTable(30)
 	h := tbl.GetOrCreate(1)
-	h.AddSample(net.ParseIP("1.1.1.1"), 5*time.Millisecond, 0)
-	h.IncrementSent()
+	h.AddSample(net.ParseIP("1.1.1.1"), 5*time.Millisecond, 0, KindPrimary)
+	tbl.MarkRoundSent(1)
 
 	snap := tbl.Snapshot()
 	if len(snap) != 1 {
@@ -120,9 +123,9 @@ func TestHopStDev(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")
 
 	// Samples: 10, 20, 30 ms => mean=20, variance=100/3, stdev≈5.77
-	h.AddSample(ip, 10*time.Millisecond, 0)
-	h.AddSample(ip, 20*time.Millisecond, 0)
-	h.AddSample(ip, 30*time.Millisecond, 0)
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip, 20*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip, 30*time.Millisecond, 0, KindPrimary)
 
 	stdev := h.StDev()
 	expected := math.Sqrt(float64(200) / 3.0) // population stdev in ms
@@ -133,7 +136,7 @@ func TestHopStDev(t *testing.T) {
 
 func TestHopStDevSingleSample(t *testing.T) {
 	h := NewHop(1)
-	h.AddSample(net.ParseIP("10.0.0.1"), 10*time.Millisecond, 0)
+	h.AddSample(net.ParseIP("10.0.0.1"), 10*time.Millisecond, 0, KindPrimary)
 	if h.StDev() != 0 {
 		t.Fatalf("single sample stdev should be 0, got %f", h.StDev())
 	}
@@ -149,10 +152,13 @@ func TestHopStDevZeroSamples(t *testing.T) {
 func TestHopReset(t *testing.T) {
 	h := NewHop(3)
 	ip := net.ParseIP("10.0.0.1")
-	h.AddSample(ip, 10*time.Millisecond, 0)
-	h.AddSample(ip, 20*time.Millisecond, 0)
-	for i := 0; i < 5; i++ {
-		h.IncrementSent()
+	h.MarkRoundSent()
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip, 20*time.Millisecond, 0, KindPrimary)
+	h.MarkRoundEnd()
+	for i := 0; i < 4; i++ {
+		h.MarkRoundSent()
+		h.MarkRoundEnd()
 	}
 
 	h.Reset()
@@ -163,8 +169,8 @@ func TestHopReset(t *testing.T) {
 	if h.GetIP() != nil {
 		t.Fatal("Reset should clear IP")
 	}
-	if h.GetSent() != 0 {
-		t.Fatal("Reset should zero sent")
+	if h.Rounds() != 0 {
+		t.Fatal("Reset should zero rounds")
 	}
 	if h.GetMinRTT() != 0 || h.GetMaxRTT() != 0 || h.GetLastRTT() != 0 {
 		t.Fatal("Reset should zero RTTs")
@@ -183,9 +189,9 @@ func TestHopMultipleIPs(t *testing.T) {
 	h := NewHop(4)
 	ip1 := net.ParseIP("10.0.0.1")
 	ip2 := net.ParseIP("10.0.0.2")
-	h.AddSample(ip1, 10*time.Millisecond, 0)
-	h.AddSample(ip2, 15*time.Millisecond, 1)
-	h.AddSample(ip1, 12*time.Millisecond, 0)
+	h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip2, 15*time.Millisecond, 1, KindPrimary)
+	h.AddSample(ip1, 12*time.Millisecond, 0, KindPrimary)
 	if !h.IsDivergent() {
 		t.Fatal("expected divergent")
 	}
@@ -198,8 +204,8 @@ func TestHopMultipleIPs(t *testing.T) {
 func TestHopSingleIP(t *testing.T) {
 	h := NewHop(3)
 	ip := net.ParseIP("10.0.0.1")
-	h.AddSample(ip, 10*time.Millisecond, 0)
-	h.AddSample(ip, 12*time.Millisecond, 1)
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip, 12*time.Millisecond, 1, KindPrimary)
 	if h.IsDivergent() {
 		t.Fatal("should not be divergent with 1 IP")
 	}
@@ -209,9 +215,9 @@ func TestHopPrimaryNode(t *testing.T) {
 	h := NewHop(4)
 	ip1 := net.ParseIP("10.0.0.1")
 	ip2 := net.ParseIP("10.0.0.2")
-	h.AddSample(ip1, 10*time.Millisecond, 0)
-	h.AddSample(ip1, 12*time.Millisecond, 0)
-	h.AddSample(ip2, 15*time.Millisecond, 1)
+	h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip1, 12*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip2, 15*time.Millisecond, 1, KindPrimary)
 	primary := h.PrimaryNode()
 	if !primary.IP.Equal(ip1) {
 		t.Fatalf("expected primary 10.0.0.1, got %s", primary.IP)
@@ -221,7 +227,7 @@ func TestHopPrimaryNode(t *testing.T) {
 func TestHopMarkRoundEnd(t *testing.T) {
 	h := NewHop(1)
 	ip := net.ParseIP("10.0.0.1")
-	h.AddSample(ip, 10*time.Millisecond, 0)
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 
 	// MarkRoundEnd should not panic and should advance stability on all nodes
 	h.MarkRoundEnd()
@@ -234,7 +240,7 @@ func TestHopMarkRoundEnd(t *testing.T) {
 func TestHopGetNodesIsCopy(t *testing.T) {
 	h := NewHop(1)
 	ip := net.ParseIP("10.0.0.1")
-	h.AddSample(ip, 10*time.Millisecond, 0)
+	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 
 	nodes := h.GetNodes()
 	nodes[0] = nil // mutate copy
@@ -248,18 +254,97 @@ func TestHopLossPercentMultiNode(t *testing.T) {
 	h := NewHop(1)
 	ip1 := net.ParseIP("10.0.0.1")
 	ip2 := net.ParseIP("10.0.0.2")
-	// 10 probes sent total, 4 received by ip1, 3 received by ip2 = 7 total received => 30% loss
-	for i := 0; i < 10; i++ {
-		h.IncrementSent()
-	}
-	for i := 0; i < 4; i++ {
-		h.AddSample(ip1, 10*time.Millisecond, 0)
+	// 10 rounds sent; 7 rounds had at least one response => 30% loss
+	for i := 0; i < 7; i++ {
+		h.MarkRoundSent()
+		h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
+		h.AddSample(ip2, 15*time.Millisecond, 1, KindPrimary)
+		h.MarkRoundEnd()
 	}
 	for i := 0; i < 3; i++ {
-		h.AddSample(ip2, 15*time.Millisecond, 1)
+		h.MarkRoundSent()
+		h.MarkRoundEnd()
 	}
 	loss := h.LossPercent()
 	if loss != 30.0 {
 		t.Fatalf("expected 30%% loss, got %.1f%%", loss)
+	}
+}
+
+func TestHopRoundBasedLoss(t *testing.T) {
+	h := NewHop(3)
+	ip := net.ParseIP("198.51.100.1")
+	// Round 1: 6 ECMP flows all answer — counts as ONE received round.
+	h.MarkRoundSent()
+	for f := 0; f < 6; f++ {
+		h.AddSample(ip, 10*time.Millisecond, f, KindPrimary)
+	}
+	h.MarkRoundEnd()
+	// Round 2: silence.
+	h.MarkRoundSent()
+	h.MarkRoundEnd()
+	if got := h.LossPercent(); got != 50.0 {
+		t.Errorf("LossPercent = %v, want 50 (round-based, ECMP-agnostic)", got)
+	}
+	if h.Rounds() != 2 {
+		t.Errorf("Rounds = %d, want 2", h.Rounds())
+	}
+}
+
+func TestHopRoundBasedLossV6(t *testing.T) {
+	h := NewHop(3)
+	ip := net.ParseIP("2001:db8::1")
+	// Round 1: 6 ECMP flows all answer — counts as ONE received round.
+	h.MarkRoundSent()
+	for f := 0; f < 6; f++ {
+		h.AddSample(ip, 10*time.Millisecond, f, KindPrimary)
+	}
+	h.MarkRoundEnd()
+	// Round 2: silence.
+	h.MarkRoundSent()
+	h.MarkRoundEnd()
+	if got := h.LossPercent(); got != 50.0 {
+		t.Errorf("LossPercent = %v, want 50 (round-based, ECMP-agnostic)", got)
+	}
+	if h.Rounds() != 2 {
+		t.Errorf("Rounds = %d, want 2", h.Rounds())
+	}
+}
+
+func TestTableGet(t *testing.T) {
+	tbl := NewTable(30)
+
+	// Get on unseen TTL returns nil and does not create a row.
+	if got := tbl.Get(5); got != nil {
+		t.Fatalf("Get on unseen TTL should return nil, got %v", got)
+	}
+	if snap := tbl.Snapshot(); len(snap) != 0 {
+		t.Fatalf("Get miss must not create a row; snapshot len = %d", len(snap))
+	}
+
+	// After GetOrCreate the same TTL is found.
+	h := tbl.GetOrCreate(5)
+	if got := tbl.Get(5); got != h {
+		t.Fatalf("Get after GetOrCreate should return same pointer; got %p want %p", got, h)
+	}
+
+	// A different unseen TTL still returns nil.
+	if got := tbl.Get(99); got != nil {
+		t.Fatalf("Get on different unseen TTL should return nil, got %v", got)
+	}
+	// Snapshot still has only the one row we created.
+	if snap := tbl.Snapshot(); len(snap) != 1 {
+		t.Fatalf("snapshot should have 1 row, got %d", len(snap))
+	}
+}
+
+func TestHopEchoDoesNotFeedHopLoss(t *testing.T) {
+	h := NewHop(3)
+	ip := net.ParseIP("198.51.100.1")
+	h.MarkRoundSent()
+	h.AddSample(ip, 10*time.Millisecond, 0, KindEcho) // only an echo arrived
+	h.MarkRoundEnd()
+	if got := h.LossPercent(); got != 100.0 {
+		t.Errorf("LossPercent = %v, want 100 (echo must not count as hop response)", got)
 	}
 }

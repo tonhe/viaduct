@@ -82,7 +82,7 @@ func TestListenTCP_MatchesProbeMap(t *testing.T) {
 	// Register a probe in the probeMap
 	pm := newProbeMap()
 	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 0}
-	pm.add(key, 15, 0, time.Now())
+	pm.add(key, 15, 0, time.Now(), ProbeTCPTTL)
 
 	// Build a fake SYN-ACK packet: server src=443, dst=44000
 	pkt := buildFakeTCPPacket(443, 44000, 0x12)

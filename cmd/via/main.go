@@ -19,7 +19,6 @@ import (
 	"github.com/tonhe/viaduct/internal/config"
 	"github.com/tonhe/viaduct/internal/export"
 	"github.com/tonhe/viaduct/internal/hop"
-	"github.com/tonhe/viaduct/internal/ping"
 	"github.com/tonhe/viaduct/internal/probe"
 	"github.com/tonhe/viaduct/internal/resolve"
 	"github.com/tonhe/viaduct/internal/sysprobe"
@@ -35,9 +34,10 @@ var (
 // tracerIface captures the methods runReport uses on probe.Tracer.
 // It is intentionally minimal — only the subset used by the report path.
 type tracerIface interface {
-	SetOnSent(probe.SentCounter)
+	SetOnRoundSent(probe.RoundMarker)
 	SetOnRoundEnd(func())
-	Discover(ctx context.Context, results chan<- probe.Result)
+	SetOnEchoSent(func(ip net.IP, ttl int))
+	SubmitEchoTargets([]probe.EchoTarget)
 	Run(ctx context.Context, results chan<- probe.Result) error
 }
 
@@ -46,11 +46,16 @@ var newTracer = func(target net.IP, cfg probe.Config) tracerIface {
 	return probe.NewTracer(target, cfg)
 }
 
+// Compile-time assertion: *probe.Tracer must satisfy cmd/via's tracerIface.
+// If probe.Tracer ever loses a method this seam requires, this line fails to
+// compile — catching the mismatch before it becomes a runtime panic.
+var _ tracerIface = (*probe.Tracer)(nil)
+
 func main() {
 	rootCmd := &cobra.Command{
-		Use:     "via <target>",
+		Use:     "via [target ...]",
 		Short:   "A modern traceroute tool with real-time TUI",
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.RangeArgs(0, maxTargets),
 		Version: version + " (build " + buildVersion + ")",
 		RunE:    runTrace,
 
@@ -72,22 +77,57 @@ func main() {
 	rootCmd.Flags().BoolP("ipv4", "4", false, "force IPv4")
 	rootCmd.Flags().BoolP("ipv6", "6", false, "force IPv6")
 	rootCmd.Flags().Bool("no-asn", false, "skip ASN lookups")
-	rootCmd.Flags().Bool("no-ping", false, "skip ping supplement for rate-limited hops")
 	rootCmd.Flags().Float64("alert-loss", 5.0, "loss% threshold for destination alert (0 = disabled)")
 	rootCmd.Flags().Duration("alert-latency", 0, "latency threshold for destination alert (0 = disabled)")
 	rootCmd.Flags().Int("alert-rounds", 3, "consecutive rounds before alert fires")
 	rootCmd.Flags().Bool("no-alert", false, "disable alerting")
 	rootCmd.Flags().String("theme", "", "color theme (slug name, e.g. 'dracula')")
 	rootCmd.Flags().StringP("output", "o", "", "export format: json, csv, or dot (implies --report)")
+	rootCmd.Flags().String("targets", "", "file containing one target per line (combined with positional args)")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func runTrace(cmd *cobra.Command, args []string) error {
-	target := args[0]
+// lookupFunc is a pluggable DNS resolver function, injectable for tests.
+type lookupFunc func(host string) ([]net.IP, error)
 
+// resolveTargetSpecs resolves every target and selects its IP family
+// independently. Failures land in TargetSpec.Err; they never abort the
+// other targets. Port/ID blocks are assigned by session index.
+func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, base probe.Config, protocolName string, lookup lookupFunc) []tui.TargetSpec {
+	specs := make([]tui.TargetSpec, len(targets))
+	for i, tgt := range targets {
+		specs[i] = tui.TargetSpec{Name: tgt, ProtocolName: protocolName}
+		ips, err := lookup(tgt)
+		if err != nil {
+			specs[i].Err = fmt.Errorf("resolve %s: %w", tgt, err)
+			continue
+		}
+		var v4, v6 net.IP
+		for _, ip := range ips {
+			if ip4 := ip.To4(); ip4 != nil && v4 == nil {
+				v4 = ip4
+			} else if ip.To4() == nil && v6 == nil {
+				v6 = ip
+			}
+		}
+		ver, ip, err := selectFamily(forceV4, forceV6, v4, v6, hasV4, hasV6)
+		if err != nil {
+			specs[i].Err = err
+			continue
+		}
+		cfg := base
+		cfg.IPVersion = ver
+		cfg.BasePort, cfg.ICMPID, cfg.EchoID = sessionPorts(i)
+		specs[i].IP = ip
+		specs[i].Cfg = cfg
+	}
+	return specs
+}
+
+func runTrace(cmd *cobra.Command, args []string) error {
 	// Load config
 	appCfg, err := config.Load()
 	if err != nil {
@@ -133,33 +173,33 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve target — collect both A and AAAA records.
-	ips, err := net.LookupIP(target)
-	if err != nil {
-		return fmt.Errorf("failed to resolve %q: %w", target, err)
-	}
-	var v4IP, v6IP net.IP
-	for _, ip := range ips {
-		if ip4 := ip.To4(); ip4 != nil {
-			if v4IP == nil {
-				v4IP = ip4
-			}
-			continue
-		}
-		if v6IP == nil {
-			v6IP = ip
+	// Merge positional args with --targets file.
+	targetsFile, _ := cmd.Flags().GetString("targets")
+	var fileTargets []string
+	if targetsFile != "" {
+		fileTargets, err = parseTargetsFile(targetsFile)
+		if err != nil {
+			return err
 		}
 	}
-
-	ipVersion, targetIP, err := selectFamily(forceV4, forceV6, v4IP, v6IP, sysprobe.HasIPv4Transport(), sysprobe.HasIPv6Transport())
+	targets, err := mergeTargets(args, fileTargets)
 	if err != nil {
+		// mergeTargets returns descriptive errors (0 targets / >16 targets).
 		return err
 	}
 
-	// Capability check for the selected family. sysprobe already attempted this
-	// from selectFamily, but we re-open here to catch transient failures and
-	// trigger sudo re-exec if needed.
-	testConn, err := icmp.ListenPacket(probe.ListenerNet(ipVersion), probe.RawListenAddr(ipVersion))
+	// Capability check — probe raw socket. sysprobe has already probed family
+	// availability; we open a test socket here to catch transient failures and
+	// trigger sudo re-exec if CAP_NET_RAW is missing. We pick IPv4 by default
+	// (if hasV4) so the capability check doesn't depend on target resolution.
+	hasV4 := sysprobe.HasIPv4Transport()
+	hasV6 := sysprobe.HasIPv6Transport()
+
+	capFamily := 4
+	if forceV6 || (!forceV4 && !hasV4 && hasV6) {
+		capFamily = 6
+	}
+	testConn, err := icmp.ListenPacket(probe.ListenerNet(capFamily), probe.RawListenAddr(capFamily))
 	if err != nil {
 		if os.Geteuid() != 0 {
 			// Try re-exec under sudo
@@ -188,7 +228,6 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	protocolName, _ := cmd.Flags().GetString("protocol")
 	dstPort, _ := cmd.Flags().GetInt("port")
 	noASN, _ := cmd.Flags().GetBool("no-asn")
-	noPing, _ := cmd.Flags().GetBool("no-ping")
 	alertLoss, _ := cmd.Flags().GetFloat64("alert-loss")
 	alertLatency, _ := cmd.Flags().GetDuration("alert-latency")
 	alertRounds, _ := cmd.Flags().GetInt("alert-rounds")
@@ -226,9 +265,6 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	if !cmd.Flags().Changed("no-asn") {
 		noASN = !appCfg.ASNLookups
 	}
-	if !cmd.Flags().Changed("no-ping") {
-		noPing = !appCfg.PingSupplement
-	}
 	if !cmd.Flags().Changed("no-alert") && !cmd.Flags().Changed("alert-loss") {
 		if !appCfg.AlertEnabled {
 			noAlert = true
@@ -245,17 +281,23 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		alertRounds = appCfg.AlertRounds
 	}
 
+	// Clamp numPaths to the port-block stride invariant. An explicit --paths flag
+	// bypasses config.Validate, so we enforce the same bounds here. Without this,
+	// --paths 100 host1 host2 would let session 0's flow IDs spill into session 1's
+	// port block, causing cross-target reply misattribution.
+	if clamped, changed := clampNumPaths(numPaths); changed {
+		if numPaths > maxNumPaths {
+			fmt.Fprintf(os.Stderr, "Warning: --paths %d exceeds maximum %d, clamping\n", numPaths, maxNumPaths)
+		}
+		numPaths = clamped
+	}
+
 	if reportMode && count == 0 {
 		count = 10
 	}
 
-	// Build protocol before constructing config
-	proto, err := buildProtocol(protocolName, dstPort, &numPaths)
-	if err != nil {
-		return err
-	}
-
-	probeCfg := probe.Config{
+	// Build base probe config (per-target port blocks and IP version filled in by resolveTargetSpecs).
+	baseCfg := probe.Config{
 		MaxHops:     maxHops,
 		FirstTTL:    firstTTL,
 		Timeout:     timeout,
@@ -265,119 +307,188 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		MaxRounds:   count,
 		NoDNS:       noDNS,
 		ReportMode:  reportMode,
-		NumPaths:    numPaths,
-		BasePort:    44000,
-		Protocol:    proto,
-		IPVersion:   ipVersion,
+		NumPaths: numPaths,
 	}
 
-	// Determine source IP
-	udpNet := "udp4"
-	dialTarget := targetIP.String() + ":1"
-	if ipVersion == 6 {
-		udpNet = "udp6"
-		dialTarget = "[" + targetIP.String() + "]:1"
+	// Build protocol with config available
+	proto, err := buildProtocol(protocolName, dstPort, &numPaths, baseCfg)
+	if err != nil {
+		return err
 	}
-	srcConn, err := net.Dial(udpNet, dialTarget)
-	if err == nil {
-		probeCfg.SourceIP = srcConn.LocalAddr().(*net.UDPAddr).IP
-		srcConn.Close()
-	}
-	probeCfg.TargetIP = targetIP
+	baseCfg.Protocol = proto
+	baseCfg.NumPaths = numPaths
 
-	// Report mode: bypass TUI, run N rounds, print table, exit
-	if probeCfg.ReportMode {
-		return runReport(target, targetIP, probeCfg, protocolName, noASN, noPing, outputFmt)
+	// Draw per-process random port/ID bases before resolving targets.
+	initPortAllocator(len(targets))
+
+	// Resolve all targets. hasV4/hasV6 probed once before the loop.
+	specs := resolveTargetSpecs(targets, forceV4, forceV6, hasV4, hasV6, baseCfg, protocolName, net.LookupIP)
+
+	// For single-target, preserve the original error semantics: error → exit 1.
+	if len(specs) == 1 && specs[0].Err != nil {
+		return specs[0].Err
 	}
 
-	// Create TUI model
+	// For each successfully-resolved spec, determine source IP.
+	for i := range specs {
+		if specs[i].Err != nil {
+			continue
+		}
+		targetIP := specs[i].IP
+		ipVersion := specs[i].Cfg.IPVersion
+		udpNet := "udp4"
+		dialTarget := targetIP.String() + ":1"
+		if ipVersion == 6 {
+			udpNet = "udp6"
+			dialTarget = "[" + targetIP.String() + "]:1"
+		}
+		srcConn, dialErr := net.Dial(udpNet, dialTarget)
+		if dialErr == nil {
+			specs[i].Cfg.SourceIP = srcConn.LocalAddr().(*net.UDPAddr).IP
+			srcConn.Close()
+		}
+		specs[i].Cfg.TargetIP = targetIP
+	}
+
+	// Report mode: bypass TUI, run N rounds per target, print/export, exit.
+	// Stamp echo budget on healthy specs first (mirrors the TUI path below).
+	if reportMode {
+		numSessions := 0
+		for _, sp := range specs {
+			if sp.Err == nil {
+				numSessions++
+			}
+		}
+		echoBudget := 64
+		if numSessions > 1 {
+			echoBudget = 64 / numSessions
+			if echoBudget < 4 {
+				echoBudget = 4
+			}
+		}
+		for i := range specs {
+			if specs[i].Err == nil {
+				specs[i].Cfg.EchoBudget = echoBudget
+			}
+		}
+		return runMultiReport(specs, protocolName, noASN, outputFmt)
+	}
+
+	// Check that at least one spec is healthy before starting TUI.
+	allErrored := true
+	for _, sp := range specs {
+		if sp.Err == nil {
+			allErrored = false
+			break
+		}
+	}
+	if allErrored {
+		for _, sp := range specs {
+			fmt.Fprintf(os.Stderr, "error: %v\n", sp.Err)
+		}
+		os.Exit(1)
+	}
+
+	// Compute per-session echo budget and apply to each healthy spec's config.
+	numSessions := 0
+	for _, sp := range specs {
+		if sp.Err == nil {
+			numSessions++
+		}
+	}
+	echoBudget := 64
+	if numSessions > 1 {
+		echoBudget = 64 / numSessions
+		if echoBudget < 4 {
+			echoBudget = 4
+		}
+	}
+	for i := range specs {
+		if specs[i].Err == nil {
+			specs[i].Cfg.EchoBudget = echoBudget
+		}
+	}
+
+	// Create TUI model using NewMulti (works for 1 or N sessions).
 	versionStr := "v" + version + " (" + buildVersion + ")"
-	model := tui.New(target, targetIP, probeCfg, versionStr, protocolName, noASN, noPing, alertLoss, alertLatency, alertRounds, noAlert, appCfg)
+	model := tui.NewMulti(specs, versionStr, noASN, alertLoss, alertLatency, alertRounds, noAlert, appCfg)
 
-	// Create bubbletea program
+	// Create bubbletea program AFTER model is fully wired.
+	// Note: model is passed by value into tea.NewProgram; SetSessionTracer must
+	// be called on the model value before it is handed to the program.
+	// We create p here but wire tracers first via model pointer methods.
 	p := tea.NewProgram(model, tea.WithAltScreen())
-
-	// Wire auto-mode protocol switch callback
-	probeCfg.OnProtocolSwitch = func(newProto string) {
-		p.Send(tui.ProtocolSwitchMsg{NewProtocol: newProto})
-	}
 
 	// Create context for background goroutines
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Channels for results
-	probeResults := make(chan probe.Result, 64)
+	// Shared DNS/ASN channels (one resolver/enricher for all sessions).
 	dnsResults := make(chan resolve.Result, 64)
 
-	// Start probe tracer in background
-	tracer := probe.NewTracer(targetIP, probeCfg)
-	tracer.OnSent = model.Table()
-	// Start ping supplementer
-	var supplementer *ping.Supplementer
-	pingResults := make(chan ping.Result, 64)
-	if !noPing {
-		supplementer = ping.New(probeCfg.IPVersion)
-		if err := supplementer.Open(ctx, pingResults); err != nil {
-			// Ping socket failure is non-fatal; continue without ping
-			supplementer = nil
-		} else {
-			defer supplementer.Close()
+	// Per-session wiring.
+	for i, sp := range specs {
+		if sp.Err != nil {
+			// Errored sessions: no tracer, no pumps — the TUI shows the error row.
+			continue
 		}
-	}
 
-	tracer.OnRoundEnd = func() {
-		p.Send(tui.RoundEndMsg{})
-		if supplementer != nil {
-			hops := model.Table().Snapshot()
-			maxTTL := model.Table().MaxTTLSeen()
-			rl := hop.DetectRateLimited(hops, maxTTL)
-			hopMap := make(map[int]*hop.Hop, len(hops))
-			for _, h := range hops {
-				hopMap[h.TTL] = h
+		// Wire the protocol-switch callback into the config before creating the tracer.
+		// The tracer consumes cfg at construction time (copies the struct).
+		sessionIdx := i
+		specs[i].Cfg.OnProtocolSwitch = func(newProto string) {
+			p.Send(tui.ProtocolSwitchMsg{TargetIdx: sessionIdx, NewProtocol: newProto})
+		}
+
+		tracer := newTracer(sp.IP, specs[i].Cfg)
+		// SetSessionTracer needs *probe.Tracer for direct field access (Paused).
+		// The compile-time guard above ensures the default newTracer always returns
+		// a *probe.Tracer; if a test stub reaches this branch, fail fast and clearly.
+		pt, ok := tracer.(*probe.Tracer)
+		if !ok {
+			return fmt.Errorf("internal error: newTracer returned %T, want *probe.Tracer", tracer)
+		}
+		model.SetSessionTracer(i, pt)
+		tracer.SetOnRoundSent(model.SessionTable(i))
+		pt.SetOnEchoSent(func(ip net.IP, ttl int) {
+			p.Send(tui.EchoSentMsg{TargetIdx: sessionIdx, IP: ip, TTL: ttl})
+		})
+
+		tracer.SetOnRoundEnd(func() {
+			p.Send(tui.RoundEndMsg{TargetIdx: sessionIdx})
+		})
+
+		// Per-session probe results channel.
+		probeResults := make(chan probe.Result, 64)
+		go func(idx int, tr tracerIface) {
+			if runErr := tr.Run(ctx, probeResults); runErr != nil {
+				p.Send(tui.ProbeErrorMsg{TargetIdx: idx, Err: runErr})
 			}
-			for ttl := range rl {
-				if h, ok := hopMap[ttl]; ok {
-					if ip := h.GetIP(); ip != nil {
-						supplementer.Submit(ip)
+		}(i, tracer)
+
+		go func(idx int) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case r := <-probeResults:
+					p.Send(tui.HopUpdateMsg{TargetIdx: idx, Result: r})
+					if model.Enricher() != nil {
+						model.Enricher().Submit(r.IP)
 					}
 				}
 			}
-			supplementer.PingAll()
-		}
+		}(i)
 	}
-	model.SetTracer(tracer)
-	go func() {
-		// ICMP discovery pass: find target TTL before main protocol starts
-		tracer.Discover(ctx, probeResults)
-		if err := tracer.Run(ctx, probeResults); err != nil {
-			p.Send(tui.ProbeErrorMsg{Err: err})
-		}
-	}()
 
-	// Start DNS resolver in background
+	// Start shared DNS resolver in background.
 	go model.Resolver().Run(ctx, dnsResults)
 
-	// Start ASN enricher in background
+	// Start shared ASN enricher in background.
 	asnResults := make(chan asn.Result, 64)
 	if model.Enricher() != nil {
 		go model.Enricher().Run(ctx, asnResults)
 	}
-
-	// Forwarding goroutine: probe results -> TUI (and submit to resolver/enricher)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case r := <-probeResults:
-				p.Send(tui.HopUpdateMsg{Result: r})
-				if model.Enricher() != nil {
-					model.Enricher().Submit(r.IP)
-				}
-			}
-		}
-	}()
 
 	// Forwarding goroutine: DNS results -> TUI
 	go func() {
@@ -403,20 +514,6 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Forwarding goroutine: ping results -> TUI
-	if !noPing {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case r := <-pingResults:
-					p.Send(tui.PingUpdateMsg{IP: r.IP, RTT: r.RTT, Lost: r.Lost})
-				}
-			}
-		}()
-	}
-
 	// Run TUI (blocks until quit)
 	finalModel, err := p.Run()
 	if err != nil {
@@ -432,10 +529,230 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, noPing bool, outputFmt string) error {
+// runMultiReport runs report mode for one or more targets sequentially and
+// emits results. For a single healthy target the output is identical to the
+// pre-multi runReport path. For multiple targets, text mode separates each
+// section with a rule line; structured exports use WriteJSONMulti/etc.
+func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, outputFmt string) error {
+	if len(specs) == 1 {
+		sp := specs[0]
+		if sp.Err != nil {
+			return sp.Err
+		}
+		return runReport(sp.Name, sp.IP, sp.Cfg, protocolName, noASN, outputFmt)
+	}
+
+	// Multi-target path.
+	versionStr := "v" + version + " (" + buildVersion + ")"
+	var reports []export.Report
+	for _, sp := range specs {
+		if sp.Err != nil {
+			if outputFmt == "" {
+				fmt.Printf("── %s ──\nerror: %v\n\n", sp.Name, sp.Err)
+			}
+			// Structured exports skip errored targets.
+			continue
+		}
+		if outputFmt == "" {
+			fmt.Printf("── %s (%s) ──\n", sp.Name, sp.IP.String())
+		}
+		if outputFmt != "" {
+			// Collect into report struct without printing.
+			table, resolver, enricher, maxTTL, runErr := collectReport(sp.IP, sp.Cfg, noASN)
+			if runErr != nil {
+				fmt.Fprintf(os.Stderr, "error tracing %s: %v\n", sp.Name, runErr)
+				continue
+			}
+			r := export.BuildReport(versionStr, sp.Name, sp.IP, protocolName, 0, table, resolver, enricher, maxTTL)
+			reports = append(reports, r)
+		} else {
+			// Text mode: run and print inline.
+			if err := runReport(sp.Name, sp.IP, sp.Cfg, protocolName, noASN, ""); err != nil {
+				fmt.Fprintf(os.Stderr, "error tracing %s: %v\n", sp.Name, err)
+			}
+			fmt.Println()
+		}
+	}
+
+	if outputFmt != "" {
+		mr := export.MultiReport{
+			Version:   versionStr,
+			Timestamp: time.Now().UTC(),
+			Targets:   reports,
+		}
+		switch outputFmt {
+		case "json":
+			return export.WriteJSONMulti(os.Stdout, mr)
+		case "csv":
+			return export.WriteCSVMulti(os.Stdout, mr)
+		case "dot":
+			return export.WriteDOTMulti(os.Stdout, mr)
+		}
+	}
+	return nil
+}
+
+// wireEchoTier installs the SetOnEchoSent callback on pt so that each echo
+// the tracer dispatches is recorded on the matching PathNode in table.
+// Runs on the tracer goroutine; PathNode methods are individually mutex-guarded.
+func wireEchoTier(pt tracerIface, table *hop.Table) {
+	pt.SetOnEchoSent(func(ip net.IP, ttl int) {
+		h := table.Get(ttl)
+		if h == nil {
+			return
+		}
+		for _, node := range h.GetNodes() {
+			if nip := node.GetIP(); nip != nil && nip.Equal(ip) {
+				node.MarkEchoSent()
+				break
+			}
+		}
+	})
+}
+
+// collectEchoTargets builds the slice of {IP, TTL} pairs from every node in
+// table.Snapshot() and is used by both runReportInner and collectReport inside
+// their SetOnRoundEnd closures.
+func collectEchoTargets(table *hop.Table) []probe.EchoTarget {
+	hops := table.Snapshot()
+	var pairs []probe.EchoTarget
+	for _, h := range hops {
+		for _, node := range h.GetNodes() {
+			if ip := node.GetIP(); ip != nil {
+				pairs = append(pairs, probe.EchoTarget{IP: ip, TTL: h.TTL})
+			}
+		}
+	}
+	return pairs
+}
+
+// collectReport runs the tracer for a single target and returns the assembled
+// table/resolver/enricher and maxTTL. It is used by runMultiReport for the
+// structured-export path where we need the raw Report struct.
+func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *resolve.Resolver, *asn.Enricher, int, error) {
 	table := hop.NewTable(cfg.MaxHops)
 	tracer := newTracer(targetIP, cfg)
-	tracer.SetOnSent(table)
+	tracer.SetOnRoundSent(table)
+
+	var resolver *resolve.Resolver
+	if !cfg.NoDNS {
+		resolver = resolve.New(4)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	probeResults := make(chan probe.Result, 64)
+
+	if resolver != nil {
+		dnsResults := make(chan resolve.Result, 64)
+		go resolver.Run(ctx, dnsResults)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-dnsResults:
+				}
+			}
+		}()
+	}
+
+	var enricher *asn.Enricher
+	if !noASN {
+		enricher = asn.New(4)
+		asnResults := make(chan asn.Result, 64)
+		go enricher.Run(ctx, asnResults)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-asnResults:
+				}
+			}
+		}()
+	}
+
+	// Echo attribution via shared helper.
+	wireEchoTier(tracer, table)
+
+	tracer.SetOnRoundEnd(func() {
+		hops := table.Snapshot()
+		for _, h := range hops {
+			h.MarkRoundEnd()
+		}
+		// Recompute the echo-target set from the live table each round; the
+		// tracer round-robins through it under EchoBudget.
+		tracer.SubmitEchoTargets(collectEchoTargets(table))
+	})
+
+	var maxTTLHit int32
+
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-probeResults:
+				h := table.GetOrCreate(r.TTL)
+				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
+				if r.IsTarget {
+					cur := atomic.LoadInt32(&maxTTLHit)
+					if cur == 0 || int32(r.TTL) < cur {
+						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
+					}
+				}
+				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
+					resolver.Submit(r.IP)
+				}
+				if enricher != nil {
+					enricher.Submit(r.IP)
+				}
+			}
+		}
+	}()
+
+	if err := tracer.Run(ctx, probeResults); err != nil {
+		return nil, nil, nil, 0, err
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	<-collectorDone
+
+	maxTTL := table.MaxTTLSeen()
+	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
+		maxTTL = hit
+	}
+
+	return table, resolver, enricher, maxTTL, nil
+}
+
+// probeKindFor maps a probe.ProbeType to the hop.ProbeKind slot that a
+// result should feed. Mirrors the TUI's onHopUpdate mapping so echo replies
+// land in EchoStats and TTL replies in ICMPTTLStats — a prerequisite for
+// RateLimitState() to classify a hop correctly in report mode.
+func probeKindFor(pt probe.ProbeType) hop.ProbeKind {
+	switch pt {
+	case probe.ProbeICMPTTL:
+		return hop.KindICMPTTL
+	case probe.ProbeICMPEcho:
+		return hop.KindEcho
+	default:
+		return hop.KindPrimary
+	}
+}
+
+// runReportInner traces one target end-to-end and returns the fully-populated
+// hop.Table plus any error. It is split out of runReport so callers that need
+// the table directly (e.g. tests) can obtain it without a test-only hook.
+func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, outputFmt string) (*hop.Table, error) {
+	table := hop.NewTable(cfg.MaxHops)
+	tracer := newTracer(targetIP, cfg)
+	tracer.SetOnRoundSent(table)
 
 	var resolver *resolve.Resolver
 	if !cfg.NoDNS {
@@ -481,62 +798,17 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 		}()
 	}
 
-	// Start ping supplementer
-	var supplementer *ping.Supplementer
-	pingResultsCh := make(chan ping.Result, 64)
-	if !noPing {
-		supplementer = ping.New(cfg.IPVersion)
-		if err := supplementer.Open(ctx, pingResultsCh); err != nil {
-			supplementer = nil
-		} else {
-			defer supplementer.Close()
-		}
-	}
-
-	// Collect ping results
-	pingStats := make(map[string]*ping.Stat)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case r := <-pingResultsCh:
-				key := r.IP.String()
-				stat, ok := pingStats[key]
-				if !ok {
-					stat = &ping.Stat{}
-					pingStats[key] = stat
-				}
-				if r.Lost {
-					stat.MarkSent()
-				} else {
-					stat.AddReply(r.RTT)
-				}
-			}
-		}
-	}()
+	// Echo attribution via shared helper.
+	wireEchoTier(tracer, table)
 
 	tracer.SetOnRoundEnd(func() {
-		for _, h := range table.Snapshot() {
+		hops := table.Snapshot()
+		for _, h := range hops {
 			h.MarkRoundEnd()
 		}
-		if supplementer != nil {
-			hops := table.Snapshot()
-			maxTTL := table.MaxTTLSeen()
-			rl := hop.DetectRateLimited(hops, maxTTL)
-			hopMap := make(map[int]*hop.Hop, len(hops))
-			for _, h := range hops {
-				hopMap[h.TTL] = h
-			}
-			for ttl := range rl {
-				if h, ok := hopMap[ttl]; ok {
-					if ip := h.GetIP(); ip != nil {
-						supplementer.Submit(ip)
-					}
-				}
-			}
-			supplementer.PingAll()
-		}
+		// Recompute the echo-target set from the live table each round; the
+		// tracer round-robins through it under EchoBudget.
+		tracer.SubmitEchoTargets(collectEchoTargets(table))
 	})
 
 	// Track target hit for display (atomic for cross-goroutine safety)
@@ -552,14 +824,16 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 				return
 			case r := <-probeResults:
 				h := table.GetOrCreate(r.TTL)
-				h.AddSample(r.IP, r.RTT, r.FlowID)
+				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
 				if r.IsTarget {
 					cur := atomic.LoadInt32(&maxTTLHit)
 					if cur == 0 || int32(r.TTL) < cur {
 						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
 					}
 				}
-				if resolver != nil {
+				// Echo replies come from IPs we already know — skip DNS
+				// resubmission to save cache churn, matching the TUI path.
+				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
 					resolver.Submit(r.IP)
 				}
 				if enricher != nil {
@@ -569,12 +843,9 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 		}
 	}()
 
-	// ICMP discovery pass: find target TTL before main protocol starts
-	tracer.Discover(ctx, probeResults)
-
 	// Run tracer (blocks until MaxRounds complete)
 	if err := tracer.Run(ctx, probeResults); err != nil {
-		return fmt.Errorf("tracer error: %w", err)
+		return nil, fmt.Errorf("tracer error: %w", err)
 	}
 
 	// Give DNS a moment to finish outstanding lookups and
@@ -600,12 +871,22 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 			export.WriteDOT(os.Stdout, report)
 		}
 	} else {
-		printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName, pingStats)
+		printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName)
 	}
-	return nil
+	return table, nil
 }
 
-func printReport(target string, targetIP net.IP, table *hop.Table, resolver *resolve.Resolver, enricher *asn.Enricher, maxTTLHit int, numPaths int, protocolName string, pingStats map[string]*ping.Stat) {
+// runReport traces one target end-to-end and either prints the plain-text
+// report or emits a structured export.
+func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, outputFmt string) error {
+	_, err := runReportInner(target, targetIP, cfg, protocolName, noASN, outputFmt)
+	return err
+}
+
+// printReport writes the plain-text traceroute table to stdout. The
+// dagger (†) / tilde (~) rate-limit indicators are driven from each hop's
+// primary PathNode.RateLimitState(); no external ping source is consulted.
+func printReport(target string, targetIP net.IP, table *hop.Table, resolver *resolve.Resolver, enricher *asn.Enricher, maxTTLHit int, numPaths int, protocolName string) {
 	multipath := numPaths > 1
 
 	// Header
@@ -657,14 +938,12 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 
 	// Column headers
 	if multipath {
-		fmt.Printf(fmt.Sprintf("%%-%ds", 4) + " " + ipFmt + " %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
-			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab")
+		fmt.Printf(fmt.Sprintf("%%-%ds", 4)+" "+ipFmt+" %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Rnd", "Avg", "Best", "Wrst", "StDev", "Last", "Flows", "Stab")
 	} else {
-		fmt.Printf(fmt.Sprintf("%%-%ds", 4) + " " + ipFmt + " %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
-			"#", "IP", "Hostname", "ASN", "Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last")
+		fmt.Printf(fmt.Sprintf("%%-%ds", 4)+" "+ipFmt+" %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s\n",
+			"#", "IP", "Hostname", "ASN", "Loss%", "Rnd", "Avg", "Best", "Wrst", "StDev", "Last")
 	}
-
-	rateLimited := hop.DetectRateLimited(hops, maxTTL)
 
 	prevASN := 0
 
@@ -675,6 +954,8 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 			continue
 		}
 
+		isRateLimited := h.PrimaryNode() != nil && h.PrimaryNode().RateLimitState() == hop.RateLimitYes
+
 		if multipath && h.IsDivergent() {
 			// Show one row per unique IP (PathNode) at this TTL
 			// Hop-level loss on first row, "-" on subsequent (ECMP can't attribute per-node)
@@ -683,7 +964,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				return nodes[i].GetReceived() > nodes[j].GetReceived()
 			})
 			hopLoss := h.LossPercent()
-			sent := h.GetSent()
+			sent := h.Rounds()
 			nodeIdx := 0
 			for _, node := range nodes {
 				ip := node.GetIP()
@@ -715,45 +996,25 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
-					// Check for ping supplement data
-					if ps, ok := pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
-						lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
-						sntStr = fmt.Sprintf("%d", ps.Sent)
-					} else if rateLimited[ttl] {
-						lossStr = fmt.Sprintf("~%.0f%%", hopLoss)
-						sntStr = fmt.Sprintf("%d", sent)
+					if isRateLimited {
+						// Echo-confirmed rate limiting: mark with tilde-and-dagger
+						// so the operator sees the hop loss is an ICMP artifact.
+						lossStr = fmt.Sprintf("~%.0f%%†", hopLoss)
 					} else {
 						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
-						sntStr = fmt.Sprintf("%d", sent)
 					}
+					sntStr = fmt.Sprintf("%d", sent)
 				}
 
-				var avg, minRTT, maxRTT, stdev, last float64
-				if nodeIdx == 0 {
-					if ps, ok := pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Received > 0 {
-						avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
-						minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
-						maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
-						stdev = ps.StDev()
-						last = float64(ps.LastRTT.Microseconds()) / 1000.0
-					} else {
-						avg = float64(node.AvgRTT().Microseconds()) / 1000.0
-						minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
-						maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
-						stdev = node.StDev()
-						last = float64(node.GetLastRTT().Microseconds()) / 1000.0
-					}
-				} else {
-					avg = float64(node.AvgRTT().Microseconds()) / 1000.0
-					minRTT = float64(node.GetMinRTT().Microseconds()) / 1000.0
-					maxRTT = float64(node.GetMaxRTT().Microseconds()) / 1000.0
-					stdev = node.StDev()
-					last = float64(node.GetLastRTT().Microseconds()) / 1000.0
-				}
+				avg := float64(node.AvgRTT().Microseconds()) / 1000.0
+				minRTT := float64(node.GetMinRTT().Microseconds()) / 1000.0
+				maxRTT := float64(node.GetMaxRTT().Microseconds()) / 1000.0
+				stdev := node.StDev()
+				last := float64(node.GetLastRTT().Microseconds()) / 1000.0
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
-				fmt.Printf("%-4d " + ipFmt + " %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				fmt.Printf("%-4d "+ipFmt+" %-22s %-20s %-8s %-5s %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -798,32 +1059,22 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				asnLabel = asnLabel[:20]
 			}
 
+			loss := h.LossPercent()
 			var lossStr string
-			var avg, minRTT, maxRTT, stdev, last float64
-			var sent int
-			if ps, ok := pingStats[ip.String()]; ok && rateLimited[ttl] && ps.Sent > 0 {
-				lossStr = fmt.Sprintf("%.1f%%†", ps.LossPercent())
-				sent = ps.Sent
-				if ps.Received > 0 {
-					avg = float64(ps.AvgRTT().Microseconds()) / 1000.0
-					minRTT = float64(ps.MinRTT.Microseconds()) / 1000.0
-					maxRTT = float64(ps.MaxRTT.Microseconds()) / 1000.0
-					stdev = ps.StDev()
-					last = float64(ps.LastRTT.Microseconds()) / 1000.0
-				}
+			if isRateLimited {
+				// Echo-confirmed rate limiting: display an approximate loss
+				// with the dagger marker so the operator knows the TTL loss
+				// is an ICMP artifact, not real packet loss.
+				lossStr = fmt.Sprintf("~%.0f%%†", loss)
 			} else {
-				loss := h.LossPercent()
 				lossStr = fmt.Sprintf("%.1f%%", loss)
-				if rateLimited[ttl] {
-					lossStr = fmt.Sprintf("~%.0f%%", loss)
-				}
-				sent = h.GetSent()
-				avg = float64(h.AvgRTT().Microseconds()) / 1000.0
-				minRTT = float64(h.GetMinRTT().Microseconds()) / 1000.0
-				maxRTT = float64(h.GetMaxRTT().Microseconds()) / 1000.0
-				stdev = h.StDev()
-				last = float64(h.GetLastRTT().Microseconds()) / 1000.0
 			}
+			sent := h.Rounds()
+			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
+			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0
+			maxRTT := float64(h.GetMaxRTT().Microseconds()) / 1000.0
+			stdev := h.StDev()
+			last := float64(h.GetLastRTT().Microseconds()) / 1000.0
 
 			if multipath {
 				// Still show Flows and Stab columns for consistency
@@ -834,7 +1085,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					flows = hop.FormatFlowIDs(nodes[0].GetFlowIDs())
 					stab = fmt.Sprintf("%.0f%%", nodes[0].StabilityPercent())
 				}
-				fmt.Printf("%-4d " + ipFmt + " %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
+				fmt.Printf("%-4d "+ipFmt+" %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -850,7 +1101,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 					stab,
 				)
 			} else {
-				fmt.Printf("%-4d " + ipFmt + " %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
+				fmt.Printf("%-4d "+ipFmt+" %-22s %-20s %-8s %-5d %-8s %-8s %-8s %-8s %-8s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -872,14 +1123,14 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 	_ = prevASN // report mode doesn't use color
 }
 
-func buildProtocol(protocolName string, dstPort int, numPaths *int) (probe.ProbeProtocol, error) {
+func buildProtocol(protocolName string, dstPort int, numPaths *int, cfg probe.Config) (probe.ProbeProtocol, error) {
 	switch protocolName {
 	case "icmp":
 		if *numPaths > 1 {
 			fmt.Fprintln(os.Stderr, "Warning: ICMP mode does not support multipath discovery, ignoring --paths")
 			*numPaths = 1
 		}
-		return probe.NewICMPProtocol(), nil
+		return probe.NewICMPProtocol(cfg), nil
 	case "udp":
 		if dstPort == 0 {
 			dstPort = 33434
@@ -896,7 +1147,7 @@ func buildProtocol(protocolName string, dstPort int, numPaths *int) (probe.Probe
 		}
 		return probe.NewAutoSelector(
 			probe.NewUDPProtocol(dstPort),
-			probe.NewICMPProtocol(),
+			probe.NewICMPProtocol(cfg),
 		), nil
 	default:
 		return nil, fmt.Errorf("unknown protocol: %s (valid: udp, icmp, tcp, auto)", protocolName)

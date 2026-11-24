@@ -120,11 +120,12 @@ func (t *Tracer) listenTCP(ctx context.Context, conn net.PacketConn, pm *probeMa
 		rtt := time.Since(rec.sentAt)
 		select {
 		case results <- Result{
-			TTL:      rec.ttl,
-			IP:       t.target,
-			RTT:      rtt,
-			IsTarget: true,
-			FlowID:   rec.flowID,
+			TTL:       rec.ttl,
+			IP:        t.target,
+			RTT:       rtt,
+			IsTarget:  true,
+			FlowID:    rec.flowID,
+			ProbeType: ProbeTCPTTL,
 		}:
 		case <-ctx.Done():
 			return
