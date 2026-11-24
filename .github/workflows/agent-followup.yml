@@ -28,6 +28,7 @@ jobs:
       go_version_file: go.mod
       bash_allow: >-
         Bash(go build:*),Bash(go test:*),Bash(go vet:*),Bash(gofmt:*),Bash(go mod tidy),
+        Bash(go mod tidy -diff),
         Bash(make build),Bash(make test),Bash(make test-race),Bash(make test-tui),
         Bash(make test-all),Bash(make coverage-gate),Bash(make golden-update)
       protected_paths: |
