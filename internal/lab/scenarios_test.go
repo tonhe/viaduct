@@ -159,24 +159,31 @@ func TestFinalRoundIsCounted(t *testing.T) {
 
 // Scenario 4: replies that take longer than the interval (300 ms delay,
 // 200 ms interval, 1 s timeout) are late, not lost.
+//
+// The 2-round case is the regression check for closing a round the moment its
+// probes are sent: with that bug the last round's replies are still in flight
+// when the run ends and hops 3 and 4 report 1 of 2 answered. In longer runs
+// other per-round work happens to delay the close, which hides the bug, so
+// the short run is the one that matters.
 func TestLateRepliesAreNotLoss(t *testing.T) {
-	const rounds = 10
-	for _, m := range modes[:2] {
-		t.Run(m.name, func(t *testing.T) {
-			reset(t)
-			script(t, "scenarios/delay.sh", "300ms")
-			r := via(t, traceArgs(m, rounds, dst1V4)...)
-			sent := rounds * m.perRound
-			for i, ip := range pathToDst1 {
-				h := hopByTTL(t, r, i+1)
-				wantHop(t, h, ip, rounds, sent, sent)
-				if i >= 2 && len(h.Nodes) == 1 {
-					if avg := h.Nodes[0].RTT.Avg; avg < 300 || avg > 320 {
-						t.Errorf("TTL %d: avg RTT = %.1f ms, want 300-320 (300 ms added delay)", h.TTL, avg)
+	for _, rounds := range []int{2, 10} {
+		for _, m := range modes[:2] {
+			t.Run(m.name+"/"+strconv.Itoa(rounds)+"-rounds", func(t *testing.T) {
+				reset(t)
+				script(t, "scenarios/delay.sh", "300ms")
+				r := via(t, traceArgs(m, rounds, dst1V4)...)
+				sent := rounds * m.perRound
+				for i, ip := range pathToDst1 {
+					h := hopByTTL(t, r, i+1)
+					wantHop(t, h, ip, rounds, sent, sent)
+					if i >= 2 && len(h.Nodes) == 1 {
+						if avg := h.Nodes[0].RTT.Avg; avg < 300 || avg > 320 {
+							t.Errorf("TTL %d: avg RTT = %.1f ms, want 300-320 (300 ms added delay)", h.TTL, avg)
+						}
 					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
