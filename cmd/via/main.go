@@ -53,6 +53,11 @@ var newTracer = func(target net.IP, cfg probe.Config) tracerIface {
 // compile — catching the mismatch before it becomes a runtime panic.
 var _ tracerIface = (*probe.Tracer)(nil)
 
+// Compile-time assertion: the hop table takes the tracer's per-type report of
+// probes sent. Without it the tracer falls back to a total, and a round whose
+// ICMP sends failed is counted as if its first probe had been the ICMP one.
+var _ probe.RoundTypeMarker = (*hop.Table)(nil)
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:     "via [target ...]",
@@ -86,6 +91,7 @@ func main() {
 	rootCmd.Flags().String("theme", "", "color theme (slug name, e.g. 'dracula')")
 	rootCmd.Flags().StringP("output", "o", "", "export format: json, csv, or dot (implies --report)")
 	rootCmd.Flags().String("targets", "", "file containing one target per line (combined with positional args)")
+	rootCmd.Flags().String("debug-log", "", "append probe engine diagnostics (send failures) to this file")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -486,6 +492,17 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		NoDNS:       noDNS,
 		ReportMode:  reportMode,
 		NumPaths: numPaths,
+	}
+
+	// --debug-log: the probe engine's send failures go to a file.
+	debugLogPath, _ := cmd.Flags().GetString("debug-log")
+	closeDebugLog, err := applyDebugLog(&baseCfg, debugLogPath)
+	if err != nil {
+		return err
+	}
+	defer closeDebugLog()
+	if baseCfg.Debugf != nil {
+		baseCfg.Debugf("via %s (%s): protocol %s, interval %v, timeout %v", displayVersion(version), buildVersion, protocolName, interval, timeout)
 	}
 
 	// Build protocol with config available

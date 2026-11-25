@@ -139,11 +139,11 @@ Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` an
 
 The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come from direct echo probes rather than TTL Exceeded replies. No configuration needed — it just works.
 
-**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
+**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. A probe that could not be sent (the socket refused the write, or did not take it within 100 ms) is not counted as sent and not counted as lost; a round in which nothing could be sent to a hop is not a round for that hop and does not count toward alerting. `Rnd` is the number of rounds.
 
 **When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way, because a host throttles the Port Unreachable errors it sends in answer to UDP probes just as a router throttles Time Exceeded.
 
-**Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`.
+**Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`. A hop that answers from an IPv6 link-local address (`fe80::…`) is not echoed, so loss there stays `N%?`.
 
 With several targets in the TUI the verdict takes longer. A trace sends up to 64 echoes a round; the TUI divides that between its targets (64 / targets, never fewer than 4), and a target spreads its share over the nodes of its path. When the share is smaller than the number of nodes, each node gets budget / nodes echoes a round, so 20 samples take about 20 × nodes / budget rounds: about 75 rounds for 16 targets on a 15-node path. Report mode traces targets one after another, so each target gets the full 64.
 
@@ -354,6 +354,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
 | `--no-alert` | | | Disable alerting |
 | `--theme` | | (config) | Color theme slug (e.g. 'dracula', 'nord') |
+| `--debug-log` | | | Append probe engine diagnostics to this file: each address a send failed for (once per address) and, for each round, the probes that could not be sent |
 | `--version` | `-v` | | Print version and exit |
 | `--help` | `-h` | | Print usage and the flag list, then exit |
 
@@ -366,7 +367,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | <kbd>j</kbd> / <kbd>k</kbd> | Scroll down / up one line |
 | <kbd>↓</kbd> / <kbd>↑</kbd> | Scroll down / up one line (single target; with several targets they move focus, see below) |
 | <kbd>g</kbd> / <kbd>G</kbd> | Jump to top/bottom |
-| <kbd>p</kbd> | Pause/resume probing |
+| <kbd>p</kbd> | Pause/resume probing (every probe type, the direct echoes included) |
 | <kbd>r</kbd> | Reset all hop stats |
 | <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability → Probe Detail) |
 | <kbd>e</kbd> | Export the current trace to a file (see [Exporting from the TUI](#exporting-from-the-tui)) |
