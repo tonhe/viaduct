@@ -145,6 +145,8 @@ The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come 
 
 **Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`.
 
+With several targets in the TUI the verdict takes longer. A trace sends up to 64 echoes a round; the TUI divides that between its targets (64 / targets, never fewer than 4), and a target spreads its share over the nodes of its path. When the share is smaller than the number of nodes, each node gets budget / nodes echoes a round, so 20 samples take about 20 × nodes / budget rounds: about 75 rounds for 16 targets on a 15-node path. Report mode traces targets one after another, so each target gets the full 64.
+
 TUI, report mode and alerting all use the same figure, and the JSON carries it. In the JSON:
 
 - Each hop has `loss_pct` (raw TTL-probe loss), `headline_loss_pct` (the figure shown) and `loss_kind` (`measured`, `rate_limited` or `provisional`).

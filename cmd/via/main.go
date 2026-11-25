@@ -265,6 +265,38 @@ func dropLinkLocal(target string, ips []net.IP) ([]net.IP, error) {
 	return routable, nil
 }
 
+// maxEchoBudget is the number of direct echoes a trace sends per round.
+const maxEchoBudget = 64
+
+// echoBudgetFor returns the per-round echo budget of each target. Report mode
+// traces targets one after another, so each gets the full budget. The TUI
+// traces them at once and divides it, with a floor of 4.
+func echoBudgetFor(numSessions int, reportMode bool) int {
+	if reportMode || numSessions <= 1 {
+		return maxEchoBudget
+	}
+	if b := maxEchoBudget / numSessions; b > 4 {
+		return b
+	}
+	return 4
+}
+
+// applyEchoBudget sets the echo budget on every healthy spec's config.
+func applyEchoBudget(specs []tui.TargetSpec, reportMode bool) {
+	numSessions := 0
+	for _, sp := range specs {
+		if sp.Err == nil {
+			numSessions++
+		}
+	}
+	echoBudget := echoBudgetFor(numSessions, reportMode)
+	for i := range specs {
+		if specs[i].Err == nil {
+			specs[i].Cfg.EchoBudget = echoBudget
+		}
+	}
+}
+
 // isIPv4MappedLiteral reports whether s is an IPv6 literal of the form
 // ::ffff:a.b.c.d (or its hex spelling), which stands for an IPv4 address.
 func isIPv4MappedLiteral(s string) bool {
@@ -505,24 +537,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Report mode: bypass TUI, run N rounds per target, print/export, exit.
 	// Stamp echo budget on healthy specs first (mirrors the TUI path below).
 	if reportMode {
-		numSessions := 0
-		for _, sp := range specs {
-			if sp.Err == nil {
-				numSessions++
-			}
-		}
-		echoBudget := 64
-		if numSessions > 1 {
-			echoBudget = 64 / numSessions
-			if echoBudget < 4 {
-				echoBudget = 4
-			}
-		}
-		for i := range specs {
-			if specs[i].Err == nil {
-				specs[i].Cfg.EchoBudget = echoBudget
-			}
-		}
+		applyEchoBudget(specs, true)
 		return runMultiReport(specs, protocolName, noASN, outputFmt)
 	}
 
@@ -542,24 +557,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	}
 
 	// Compute per-session echo budget and apply to each healthy spec's config.
-	numSessions := 0
-	for _, sp := range specs {
-		if sp.Err == nil {
-			numSessions++
-		}
-	}
-	echoBudget := 64
-	if numSessions > 1 {
-		echoBudget = 64 / numSessions
-		if echoBudget < 4 {
-			echoBudget = 4
-		}
-	}
-	for i := range specs {
-		if specs[i].Err == nil {
-			specs[i].Cfg.EchoBudget = echoBudget
-		}
-	}
+	applyEchoBudget(specs, false)
 
 	// Create TUI model using NewMulti (works for 1 or N sessions).
 	versionStr := displayVersion(version) + " (" + buildVersion + ")"
