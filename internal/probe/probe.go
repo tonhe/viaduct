@@ -184,6 +184,21 @@ func (pm *probeMap) match(key probeKey) (probeRecord, bool) {
 	return rec, ok
 }
 
+// matchICMPError is match for an ICMP error (Time Exceeded, Destination
+// Unreachable) that quotes the probe. An error is not an Echo Reply, so it
+// never answers an echo-tier probe: that record is left in place and the echo
+// times out as lost. Every other record is matched and consumed as by match.
+func (pm *probeMap) matchICMPError(key probeKey) (probeRecord, bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	rec, ok := pm.items[key]
+	if !ok || rec.probeType == ProbeICMPEcho {
+		return probeRecord{}, false
+	}
+	delete(pm.items, key)
+	return rec, true
+}
+
 // sweep removes stale entries older than maxAge to prevent memory leaks
 // from probes that never received a response.
 func (pm *probeMap) sweep(maxAge time.Duration) {
@@ -717,13 +732,14 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 
 		// An Echo Reply answers a probe only if it comes from the address
 		// that probe was sent to. ICMP errors come from routers along the
-		// path, so they are matched on the quoted packet alone.
+		// path, so they are matched on the quoted packet alone, and never
+		// answer an echo-tier probe.
 		var rec probeRecord
 		var ok bool
 		if msg.Type == EchoReplyType(t.cfg.IPVersion) {
 			rec, ok = t.pm.matchEchoReply(key, peerIP)
 		} else {
-			rec, ok = t.pm.match(key)
+			rec, ok = t.pm.matchICMPError(key)
 		}
 		if !ok {
 			continue
