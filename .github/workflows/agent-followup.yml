@@ -1,10 +1,11 @@
-# One fix round after reviews, then auto-merge for risk:low. Sweeps every 3 hours as a fallback.
+# One fix round after reviews, then auto-merge for risk:low. A sweep of every agent PR is the
+# fallback: gh workflow run agent-followup.yml
+# There is no schedule here: GitHub started this repo's scheduled runs hours late or dropped
+# them (#121). An outside scheduler starts the sweep.
 name: agent-followup
 on:
   pull_request_review:
     types: [submitted]
-  schedule:
-    - cron: '43 */3 * * *'
   workflow_dispatch:
     inputs:
       pr: {description: "PR number (empty = all agent PRs)", required: false}
