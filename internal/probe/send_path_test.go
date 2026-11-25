@@ -107,9 +107,12 @@ func TestSend_WriteDeadlineIsSetBeforeEveryWrite(t *testing.T) {
 						t.Fatalf("send %d was %v, want [ttl deadline write]", i/3, calls[i:i+3])
 					}
 				}
+				// Measured inside the fake, a moment after the deadline was
+				// computed: at most the send timeout ahead, and not a zero or
+				// stale time.
 				for i, d := range lead {
-					if d <= 0 || d > cfg.SendTimeout {
-						t.Errorf("deadline %d was set %v ahead, want within (0, %v]", i, d, cfg.SendTimeout)
+					if d > cfg.SendTimeout || d < cfg.SendTimeout-time.Second {
+						t.Errorf("deadline %d was set %v ahead, want the send timeout (%v)", i, d, cfg.SendTimeout)
 					}
 				}
 
@@ -230,6 +233,23 @@ func TestSend_RealSocketDeadlineFailsTheSend(t *testing.T) {
 	snd := &rawSender{conn: conn, ipVersion: 4}
 
 	dst := conn.LocalAddr().(*net.UDPAddr)
+
+	// The kernel socket itself: a deadline in the past fails the write, and
+	// the error is recognised as a timeout.
+	if err := snd.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snd.WriteTo([]byte("probe"), dst); !isSendTimeout(err) {
+		t.Fatalf("write past its deadline returned %v, want a timeout", err)
+	}
+	// A deadline is per write: with a fresh one the same socket writes again.
+	if err := snd.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snd.WriteTo([]byte("probe"), dst); err != nil {
+		t.Fatalf("write with a fresh deadline failed: %v", err)
+	}
+
 	// rawSender writes to whatever address it is given; the UDP stand-in needs
 	// a UDP address, so the write goes through a sender that supplies one.
 	udp := udpAddrSender{rawSender: snd, to: dst}
