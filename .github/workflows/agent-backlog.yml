@@ -1,8 +1,9 @@
 # Nightly backlog triage. Logic lives in tonhe/agent-loop.
+#   Start it: gh workflow run agent-backlog.yml
+# There is no schedule here: GitHub started this repo's scheduled runs hours late or dropped
+# them (#121). An outside scheduler starts it, before agent-dev.
 name: agent-backlog
 on:
-  schedule:
-    - cron: '17 6 * * *'   # ~1:17 AM Eastern (UTC; drifts an hour with DST)
   workflow_dispatch:
     inputs:
       dry_run: {type: boolean, default: false, description: "Plan only, change nothing"}

@@ -1,15 +1,18 @@
 # Dev agent: nightly on agent:ready issues, on demand, or when you label an issue agent:urgent.
-#   One issue now:        gh workflow run agent-dev.yml -f issue=42
-#   The nightly selection: gh workflow run agent-dev.yml
-# GitHub starts scheduled runs hours late or drops them, so an outside scheduler can start
-# the nightly selection with the second command.
+#   One issue now:         gh workflow run agent-dev.yml -f issue=42
+#   The nightly selection: gh workflow run agent-dev.yml -f mode=scheduled
+# There is no schedule here: GitHub started this repo's scheduled runs hours late or dropped
+# them (#121). An outside scheduler starts the nightly selection with the second command.
 name: agent-dev
 on:
-  schedule:
-    - cron: '17 7 * * *'   # ~2:17 AM Eastern
   workflow_dispatch:
     inputs:
-      issue: {description: "Issue number to work now (empty = the nightly selection)", required: false}
+      mode:
+        description: "scheduled = the nightly selection; manual and urgent need an issue number"
+        type: choice
+        options: [manual, scheduled, urgent]
+        default: manual
+      issue: {description: "Issue number (manual and urgent only)", required: false}
   issues:
     types: [labeled]
 permissions:
@@ -26,9 +29,10 @@ jobs:
     uses: tonhe/agent-loop/.github/workflows/dev.yml@v1
     with:
       loop_ref: v1
-      # A dispatch without an issue number runs the nightly selection, like the schedule.
-      mode: ${{ github.event_name == 'issues' && 'urgent' || (github.event.inputs.issue && 'manual' || 'scheduled') }}
-      issue: ${{ github.event.inputs.issue || github.event.issue.number || '' }}
+      # A label event is always urgent; a dispatch runs in the mode it names. The nightly
+      # selection ignores any issue number.
+      mode: ${{ github.event_name == 'issues' && 'urgent' || github.event.inputs.mode || 'manual' }}
+      issue: ${{ github.event.inputs.mode != 'scheduled' && (github.event.inputs.issue || github.event.issue.number) || '' }}
       owner_login: tonhe
       git_author_name: tonhe
       git_author_email: a.mattke@gmail.com
