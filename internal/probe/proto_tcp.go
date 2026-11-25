@@ -126,18 +126,23 @@ func (t *Tracer) listenTCP(ctx context.Context, conn net.PacketConn, pm *probeMa
 		default:
 		}
 		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		n, _, err := conn.ReadFrom(buf)
+		n, from, err := conn.ReadFrom(buf)
 		if err != nil {
+			t.expTCPReadErr(err) // EXPERIMENT ONLY, not for merge (viaduct#172)
 			continue
 		}
+		t.expTCPRead(buf[:n], from) // EXPERIMENT ONLY, not for merge
 		key, isTarget := parseTCPResponse(buf[:n])
 		if key == nil || !isTarget {
+			t.expTCPRejected(buf[:n], from) // EXPERIMENT ONLY, not for merge
 			continue
 		}
 		rec, ok := pm.match(*key)
 		if !ok {
+			t.expTCPUnmatched(buf[:n], from, *key, pm) // EXPERIMENT ONLY, not for merge
 			continue
 		}
+		t.expTCPMatched() // EXPERIMENT ONLY, not for merge
 		// Record the target TTL so the sender can cap its range
 		atomic.CompareAndSwapInt32(&t.targetTTL, 0, int32(rec.ttl))
 

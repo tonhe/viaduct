@@ -313,6 +313,9 @@ type Tracer struct {
 
 	// sends is the send loop's record of probes that did not leave (send.go).
 	sends sendState
+
+	// expTCP: EXPERIMENT ONLY, not for merge (viaduct#172). See exp_tcp_recv.go.
+	expTCP expTCPRecv
 }
 
 // defaultListenICMP wraps icmp.ListenPacket so its return type satisfies
@@ -444,6 +447,9 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			defer rawConn.Close()
 			// For TCP, also start a listener for SYN-ACK/RST responses
 			if proto.Name() == "tcp" {
+				// EXPERIMENT ONLY, not for merge (viaduct#172).
+				t.expTCPSocket(rawProto, rawConn)
+				defer t.expTCPSummary("exit")
 				go t.listenTCP(ctx, rawConn, t.pm, results)
 			}
 			snd = &rawSender{conn: rawConn, ipVersion: t.cfg.IPVersion}
@@ -553,6 +559,11 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		// The round's sends are done: log what did not leave, and let the
 		// next round try a stalled socket again.
 		t.endSendRound(round + 1)
+		// EXPERIMENT ONLY, not for merge (viaduct#172): running totals of what
+		// the raw TCP socket delivered, taken when the round's sends are done.
+		if proto.Name() == "tcp" {
+			t.expTCPSummary(fmt.Sprintf("round %d", round+1))
+		}
 
 		// Sweep stale probe entries that never received a response
 		t.pm.sweep(2 * t.cfg.Timeout)
