@@ -137,6 +137,21 @@ func destAlertMetrics(hopMap map[int]*hop.Hop, maxTTL int) (loss float64, latenc
 	return 0, 0
 }
 
+// destAlertTTL returns the TTL of the hop destAlertMetrics reads: the last
+// responding hop, or 0 when no hop has responded.
+func destAlertTTL(hopMap map[int]*hop.Hop, maxTTL int) int {
+	for i := maxTTL; i >= 1; i-- {
+		h, ok := hopMap[i]
+		if !ok || h == nil {
+			continue
+		}
+		if pn := h.PrimaryNode(); pn != nil && pn.GetReceived() > 0 {
+			return i
+		}
+	}
+	return 0
+}
+
 // FindAffectedHop walks backward from the destination to find the first hop
 // contributing to the degradation.
 func (e *AlertEngine) FindAffectedHop(hopMap map[int]*hop.Hop, maxTTL int, deltas []time.Duration) {

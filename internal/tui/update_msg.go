@@ -137,7 +137,12 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	hops := s.table.Snapshot()
+	// The TTLs probes were sent to in the round being closed.
+	sentTo := make(map[int]bool, len(hops))
 	for _, h := range hops {
+		if h.RoundOpen() {
+			sentTo[h.TTL] = true
+		}
 		h.MarkRoundEnd()
 	}
 	// Collect {IP, TTL} pairs and submit to the echo sink for next-round echo probing.
@@ -159,6 +164,13 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 		maxTTL := s.table.MaxTTLSeen()
 		if s.maxTTLHit > 0 && s.maxTTLHit < maxTTL {
 			maxTTL = s.maxTTLHit
+		}
+		// A round that sent nothing to the destination's hop (the trace was
+		// paused, or no send to it succeeded) is no evidence about the path:
+		// the alert engine counts consecutive bad rounds, and such a round is
+		// neither bad nor good.
+		if dest := destAlertTTL(hopMap, maxTTL); dest > 0 && !sentTo[dest] {
+			return m, nil
 		}
 		destLoss, destLatency := destAlertMetrics(hopMap, maxTTL)
 		bell := s.alertEngine.Update(destLoss, destLatency)
