@@ -25,18 +25,24 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run GoReleaser
+      # Nothing is published by this step: it builds one linux/amd64 binary
+      # into dist/ from the same .goreleaser.yml (same ldflags, same commit)
+      # as the release below. No token is passed to it.
+      - name: Build one binary to check the version
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: build --single-target --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOS: linux
+          GOARCH: amd64
 
-      # The tag is the only source of the version. If the binary GoReleaser
-      # built does not report it, fail here: the installer and Homebrew jobs
-      # need this job and will not run.
-      - name: Check the released binary reports the tag
+      # The tag is the only source of the version. `via --version` prints
+      # "via version <version> (build <commit>)"; <version> must be exactly
+      # the tag without its leading "v". If it is not, fail here, before the
+      # release step: no release, archive or tap update exists yet, and the
+      # installer and Homebrew jobs need this job and will not run.
+      - name: Check the built binary reports the tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -46,15 +52,25 @@ jobs:
             echo "::error::no linux/amd64 binary found under dist/"
             exit 1
           fi
-          got=$("$bin" --version)
-          echo "$bin reports: $got"
-          case "$got" in
-            *"$want"*) ;;
-            *)
-              echo "::error::the released binary reports '$got', which does not contain the tag's version '$want'"
-              exit 1
-              ;;
-          esac
+          out=$("$bin" --version)
+          echo "$bin reports: $out"
+          got=$(printf '%s\n' "$out" | awk 'NR == 1 { print $3 }')
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            echo "::error::the built binary reports version '$got', the tag's version is '$want'; nothing was published"
+            exit 1
+          fi
+          echo "version '$got' matches tag '$TAG'"
+
+      # Only reached when the check above passed. --clean removes the dist/
+      # the check build left behind (dist/ is in .gitignore, so the tree is
+      # not dirty).
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   windows-installer:
     needs: release
