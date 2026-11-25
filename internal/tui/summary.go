@@ -29,9 +29,20 @@ func (m Model) renderSummary() string {
 
 // summaryHeader renders the column header line for the summary panel.
 func (m Model) summaryHeader() string {
-	line := fmt.Sprintf("  %-24s %5s %7s %9s  %-16s %s",
+	// Same widths as the row format in renderSummaryRow: the AVG value is
+	// "%8.1fms", ten cells.
+	line := fmt.Sprintf("  %-24s %5s %7s %10s  %-16s %s",
 		"TARGET", "HOPS", "LOSS", "AVG", "WRST-HOP", "ALERT")
-	return barBg(dimStyle().Render(line), m.width) + "\n"
+	return barBg(dimStyle().Render(m.fitLine(line)), m.width) + "\n"
+}
+
+// fitLine cuts a plain line to the terminal's width. Before the size is known
+// the line is left as it is.
+func (m Model) fitLine(line string) string {
+	if m.width <= 0 {
+		return line
+	}
+	return cutToWidth(line, m.width)
 }
 
 // renderSummaryRow renders one row for session i. Focused row uses the
@@ -49,18 +60,24 @@ func (m Model) renderSummaryRow(i int, s *TargetSession) string {
 
 	if s.startErr != nil {
 		row := fmt.Sprintf("%s%-24s  error: %s", prefix, truncateSummary(name, 24), s.startErr.Error())
-		return m.styleSummaryRow(i, row) + "\n"
+		return m.styleSummaryRow(i, m.fitLine(row)) + "\n"
 	}
 
 	hops := summaryHops(s)
 	loss, lossKind, avg := destStats(s)
 	alertMsg := summaryAlert(s)
-	row := fmt.Sprintf("%s%-24s %5d %7s %8.1fms  %-16s %s",
-		prefix, truncateSummary(name, 24), hops, hop.FormatLoss(loss, lossKind),
-		float64(avg)/float64(time.Millisecond),
+	// Before any hop has answered there is nothing to report: dashes, not
+	// zero figures that read as a measurement.
+	lossCol, avgCol := "-", "-"
+	if hops > 0 {
+		lossCol = hop.FormatLoss(loss, lossKind)
+		avgCol = fmt.Sprintf("%.1fms", float64(avg)/float64(time.Millisecond))
+	}
+	row := fmt.Sprintf("%s%-24s %5d %7s %10s  %-16s %s",
+		prefix, truncateSummary(name, 24), hops, lossCol, avgCol,
 		truncateSummary(worstHop(s), 16),
 		alertMsg)
-	return m.styleSummaryRow(i, row) + "\n"
+	return m.styleSummaryRow(i, m.fitLine(row)) + "\n"
 }
 
 // styleSummaryRow paints row with the selection background when it is the
@@ -192,7 +209,7 @@ func summaryAlert(s *TargetSession) string {
 // failed to start (startErr != nil). Fills all available rows with the
 // error message and empty background lines.
 func (m Model) renderFocusedError(s *TargetSession, availableRows int) string {
-	msg := lossStyle().Render(s.target + ": " + s.startErr.Error() + " — target is not being traced")
+	msg := lossStyle().Render(m.fitLine(s.target + ": " + s.startErr.Error() + " — target is not being traced"))
 	var b strings.Builder
 	b.WriteString(lineBg(msg, m.width))
 	b.WriteString("\n")

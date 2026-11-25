@@ -1,8 +1,8 @@
-[38;2;131;148;150m[48;2;7;54;66mvia 0.0.0-test   Target: bad.example ((unresolved))    Proto: UDP/ECMP    Probes: 0                                     [0m
+[38;2;131;148;150m[48;2;7;54;66mvia 0.0.0-test   Target: bad.example (unresolved)    Proto: UDP/ECMP    Probes: 0                                       [0m
 [38;2;131;148;150m[48;2;7;54;66m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-[38;2;131;148;150m[48;2;7;54;66m  TARGET                    HOPS    LOSS       AVG  WRST-HOP         ALERT                                              [0m
+[38;2;131;148;150m[48;2;7;54;66m  TARGET                    HOPS    LOSS        AVG  WRST-HOP         ALERT                                             [0m
 [38;2;147;161;161m[48;2;0;43;54m  one.example                  3    0.0%     12.4ms  203.0.113.1      —                                                 [0m
-[38;2;147;161;161m[48;2;0;43;54m  two.example                  0    0.0%      0.0ms  —                —                                                 [0m
+[38;2;147;161;161m[48;2;0;43;54m  two.example                  0       -          -  —                —                                                 [0m
 [38;2;238;232;213m[48;2;88;110;117m▶ bad.example               error: cannot resolve host                                                                  [0m
 [38;2;147;161;161m[48;2;0;43;54m#        IP              Hostname                  Loss%    Rnd   Avg     Best    Wrst    StDev   Last    Spark         [0m
 [38;2;147;161;161m[48;2;0;43;54mbad.example: cannot resolve host — target is not being traced                                                           [0m
@@ -37,4 +37,4 @@
 [38;2;147;161;161m[48;2;0;43;54m                                                                                                                        [0m
 [38;2;147;161;161m[48;2;0;43;54m                                                                                                                        [0m
 [38;2;147;161;161m[48;2;0;43;54m                                                                                                                        [0m
-[38;2;131;148;150m[48;2;7;54;66mTracing... 0 hops    Elapsed: 0s    DNS: off    6 flows    j/k:scroll p:pause r:reset [d] Health q:quit    ↑/↓:target space:mark c:columns[0m
+[38;2;131;148;150m[48;2;7;54;66mTracing... 0 hops    Elapsed: 0s    DNS: off    6 flows    j/k:scroll p:pause r:reset [d] Health q:quit                 [0m

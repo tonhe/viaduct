@@ -208,8 +208,16 @@ func (m Model) renderColumns() string {
 			maxTTL = d
 		}
 	}
-	if availRows > 0 && maxTTL > availRows {
-		maxTTL = availRows
+	// Column view does not scroll. When the deepest path does not fit, one
+	// row is given to a note saying how much is shown, so a cut path is not
+	// mistaken for a short one.
+	cutNote := ""
+	if deepest := maxTTL; availRows > 0 && deepest > availRows {
+		maxTTL = availRows - 1
+		if maxTTL < 1 {
+			maxTTL = 1
+		}
+		cutNote = fmt.Sprintf("  hops 1–%d of %d shown — c for the full table", maxTTL, deepest)
 	}
 	if maxTTL < 1 {
 		maxTTL = 1
@@ -234,8 +242,12 @@ func (m Model) renderColumns() string {
 		b.WriteString(lineBg(sb.String(), m.width))
 		b.WriteString("\n")
 	}
+	if cutNote != "" {
+		b.WriteString(lineBg(dimStyle().Render(m.fitLine(cutNote)), m.width))
+		b.WriteString("\n")
+	}
 	if hidden > 0 {
-		more := dimStyle().Render(fmt.Sprintf("  +%d more — space to mark which show", hidden))
+		more := dimStyle().Render(m.fitLine(fmt.Sprintf("  +%d more — space to mark which show", hidden)))
 		b.WriteString(lineBg(more, m.width))
 		b.WriteString("\n")
 	}

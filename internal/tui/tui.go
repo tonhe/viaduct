@@ -340,8 +340,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the TUI.
+// View renders the TUI: the frame for the current view, never taller than the
+// terminal.
 func (m Model) View() string {
+	return clipFrame(m.renderView(), m.height)
+}
+
+// clipFrame cuts a frame to at most height lines. The last line is kept, since
+// it is the status bar; the lines above it are cut from the bottom. A frame
+// taller than the terminal scrolls the header off the top, which is what
+// happened when the summary panel of a 16-target session left no room on a
+// short terminal. A height of zero or less means the size is not known yet.
+func clipFrame(frame string, height int) string {
+	if height <= 0 {
+		return frame
+	}
+	// A frame may end with a newline; that is not an extra line.
+	body := strings.TrimSuffix(frame, "\n")
+	lines := strings.Split(body, "\n")
+	if len(lines) <= height {
+		return frame
+	}
+	kept := append(lines[:height-1:height-1], lines[len(lines)-1])
+	return strings.Join(kept, "\n") + frame[len(body):]
+}
+
+// renderView renders the frame for the current view at whatever height it
+// comes to; View clips it.
+func (m Model) renderView() string {
 	if m.err != nil {
 		return m.errorView()
 	}
@@ -355,27 +381,15 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// Header bar
-	protoLabel := strings.ToUpper(s.protocolName)
-	if s.protocolName == "auto" {
-		protoLabel = "Auto → " + strings.ToUpper(s.probeCfg.Protocol.Name())
-	}
-	if s.protocolName != "icmp" && s.probeCfg.NumPaths > 1 {
-		protoLabel += "/ECMP"
-	}
-	targetIPStr := "(unresolved)"
-	if s.targetIP != nil {
-		targetIPStr = s.targetIP.String()
-	}
-	header := fmt.Sprintf("via %s   Target: %s (%s)    Proto: %s    Probes: %d",
-		m.version, s.target, targetIPStr, protoLabel, s.probeCount)
+	viewName := ""
 	if m.viewMode != ViewDefault {
-		header += fmt.Sprintf("    View: %s", m.viewMode.String())
+		viewName = m.viewMode.String()
 	}
-	b.WriteString(barBg(headerStyle().Render(header), m.width))
+	b.WriteString(barBg(headerStyle().Render(m.headerLine(s, viewName)), m.width))
 	b.WriteString("\n")
 
 	// Separator
-	b.WriteString(barBg(dimStyle().Render(strings.Repeat("─", max(m.width, 60))), m.width))
+	b.WriteString(barBg(dimStyle().Render(separatorLine(m.width)), m.width))
 	b.WriteString("\n")
 
 	// Column comparison view: side-by-side layout when more than one session
@@ -407,8 +421,15 @@ func (m Model) View() string {
 		// Column view: surface the focus/mark/select keys on the status bar.
 		// space marks the focused target; when any are marked, only marked panes
 		// show — so mark doubles as pane selection.
-		status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s    tab/↑↓:focus  space:mark  c:summary  e:export  p:pause  r:reset  q:quit",
-			traceStatus, elapsed, dnsLabel)
+		const colKeys = "tab/↑↓:focus  space:mark  c:summary  e:export  p:pause  r:reset"
+		status := m.statusLine(
+			fmt.Sprintf("%s    Elapsed: %s    DNS: %s    %s  q:quit", traceStatus, elapsed, dnsLabel, colKeys),
+			statusParts{
+				trace:   traceStatus,
+				elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+				dns:     "DNS: " + dnsLabel,
+				keys:    colKeys,
+			})
 		b.WriteString(barBg(statusStyle().Render(status), m.width))
 		if m.showSettings && m.settings != nil {
 			return m.settings.View()
@@ -432,14 +453,8 @@ func (m Model) View() string {
 	// Determine how many hop lines we can show.
 	// Fixed lines consumed: 3 header lines (title + separator + col header) + 1 status bar.
 	// In multi-target mode subtract the summary panel (header + one row per session).
-	fixedLines := 4
-	if multiTarget {
-		fixedLines += m.summaryLineCount()
-	}
-	availableRows := 0
-	if m.height > fixedLines {
-		availableRows = m.height - fixedLines
-	}
+	fixedLines := m.fixedLineCount()
+	availableRows := m.hopRowsAvailable()
 
 	// hopLines holds all rendered hop rows before viewport clipping.
 	// displayLines is the subset actually written to the builder.
@@ -593,7 +608,7 @@ func (m Model) View() string {
 	}
 
 	if alertLine != "" {
-		b.WriteString(lineBg(alertStyle().Render(alertLine), m.width))
+		b.WriteString(lineBg(alertStyle().Render(m.fitLine(alertLine)), m.width))
 		b.WriteString("\n")
 	}
 
@@ -636,8 +651,20 @@ func (m Model) View() string {
 	if len(m.sessions) > 1 {
 		multiHint = "    ↑/↓:target space:mark c:columns"
 	}
-	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset [d] %s q:quit%s%s",
-		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, m.viewMode.Next().String(), scrollHint, multiHint)
+	keys := "j/k:scroll p:pause r:reset [d] " + m.viewMode.Next().String()
+	status := m.statusLine(
+		fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    %s q:quit%s%s",
+			traceStatus, elapsed, dnsLabel, flowLabel, switchHint, keys, scrollHint, multiHint),
+		statusParts{
+			trace:   traceStatus,
+			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+			dns:     "DNS: " + dnsLabel,
+			flows:   strings.TrimSpace(flowLabel),
+			notice:  strings.TrimSpace(switchHint),
+			keys:    keys,
+			scroll:  strings.TrimSpace(scrollHint),
+			multi:   strings.TrimSpace(multiHint),
+		})
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
 
 	// Settings overlay — rendered on top of everything else.
@@ -1560,9 +1587,19 @@ func computeIPColWidth(hops []*hop.Hop) int {
 	return w
 }
 
-// FinalSummary returns a plain-text summary table for printing to stdout after the TUI exits.
+// FinalSummary returns the plain-text summary printed to stdout after the TUI
+// exits: one table per target, in session order, separated by a blank line. A
+// target that failed to start gets its error line.
 func (m Model) FinalSummary() string {
-	s := m.focused()
+	parts := make([]string, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		parts = append(parts, m.finalSummaryFor(s))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// finalSummaryFor returns the summary table for one target.
+func (m Model) finalSummaryFor(s *TargetSession) string {
 	var b strings.Builder
 
 	// Guard: if the session failed to resolve (errored spec), emit a short error
@@ -1780,12 +1817,31 @@ func (m Model) FinalSummary() string {
 }
 
 // maxScrollOffset returns the maximum valid scroll offset for the current state.
+// fixedLineCount is the number of lines the default view spends on everything
+// but hop rows: title, separator, column header and status bar, plus the
+// summary panel when several targets are traced.
+func (m Model) fixedLineCount() int {
+	n := 4
+	if len(m.sessions) > 1 && !m.columnView {
+		n += m.summaryLineCount()
+	}
+	return n
+}
+
+// hopRowsAvailable is the number of hop rows the default view can show. View
+// and the scroll limit both use it: when they disagreed (the scroll limit
+// ignored the summary panel) the first hops of a long path could not be
+// scrolled to.
+func (m Model) hopRowsAvailable() int {
+	if fixed := m.fixedLineCount(); m.height > fixed {
+		return m.height - fixed
+	}
+	return 0
+}
+
 func (m Model) maxScrollOffset() int {
 	totalLines := m.countHopLines()
-	availableRows := 0
-	if m.height > 4 {
-		availableRows = m.height - 4
-	}
+	availableRows := m.hopRowsAvailable()
 	maxOff := totalLines - availableRows
 	if maxOff < 0 {
 		maxOff = 0
