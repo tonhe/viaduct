@@ -418,6 +418,12 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Resolve all targets. hasV4/hasV6 probed once before the loop.
 	specs := resolveTargetSpecs(targets, forceV4, forceV6, hasV4, hasV6, baseCfg, protocolName, net.LookupIP)
 
+	// The base config's protocol object is shared by every spec. Give each
+	// target its own where the protocol keeps per-trace state (auto mode).
+	if err := perTargetProtocols(specs, protocolName, dstPort, numPaths); err != nil {
+		return err
+	}
+
 	// For single-target, preserve the original error semantics: error → exit 1.
 	if len(specs) == 1 && specs[0].Err != nil {
 		return specs[0].Err
@@ -1205,6 +1211,28 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 		}
 	}
 	_ = prevASN // report mode doesn't use color
+}
+
+// perTargetProtocols gives every healthy target its own protocol object where
+// the protocol holds state. Only auto mode does: its selector records whether
+// this trace has fallen back from UDP to ICMP, and a selector shared between
+// targets would switch all of them when one got no replies.
+func perTargetProtocols(specs []tui.TargetSpec, protocolName string, dstPort, numPaths int) error {
+	if protocolName != "auto" {
+		return nil
+	}
+	for i := range specs {
+		if specs[i].Err != nil {
+			continue
+		}
+		n := numPaths
+		proto, err := buildProtocol(protocolName, dstPort, &n, specs[i].Cfg)
+		if err != nil {
+			return err
+		}
+		specs[i].Cfg.Protocol = proto
+	}
+	return nil
 }
 
 func buildProtocol(protocolName string, dstPort int, numPaths *int, cfg probe.Config) (probe.ProbeProtocol, error) {
