@@ -23,6 +23,12 @@ type Hop struct {
 	probesRecvd  int // non-echo replies received
 	closedSent   int // probesSent as of the last closed round
 	closedRecvd  int // probesRecvd as of the last closed round
+	closedRounds int // roundsSent as of the last closed round
+
+	// draining is set by Reset when this hop's round was open at the reset.
+	// Replies still on their way answer probes whose sends Reset discarded,
+	// so they are dropped until that round closes or a new round is sent.
+	draining bool
 
 	mu sync.RWMutex
 }
@@ -32,10 +38,16 @@ func NewHop(ttl int) *Hop {
 	return &Hop{TTL: ttl}
 }
 
-// AddSample records an RTT measurement from the given IP with a flow identifier.
-func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind) {
+// AddSample records an RTT measurement from the given IP with a flow
+// identifier. It reports whether the sample was recorded: a reply that
+// arrives while the round open at a Reset drains is dropped (see Reset).
+func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if h.draining {
+		return false
+	}
 
 	// Find or create PathNode for this IP
 	var node *PathNode
@@ -53,6 +65,7 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind
 		h.probesRecvd++
 	}
 	node.AddSample(rtt, flowID, kind)
+	return true
 }
 
 // IsDivergent returns true if more than one IP has been seen at this TTL.
@@ -105,6 +118,8 @@ func (h *Hop) MarkRoundSent() { h.MarkRoundSentProbes(1) }
 func (h *Hop) MarkRoundSentProbes(probes int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// A new round's probes are out: replies from here on may answer them.
+	h.draining = false
 	h.roundsSent++
 	if probes > 0 {
 		h.probesSent += probes
@@ -113,10 +128,20 @@ func (h *Hop) MarkRoundSentProbes(probes int) {
 
 // MarkRoundEnd closes a probe round: probes sent so far and replies received
 // so far become the figures loss is computed from, then stability tracking
-// advances for all nodes.
+// advances for all nodes. A round in which nothing was sent to this hop
+// (the tracer was paused, or the hop lies beyond the destination) updates the
+// figures but is not a round for the nodes: it adds no probes, sparkline cell
+// or stability slot.
 func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.draining = false
+	if h.roundsSent == h.closedRounds {
+		h.closedSent = h.probesSent
+		h.closedRecvd = h.probesRecvd
+		return
+	}
+	h.closedRounds = h.roundsSent
 	// Probes sent to this hop in the round being closed. A round is one ICMP
 	// TTL probe followed by the UDP or TCP flows, so the first is the ICMP
 	// probe and the rest are primary probes.
@@ -389,10 +414,16 @@ func (h *Hop) Rounds() int {
 	return h.roundsSent
 }
 
-// Reset clears all nodes and zeroes counters, preserving TTL.
+// Reset clears all nodes and zeroes counters, preserving TTL. If a round
+// was sent to this hop and has not closed, its replies may still be in
+// flight; they would be credited against the zeroed sent count and hide later
+// loss, so they are dropped until the round closes. The open round is not
+// counted at all: neither as sent nor as lost.
 func (h *Hop) Reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.draining = h.roundsSent > h.closedRounds
+	h.closedRounds = 0
 	h.Nodes = nil
 	h.roundsSent = 0
 	h.probesSent = 0
