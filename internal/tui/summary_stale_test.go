@@ -93,6 +93,31 @@ func TestWorstHop_IgnoresHopsBeyondTheDestination(t *testing.T) {
 	}
 }
 
+// Golden: a two-target summary whose first target has the round-one entries
+// beyond its destination, as every real trace does. The row must show the
+// destination's own figures and a path length of 3.
+func TestGolden_SummaryView_HopsBeyondTheDestination(t *testing.T) {
+	setTestTheme(t)
+	m := newTestModel(
+		withSize(120, 30),
+		withHops(hopSample(1, "192.0.2.254", 1300*time.Microsecond)),
+	)
+	stale := staleTailSession()
+	m.sessions[0].target = stale.target
+	m.sessions[0].targetIP = stale.targetIP
+	m.sessions[0].table = stale.table
+	m.sessions[0].maxTTLHit = stale.maxTTLHit
+	m.sessions[0].targetHit = true
+	m.sessions = append(m.sessions,
+		newSession("other.example", net.ParseIP("203.0.113.9"), m.sessions[0].probeCfg, "udp", 5.0, 0, 3, true))
+
+	out := m.View()
+	if !strings.Contains(out, "55.7%") {
+		t.Errorf("summary does not show the destination hop's 55.7%% loss:\n%s", out)
+	}
+	goldenCompare(t, "testdata/view/summary_stale_tail.golden", out)
+}
+
 func TestSummaryHops_BeforeTheDestinationIsKnown(t *testing.T) {
 	tbl := hop.NewTable(30)
 	tbl.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0, hop.KindPrimary)
