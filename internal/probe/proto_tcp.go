@@ -3,7 +3,9 @@ package probe
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -91,10 +93,12 @@ func (p *TCPProtocol) IsDestReachedICMP(icmpType, icmpCode int) bool {
 	return false
 }
 
-// parseTCPResponse extracts a probe key from a raw TCP response.
-// On macOS, net.ListenPacket("ip4:tcp" or "ip6:tcp") strips the IP header, so the input
-// is the TCP segment directly (no IP header).
-// Returns nil if the packet is not a SYN-ACK or RST.
+// parseTCPResponse extracts a probe key from a TCP segment read by the TCP
+// listener. The input starts at the TCP header: a raw "ip4:tcp" socket read
+// through package net has its IP header stripped, a raw "ip6:tcp" socket
+// never delivers one, and the packet capture used on macOS strips it in
+// tcp_frame.go.
+// Returns nil if the segment is not a SYN-ACK or an RST with ACK.
 func parseTCPResponse(tcpData []byte) (*probeKey, bool) {
 	if len(tcpData) < 20 {
 		return nil, false
@@ -120,29 +124,65 @@ func parseTCPResponse(tcpData []byte) (*probeKey, bool) {
 	return &key, true
 }
 
-// listenTCP listens for SYN-ACK and RST responses on a raw TCP socket.
-// On macOS, net.ListenPacket("ip4:tcp" or "ip6:tcp") delivers TCP segments without IP header.
-func (t *Tracer) listenTCP(ctx context.Context, conn net.PacketConn, pm *probeMap, results chan<- Result) {
+// tcpReadErrorPause is how long the TCP listener waits before it reads again
+// after a read error that is neither a timeout nor a close.
+const tcpReadErrorPause = 20 * time.Millisecond
+
+// listenTCP reads the destination's SYN-ACK and RST replies from src and
+// matches them to outstanding probes. src is the raw TCP socket the probes
+// are sent on, or on macOS, where the kernel does not deliver TCP to raw
+// sockets, a packet capture on the outgoing interface (tcp_recv.go).
+//
+// A segment answers a probe only if it was sent by the target. The raw socket
+// is handed every TCP segment the host receives, and one from another host
+// whose ports and acknowledgement number happen to fit is not the target's
+// answer: it is ignored and the probe stays outstanding.
+//
+// The listener returns when ctx is cancelled or src is closed.
+func (t *Tracer) listenTCP(ctx context.Context, src tcpSegmentSource, pm *probeMap, results chan<- Result) {
 	buf := make([]byte, 1500)
+	stats := &t.tcpRecv
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		n, _, err := conn.ReadFrom(buf)
+		src.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n, peer, err := src.ReadFrom(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+				return
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue // nothing arrived: check ctx and read again
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(tcpReadErrorPause):
+			}
 			continue
 		}
+		stats.segments.Add(1)
+		if peer == nil {
+			continue
+		}
+		if from := peerIP(peer); from == nil || !from.Equal(t.target) {
+			continue
+		}
+		stats.fromTarget.Add(1)
 		key, isTarget := parseTCPResponse(buf[:n])
 		if key == nil || !isTarget {
 			continue
 		}
+		stats.replies.Add(1)
 		rec, ok := pm.match(*key)
 		if !ok {
 			continue
 		}
+		stats.matched.Add(1)
 		// Record the target TTL so the sender can cap its range
 		atomic.CompareAndSwapInt32(&t.targetTTL, 0, int32(rec.ttl))
 

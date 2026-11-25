@@ -20,6 +20,10 @@ internal/
     proto_icmp.go   ICMP Echo probes
     proto_udp.go    UDP probes, IPv4 and IPv6 UDP checksums
     proto_tcp.go    TCP SYN probes, SYN-ACK/RST listener
+    tcp_recv.go     where the TCP listener reads replies from, per platform
+    tcp_recv_raw.go        every OS but macOS: the raw TCP send socket
+    tcp_recv_bpf_darwin.go macOS: a BPF device on the outgoing interface
+    tcp_frame.go    BPF filter, BPF record walk, link and IP header stripping
     proto_auto.go   AutoSelector: UDP with one-way fallback to ICMP
     checksum6.go    IPV6_CHECKSUM on the raw IPv6 send sockets
     family.go       everything that differs between IPv4 and IPv6
@@ -63,7 +67,8 @@ A tracer holds two raw ICMP sockets, and a third raw socket in UDP or TCP mode:
 
 - **The listener's ICMP socket.** Every reply is read from it, and the ICMP TTL probes are written to it. It only ever sends to the target.
 - **The echo tier's ICMP socket.** The echo tier writes to every node on the path, and does so on a socket of its own, in both families. With both on one socket, macOS was seen to refuse writes on it for seconds at a time. The echo socket is never read. Echo replies arrive on the listener's socket, as all inbound ICMP does whichever socket the request left on. Where the platform has an ICMP filter for the family (ICMPv6 on Linux, macOS and the BSDs; ICMPv4 on Linux only), a filter that blocks every type keeps the kernel from delivering anything to the echo socket. Where it has none (ICMPv4 on macOS and the BSDs, both families on Windows), the socket's receive buffer is set to the kernel's minimum and the kernel drops that socket's copies once it is full. If the echo socket cannot be opened, the echo tier sends on the listener's socket and the debug log has a line starting `echo socket:`.
-- **The UDP or TCP send socket.** The primary flows are written to it. In TCP mode a second listener reads it.
+- **The UDP or TCP send socket.** The primary flows are written to it. In TCP mode a second listener reads it, except on macOS.
+- **macOS, TCP mode: a BPF device.** The macOS kernel hands an incoming TCP segment to its TCP input routine only, so the raw TCP socket can send SYNs and never receives one. The TCP listener reads a BPF device instead (see "TCP replies").
 
 ### Three tiers per round
 
@@ -98,11 +103,28 @@ The ICMP listener handles three message types:
 - **Destination Unreachable.** Same matching. For UDP, Port Unreachable means the destination was reached.
 - **Echo Reply.** Matched by ID and sequence, and accepted only when it comes from the address the probe was sent to: the target for a tier-1 probe, the hop for an echo-tier probe.
 
-TCP has a second listener on a raw TCP socket. A SYN-ACK or RST that matches a probe means the destination was reached.
+TCP has a second listener, `listenTCP`. A SYN-ACK, or an RST with ACK, that was sent by the target and matches a probe means the destination was reached. See "TCP replies".
 
 A reply from the target's own address always marks the destination, whatever its ICMP type. Once the destination's TTL is known, later rounds stop there.
 
 Each match becomes a `probe.Result` with the TTL, responder address, RTT, flow ID and probe type (`icmp-ttl`, `udp-ttl`, `tcp-ttl`, `icmp-echo`).
+
+### TCP replies
+
+`listenTCP` (`proto_tcp.go`) reads TCP segments from a `tcpSegmentSource`: bytes that start at the TCP header, and the address they were sent from. `Tracer.tcpSource` picks the source when the send loop starts (`tcp_recv.go`).
+
+- **Linux, Windows and the other BSDs: the raw TCP send socket** (`tcp_recv_raw.go`). Linux delivers a copy of every TCP segment the host receives to it, other connections' included. With `IPV6_CHECKSUM` set on the IPv6 socket the kernel also verifies the checksum of what it delivers. The other BSDs are built this way and are expected to receive nothing, as macOS did: TCP mode is not supported there.
+- **macOS: a BPF device** (`tcp_recv_bpf_darwin.go`). The first free `/dev/bpfN` is opened and bound to the interface that has the startup source address (`Config.SourceIP`); a target that is one of the host's own addresses is captured on the loopback interface. The device is in immediate mode with a 100 ms read timeout and, off loopback, sees inbound frames only. One device per tracer, so a multi-target run holds one per target.
+
+The kernel filter (`tcpReplyFilter` in `tcp_frame.go`, assembled with `golang.org/x/net/bpf`) accepts a frame only if it is TCP of the trace's family, sent from the target, to a destination port in the tracer's source-port range. The local address is not part of it: the kernel picks the source address of each probe and it is not always `Config.SourceIP`. `captureSource` walks the records of each read (`nextBPFRecord`: a `bpf_hdr` with its own header length, records aligned to 4 bytes) and strips the link header and the IP header (`tcpSegmentFromFrame`). Three link types are known: Ethernet and Wi-Fi (14 bytes), loopback and classic `utun` (4-byte address family), newer `utun` and `ipsec` (none). The parser repeats the filter's tests, so nothing depends on the filter alone.
+
+Dropped, in the filter and in the parser, and never guessed at: VLAN-tagged frames, IPv4 fragments, IPv6 packets with an extension header before TCP, and frames too short for their headers.
+
+If the device cannot be set up (no interface has the source address, an unknown link type, no free device, a failed ioctl) the send loop returns a `tcpCaptureError` and the trace stops with it. It does not run: without the capture the destination can never be seen to answer.
+
+On every platform a segment answers a probe only if its sender is the target. One from another address is ignored and the probe stays outstanding. The listener returns when its source is closed, which the send loop does on its way out; it retries a read that timed out at once, and any other read error after a short pause.
+
+With `--debug-log` the tracer writes where replies are read from (on macOS: the device, the interface, the link type, the buffer size and the filter in words), the listener's running totals after each round's sends and at exit (`tcp receive totals: N segments read, N from the target, N SYN-ACK/RST, N matched`), and on macOS the capture's own totals and the kernel's counters when the device is closed.
 
 ### Auto mode
 
@@ -196,7 +218,7 @@ shared
 
 ## Testing
 
-- **Unit tests** in every package. The tracer has seams for its sockets (`listenICMP`, `newSender`, `newEchoSender`) and `cmd/via` has one for the tracer (`newTracer`), so the send loop, the listener and report mode are tested without raw sockets.
+- **Unit tests** in every package. The tracer has seams for its sockets (`listenICMP`, `newSender`, `newEchoSender`, `newTCPSource`) and `cmd/via` has one for the tracer (`newTracer`), so the send loop, the listener and report mode are tested without raw sockets.
 - **Golden files** under `internal/tui/testdata/` pin rendered views and end-to-end TUI runs. Regenerate with `make golden-update`.
 - **Coverage floors** per package in `scripts/check-coverage.sh`, enforced by `make coverage-gate` and CI.
 - **Fuzzing.** A weekly workflow fuzzes the inner-header parser, transport offset, TCP checksum, TCP response parser, both Team Cymru response parsers and config loading.
@@ -220,7 +242,9 @@ shared
 
 **The kernel fills the IPv6 probe checksum.** A UDP or TCP checksum covers the packet's source address, and the raw send socket is not bound: the kernel picks the source address of every packet, and on a host with several global IPv6 addresses it does not always pick the one found at startup. A checksum computed in `via` over that address is then wrong and the probe is dropped on the path. The IPv6 send sockets therefore set `IPV6_CHECKSUM` (offset 6 for UDP, 16 for TCP) and the probes are built with the field zero. If a platform rejects the option, that send socket is bound to the startup source address instead and its probes carry their own checksum; the debug log says which happened. IPv4 has no such option: IPv4 probes carry a checksum computed over the startup source address.
 
-**Raw TCP reads.** The TCP listener parses its input as a bare TCP segment with no IP header.
+**Raw TCP reads.** The TCP listener parses its input as a bare TCP segment with no IP header: package `net` strips the IPv4 header from a raw-socket read, a raw IPv6 socket never delivers one, and the macOS capture strips link and IP headers itself.
+
+**macOS does not deliver TCP to raw sockets.** A raw `ip4:tcp` or `ip6:tcp` socket there sends SYNs and receives nothing, so TCP replies are read from BPF (see "TCP replies"). Consequences: replies that come back on another interface than the one that has the startup source address are not seen; an interface change during a run (Wi-Fi to Ethernet, a VPN coming up) leaves the capture on the old interface until restart; and BPF sees a frame before the kernel has checked its TCP checksum, so a reply with a bad checksum is matched on macOS where Linux's IPv6 raw socket (with `IPV6_CHECKSUM`) would not deliver it.
 
 **The destination answers at every TTL past its own.** Views stop at the lowest TTL at which the destination answered, and the sender stops there too.
 

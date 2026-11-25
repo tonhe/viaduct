@@ -110,6 +110,22 @@ via -r google.com
 
 **Auto mode** starts with UDP for ECMP discovery. If no responses are received after 3 rounds (~3 seconds), it automatically falls back to ICMP. The TUI header updates to reflect the active protocol.
 
+**TCP mode by platform.** The destination's SYN-ACK or RST is what marks it as reached, and where `via` reads it differs:
+
+| Platform | TCP replies are read from | Status |
+|----------|---------------------------|--------|
+| Linux | the raw TCP socket the probes are sent on | Supported |
+| macOS | a packet capture (BPF) on the outgoing interface, because the macOS kernel does not hand TCP segments to raw sockets | Supported |
+| FreeBSD, OpenBSD, NetBSD | the raw TCP socket, which is not expected to receive them | Not supported: the destination shows as lost. Use `-P udp` or `-P icmp` |
+
+On macOS the capture needs a free `/dev/bpf*` device (one per target) and an interface type `via` knows: Ethernet, Wi-Fi, loopback and `utun`/`ipsec` tunnels. If it cannot be set up, `via` stops with an error that says why and suggests another mode, for example:
+
+```
+TCP mode on macOS reads the destination's replies from a packet capture (BPF), which could not be set up: unsupported link type 127 on interface en0. Use -P udp or -P icmp instead
+```
+
+The other reasons are `no interface has the source address <address>` and `no free BPF device`. A reply counts only when it comes from the target's address.
+
 ---
 
 ## IPv6 Support
@@ -379,6 +395,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 - **Round line**, one per completed round: the time since the previous round closed, the probes sent in the round by type, the replies counted in the round by type, and how many of the hops probed answered none of their TTL-limited probes. A round in which every probed hop is silent reads `no reply from 8 of 8 hops probed`. A reply is counted in the round in which it arrives, as it is for loss.
 - **Snapshot**, one line per hop up to the destination, every 10 rounds (`snapshot`) and once at exit (`final`): the hop's addresses, its loss exactly as the views show it (`12.3%`, `85.7%?`, `~0%†`) with its kind, and the counts behind it as `sent/lost` over completed rounds: TTL-limited probes by type, direct echoes (`echo`), the echoes that count toward the verdict (`echo-counted`, which leaves out a node that ignores ping) and the rate-limit verdict.
 - **Alerts**: a line when an alert is raised and a line when it clears, with the alert's text. Report mode shows no alerts; its log records the ones the TUI would have raised with the same `--alert-*` settings.
+- **TCP replies** (`-P tcp` only), lines starting `tcp receive:`: where the destination's replies are read from (on macOS the BPF device, the interface, its link type and the filter in words), and after each round's sends and at exit the running totals: `round 12: tcp receive totals: 208 segments read, 72 from the target, 72 SYN-ACK/RST, 72 matched`. On Linux "segments read" counts every TCP segment the host received. On macOS a last line gives the capture's own counts when the device is closed.
 
 ---
 
