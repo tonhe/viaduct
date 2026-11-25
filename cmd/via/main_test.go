@@ -399,15 +399,38 @@ func captureStdout(t *testing.T, fn func()) string {
 	orig := os.Stdout
 	os.Stdout = w
 
+	// Read while fn writes. A pipe holds a few kilobytes (4096 bytes on
+	// Windows); reading only after fn returns blocks fn forever once its
+	// output is larger than that.
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		io.Copy(&buf, r)
+	}()
+
 	fn()
 
 	w.Close()
 	os.Stdout = orig
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	<-done
 	r.Close()
 	return buf.String()
+}
+
+// captureStdout must not block when the output is larger than a pipe buffer.
+func TestCaptureStdout_LargeOutput(t *testing.T) {
+	want := strings.Repeat("x", 1<<20)
+	done := make(chan string, 1)
+	go func() { done <- captureStdout(t, func() { fmt.Fprint(os.Stdout, want) }) }()
+	select {
+	case got := <-done:
+		if got != want {
+			t.Errorf("captured %d bytes, want %d", len(got), len(want))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("captureStdout blocked on output larger than the pipe buffer")
+	}
 }
 
 // installStubTracer replaces newTracer for the duration of the test and returns
