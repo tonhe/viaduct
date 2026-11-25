@@ -30,6 +30,13 @@ type Hop struct {
 	// so they are dropped until that round closes or a new round is sent.
 	draining bool
 
+	// heldVerdict is the hop's last rate-limit verdict, and heldEchoLoss the
+	// echo loss that went with it. Once a hop has had a verdict it keeps one:
+	// while its echo totals are below the samples a verdict needs, these stand
+	// in (see holdVerdictLocked). Undetermined until the first verdict.
+	heldVerdict  RateLimitState
+	heldEchoLoss float64
+
 	mu sync.RWMutex
 }
 
@@ -63,6 +70,8 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind
 	}
 	if kind != KindEcho {
 		h.probesRecvd++
+	} else {
+		h.beforeEchoAnswerLocked(node)
 	}
 	node.AddSample(rtt, flowID, kind)
 	return true
@@ -152,6 +161,7 @@ func (h *Hop) MarkRoundEnd() {
 	}
 	h.closedSent = h.probesSent
 	h.closedRecvd = h.probesRecvd
+	h.holdVerdictLocked()
 	verdict := h.rateLimitStateLocked()
 	for _, n := range h.Nodes {
 		n.markProbesSent(icmpSent, primarySent)
@@ -272,7 +282,53 @@ func (h *Hop) rateLimitStateLocked() RateLimitState {
 	// throttles Time Exceeded. Real loss on the way to it costs echoes too,
 	// and is not flagged.
 	echoSent, echoRecvd := h.echoTotalsLocked()
-	return rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
+	verdict := rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
+	if verdict == RateLimitUndetermined {
+		// Too few echo samples. A hop that has had a verdict keeps it until
+		// its echo totals are enough for a new one.
+		return h.heldVerdict
+	}
+	return verdict
+}
+
+// holdVerdictLocked records the hop's verdict, and the echo loss that goes
+// with it, while the hop has enough echo samples for one. The echo totals can
+// fall back below that number: a node that ignores ping drops out of them
+// when it has ignored echoSilentAfter echoes, or when another node of the hop
+// first answers one. The record is then what the hop shows until the new
+// totals are enough. It is taken when a round closes and before every echo
+// answer, the event that changes the totals. Callers hold the write lock.
+func (h *Hop) holdVerdictLocked() {
+	sent, received := h.echoTotalsLocked()
+	verdict := rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, sent, sent-received)
+	if verdict == RateLimitUndetermined {
+		return
+	}
+	h.heldVerdict = verdict
+	h.heldEchoLoss = echoLossPercent(sent, received)
+}
+
+// beforeEchoAnswerLocked runs before an echo answer from node is recorded.
+// It holds the verdict as it stands, because the answer can take echoes out
+// of the totals, and tells a node that was being left out (another node of
+// the hop answers echo) that it now joins them.
+func (h *Hop) beforeEchoAnswerLocked(node *PathNode) {
+	h.holdVerdictLocked()
+	for _, n := range h.Nodes {
+		if n != node && n.EchoStats().Received > 0 {
+			node.joinEchoTotals()
+			return
+		}
+	}
+}
+
+// echoLossPercent is the share of sent echoes that were not answered.
+func echoLossPercent(sent, received int) float64 {
+	lost := sent - received
+	if lost < 0 {
+		lost = 0
+	}
+	return float64(lost) / float64(sent) * 100
 }
 
 // echoTotalsLocked sums the echo probes sent to, and answered by, this hop's
@@ -334,11 +390,11 @@ func (h *Hop) Loss() (pct float64, kind LossKind) {
 	verdict := h.rateLimitStateLocked()
 	if verdict == RateLimitYes {
 		sent, received := h.echoTotalsLocked()
-		lost := sent - received
-		if lost < 0 {
-			lost = 0
+		if sent < rateLimitMinEchoSamples {
+			// The verdict is a held one: so is its echo loss.
+			return h.heldEchoLoss, LossRateLimited
 		}
-		return float64(lost) / float64(sent) * 100, LossRateLimited
+		return echoLossPercent(sent, received), LossRateLimited
 	}
 	if h.closedSent == 0 {
 		return 0, LossMeasured
@@ -445,6 +501,8 @@ func (h *Hop) Reset() {
 	h.probesRecvd = 0
 	h.closedSent = 0
 	h.closedRecvd = 0
+	h.heldVerdict = RateLimitUndetermined
+	h.heldEchoLoss = 0
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.
