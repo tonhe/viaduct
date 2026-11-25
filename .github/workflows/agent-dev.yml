@@ -34,7 +34,11 @@ jobs:
         Bash(go build:*),Bash(go test:*),Bash(go vet:*),Bash(gofmt:*),Bash(go mod tidy),
         Bash(go mod tidy -diff),
         Bash(make build),Bash(make test),Bash(make test-race),Bash(make test-tui),
-        Bash(make test-all),Bash(make coverage-gate),Bash(make golden-update)
+        Bash(make test-all),Bash(make coverage-gate),Bash(make golden-update),
+        Bash(make lint),Bash(make lab-docker)
+      # Scheduled runs take bugs first, then tech debt, then upkeep, then features;
+      # oldest first within each. Milestones rank above this.
+      selection_order: type
       protected_paths: |
         Makefile
         scripts/
