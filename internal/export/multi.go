@@ -26,7 +26,8 @@ func WriteJSONMulti(w io.Writer, m MultiReport) error {
 
 // WriteCSVMulti writes all targets as a single CSV table. The column layout is
 // identical to WriteCSV but with a leading "target" column. All targets share
-// one header row; rows from each target follow in order.
+// one header row; rows from each target follow in order. A target that could
+// not be traced (Error set, no hops) contributes no rows.
 func WriteCSVMulti(w io.Writer, m MultiReport) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
@@ -121,12 +122,7 @@ func WriteDOTMulti(w io.Writer, m MultiReport) error {
 					// First-seen wins for the label. If another target later
 					// observes the same IP with different stats, we keep the
 					// label already emitted to avoid conflicting declarations.
-					label := n.IP
-					if n.Hostname != "" {
-						label += fmt.Sprintf("\\n%s", n.Hostname)
-					}
-					label += fmt.Sprintf("\\navg=%.1fms loss=%.1f%%", n.RTT.Avg, n.Loss)
-					ni := nodeInfo{id: nodeID, label: label, asn: n.ASN, asOrg: n.ASOrg}
+					ni := nodeInfo{id: nodeID, label: dotNodeLabel(h, n), asn: n.ASN, asOrg: n.ASOrg}
 					if n.ASN > 0 {
 						asnGroups[n.ASN] = append(asnGroups[n.ASN], ni)
 						asnNames[n.ASN] = n.ASOrg
@@ -155,8 +151,10 @@ func WriteDOTMulti(w io.Writer, m MultiReport) error {
 		}
 	}
 
-	// Emit ASN cluster subgraphs.
-	for asNum, nodes := range asnGroups {
+	// Emit ASN cluster subgraphs in ascending AS order, so the output is the
+	// same on every run.
+	for _, asNum := range sortedASNs(asnGroups) {
+		nodes := asnGroups[asNum]
 		orgName := asnNames[asNum]
 		fmt.Fprintf(w, "  subgraph cluster_AS%d {\n", asNum)
 		fmt.Fprintf(w, "    label=%q;\n", fmt.Sprintf("AS%d (%s)", asNum, orgName))

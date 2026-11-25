@@ -3,15 +3,54 @@ package export
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+
+	"github.com/tonhe/viaduct/internal/hop"
 )
 
 // dotIDSanitizer replaces invalid characters in DOT node IDs
 var dotIDSanitizer = strings.NewReplacer(".", "_", ":", "_")
 
+// formatHeadline renders a hop's headline loss the way the views do
+// (hop.FormatLoss): "~N%†" when rate-limited, "N%?" when provisional, a plain
+// "N%" when measured. kind is a Hop.LossKind; an empty kind reads as measured.
+func formatHeadline(pct float64, kind string) string {
+	k := hop.LossMeasured
+	switch kind {
+	case "rate_limited":
+		k = hop.LossRateLimited
+	case "provisional":
+		k = hop.LossProvisional
+	}
+	return hop.FormatLoss(pct, k)
+}
+
+// dotNodeLabel is the label of a responding node: IP, hostname if known, the
+// node's average RTT and its hop's headline loss.
+func dotNodeLabel(h Hop, n Node) string {
+	label := n.IP
+	if n.Hostname != "" {
+		label += fmt.Sprintf("\\n%s", n.Hostname)
+	}
+	return label + fmt.Sprintf("\\navg=%.1fms loss=%s", n.RTT.Avg, formatHeadline(h.HeadlineLoss, h.LossKind))
+}
+
+// sortedASNs returns the keys of an ASN-keyed map in ascending order, so the
+// cluster subgraphs are written in the same order on every run.
+func sortedASNs[V any](m map[int]V) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	return keys
+}
+
 // WriteDOT writes the report as a Graphviz DOT directed graph.
 // Nodes are grouped into ASN cluster subgraphs. Gap hops are
 // rendered as dashed circles. Edges connect consecutive TTLs.
+// A node's label carries its hop's headline loss (see formatHeadline).
 func WriteDOT(w io.Writer, r Report) error {
 	fmt.Fprintf(w, "digraph %q {\n", "via → "+r.Target)
 	fmt.Fprintln(w, "  rankdir=TB;")
@@ -45,13 +84,7 @@ func WriteDOT(w io.Writer, r Report) error {
 		var ids []string
 		for _, n := range h.Nodes {
 			nodeID := fmt.Sprintf("ttl%d_%s", h.TTL, dotIDSanitizer.Replace(n.IP))
-			label := n.IP
-			if n.Hostname != "" {
-				label += fmt.Sprintf("\\n%s", n.Hostname)
-			}
-			label += fmt.Sprintf("\\navg=%.1fms loss=%.1f%%", n.RTT.Avg, n.Loss)
-
-			ni := nodeInfo{id: nodeID, label: label}
+			ni := nodeInfo{id: nodeID, label: dotNodeLabel(h, n)}
 			if n.ASN > 0 {
 				asnGroups[n.ASN] = append(asnGroups[n.ASN], ni)
 				asnNames[n.ASN] = n.ASOrg
@@ -63,8 +96,9 @@ func WriteDOT(w io.Writer, r Report) error {
 		orderedTTLs = append(orderedTTLs, ttlNodes{ids: ids})
 	}
 
-	// ASN cluster subgraphs
-	for asNum, nodes := range asnGroups {
+	// ASN cluster subgraphs, in ascending AS order
+	for _, asNum := range sortedASNs(asnGroups) {
+		nodes := asnGroups[asNum]
 		orgName := asnNames[asNum]
 		fmt.Fprintf(w, "  subgraph cluster_AS%d {\n", asNum)
 		fmt.Fprintf(w, "    label=%q;\n", fmt.Sprintf("AS%d (%s)", asNum, orgName))

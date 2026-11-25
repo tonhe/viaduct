@@ -12,9 +12,36 @@ var csvHeader = []string{
 	"loss_pct", "sent", "received",
 	"avg_ms", "best_ms", "worst_ms", "last_ms", "stdev_ms", "jitter_ms",
 	"flow_ids", "stability_pct", "trend",
+	// Added after the columns above, which keep their positions. loss_pct is
+	// the raw TTL-probe loss; headline_loss_pct is the figure the views show
+	// and loss_kind says what it is (measured, rate_limited, provisional).
+	"headline_loss_pct", "loss_kind", "rate_limited",
+	"icmp_ttl_sent", "icmp_ttl_received",
+	"primary_sent", "primary_received",
+	"echo_sent", "echo_received",
 }
 
-// writeCSVRows writes one CSV row per node (or gap row) for r.
+// Positions in csvHeader of the hop-level columns a row without a node fills.
+const (
+	csvColLoss     = 5
+	csvColSent     = 6
+	csvColReceived = 7
+	csvColHeadline = 17
+	csvColLossKind = 18
+)
+
+// csvLossKind is the hop's loss kind; a report built without one reads as
+// measured, as in formatHeadline.
+func csvLossKind(h Hop) string {
+	if h.LossKind == "" {
+		return "measured"
+	}
+	return h.LossKind
+}
+
+// writeCSVRows writes one CSV row per node for r, and one row for each hop
+// with no node: "*" as its ip, the node columns empty and, if probes were sent
+// to it, the hop's own loss figures and probe counts.
 // If withTarget is true, r.Target is prepended as the first column.
 func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 	for _, h := range r.Hops {
@@ -22,6 +49,13 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 			row := make([]string, len(csvHeader))
 			row[0] = fmt.Sprintf("%d", h.TTL)
 			row[1] = "*"
+			if h.ProbesSent > 0 { // a TTL never probed stays a blank placeholder
+				row[csvColLoss] = fmt.Sprintf("%.1f", h.Loss)
+				row[csvColSent] = fmt.Sprintf("%d", h.ProbesSent)
+				row[csvColReceived] = fmt.Sprintf("%d", h.ProbesReceived)
+				row[csvColHeadline] = fmt.Sprintf("%.1f", h.HeadlineLoss)
+				row[csvColLossKind] = csvLossKind(h)
+			}
 			if withTarget {
 				row = append([]string{r.Target}, row...)
 			}
@@ -55,6 +89,15 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 				strings.Join(flowStrs, ";"),
 				fmt.Sprintf("%.1f", n.Stability),
 				n.Trend,
+				fmt.Sprintf("%.1f", h.HeadlineLoss),
+				csvLossKind(h),
+				n.RateLimited,
+				fmt.Sprintf("%d", n.Probes.ICMPTTL.Sent),
+				fmt.Sprintf("%d", n.Probes.ICMPTTL.Received),
+				fmt.Sprintf("%d", n.Probes.Primary.Sent),
+				fmt.Sprintf("%d", n.Probes.Primary.Received),
+				fmt.Sprintf("%d", n.Probes.Echo.Sent),
+				fmt.Sprintf("%d", n.Probes.Echo.Received),
 			}
 			if withTarget {
 				row = append([]string{r.Target}, row...)
@@ -67,7 +110,8 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 	return nil
 }
 
-// WriteCSV writes the report as a CSV table with one row per node.
+// WriteCSV writes the report as a CSV table with one row per node, and one
+// row for a hop that has no node.
 func WriteCSV(w io.Writer, r Report) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
