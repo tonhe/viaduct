@@ -184,6 +184,21 @@ func (pm *probeMap) match(key probeKey) (probeRecord, bool) {
 	return rec, ok
 }
 
+// matchICMPError is match for an ICMP error (Time Exceeded, Destination
+// Unreachable) that quotes the probe. An error is not an Echo Reply, so it
+// never answers an echo-tier probe: that record is left in place and the echo
+// times out as lost. Every other record is matched and consumed as by match.
+func (pm *probeMap) matchICMPError(key probeKey) (probeRecord, bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	rec, ok := pm.items[key]
+	if !ok || rec.probeType == ProbeICMPEcho {
+		return probeRecord{}, false
+	}
+	delete(pm.items, key)
+	return rec, true
+}
+
 // sweep removes stale entries older than maxAge to prevent memory leaks
 // from probes that never received a response.
 func (pm *probeMap) sweep(maxAge time.Duration) {
@@ -283,6 +298,12 @@ func defaultListenICMP(network, address string) (icmpPacketConn, error) {
 
 // NewTracer creates a tracer for the given target.
 func NewTracer(target net.IP, cfg Config) *Tracer {
+	// Echo tier ID fallback: mirror proto_icmp.go so direct library users
+	// who never set cfg.EchoID still get a non-zero ID. Chosen here, before
+	// any goroutine starts, so nothing writes t.cfg once Run is under way.
+	if cfg.EchoID == 0 {
+		cfg.EchoID = 1 + rand.Intn(65534)
+	}
 	return &Tracer{
 		cfg:        cfg,
 		target:     target,
@@ -401,13 +422,6 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 	seq := 0
 	round := 0
 
-	// Echo tier ID fallback: mirror proto_icmp.go so direct library users
-	// who never set cfg.EchoID still get a deterministic non-zero ID for
-	// the lifetime of this run.
-	if t.cfg.EchoID == 0 {
-		t.cfg.EchoID = 1 + rand.Intn(65534)
-	}
-
 	for {
 		maxTTL := t.cfg.MaxHops
 		if reached := int(atomic.LoadInt32(&t.targetTTL)); reached > 0 {
@@ -436,10 +450,16 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 				if pkt, key, err := icmpProto.BuildProbe(0, ttl, seq, t.cfg); err == nil {
 					// The only Echo Reply that answers this probe comes from the target.
 					t.pm.addTo(key, ttl, 0, time.Now(), ProbeICMPTTL, t.target)
+					sent := false
 					if icmpSnd.SetTTL(ttl) == nil {
 						if _, err := icmpSnd.WriteTo(pkt, dst); err == nil {
 							probesSent++
+							sent = true
 						}
+					}
+					// A probe that never left has no reply to wait for.
+					if !sent {
+						t.pm.remove(key)
 					}
 				}
 				time.Sleep(t.cfg.ProbeDelay)
@@ -472,11 +492,15 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 
 					t.pm.add(key, ttl, flow, time.Now(), primaryType)
 
+					// A probe that never left has no reply to wait for: a
+					// failed send removes its record.
 					if err := snd.SetTTL(ttl); err != nil {
+						t.pm.remove(key)
 						continue
 					}
 
 					if _, err := snd.WriteTo(pkt, dst); err != nil {
+						t.pm.remove(key)
 						continue
 					}
 					probesSent++
@@ -708,13 +732,14 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 
 		// An Echo Reply answers a probe only if it comes from the address
 		// that probe was sent to. ICMP errors come from routers along the
-		// path, so they are matched on the quoted packet alone.
+		// path, so they are matched on the quoted packet alone, and never
+		// answer an echo-tier probe.
 		var rec probeRecord
 		var ok bool
 		if msg.Type == EchoReplyType(t.cfg.IPVersion) {
 			rec, ok = t.pm.matchEchoReply(key, peerIP)
 		} else {
-			rec, ok = t.pm.match(key)
+			rec, ok = t.pm.matchICMPError(key)
 		}
 		if !ok {
 			continue
