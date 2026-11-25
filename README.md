@@ -174,8 +174,8 @@ Press <kbd>d</kbd> to cycle through five view presets:
 - **Delta** — hop-to-hop latency difference; the largest delta is highlighted in amber to pinpoint where delay is introduced
 - **GMean** — geometric mean, a better central tendency for skewed latency distributions
 - **Jitter / Javg** — current jitter (`|rtt - prevRTT|`) and running mean jitter
-- **Sparkline** — heat-strip mini chart (green→gold→red gradient) showing per-round average latency (28 rounds); lost probes render as dim `·`
-- **Trend** — sliding-window linear regression over 10 rounds; shows `↑ degrading`, `↓ improving`, or `~ stable`
+- **Sparkline** — heat-strip mini chart (green→gold→red gradient) showing per-round average latency, one cell per round for the 14 most recent rounds (28 are kept per node); a round with no reply renders as a dim `·`
+- **Trend** — sliding-window linear regression over 10 rounds; shows `▲ degrading`, `▼ improving`, or `— stable`
 
 ---
 
@@ -236,8 +236,9 @@ The TUI switches to a **summary+detail layout**: a header row per target shows t
 
 | Key | Action |
 |-----|--------|
-| <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>j</kbd> / <kbd>k</kbd> | Move focus between targets |
-| <kbd>Tab</kbd> | Cycle focus to next target |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Move focus to the previous / next target (stops at the first and last) |
+| <kbd>Tab</kbd> | Move focus to the next target, wrapping from the last to the first |
+| <kbd>j</kbd> / <kbd>k</kbd> | Scroll the focused target's hop table down / up (they do not move focus) |
 | <kbd>Space</kbd> | Mark/unmark target — also selects which panes show in column view |
 | <kbd>c</kbd> | Toggle column view — bordered panes side by side (`# IP Host Avg Loss`), one per target, dividing the terminal width equally; the focused pane has a heavy border |
 
@@ -331,6 +332,8 @@ via -r -c 3 -o json google.com one.one.one.one
 | `--psize` | `-s` | 64 | Payload size in bytes |
 | `--paths` | | 6 | Number of ECMP flows to probe |
 | `--no-paths` | | | Disable ECMP, single-path mode |
+| `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
+| `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
 | `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
 | `--report` | `-r` | | Report mode: non-interactive, print table and exit |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
@@ -348,7 +351,8 @@ via -r -c 3 -o json google.com one.one.one.one
 
 | Key | Action |
 |-----|--------|
-| <kbd>j</kbd> / <kbd>k</kbd> | Scroll up/down |
+| <kbd>j</kbd> / <kbd>k</kbd> | Scroll down / up one line |
+| <kbd>↓</kbd> / <kbd>↑</kbd> | Scroll down / up one line (single target; with several targets they move focus, see below) |
 | <kbd>g</kbd> / <kbd>G</kbd> | Jump to top/bottom |
 | <kbd>p</kbd> | Pause/resume probing |
 | <kbd>r</kbd> | Reset all hop stats |
@@ -361,8 +365,8 @@ via -r -c 3 -o json google.com one.one.one.one
 
 | Key | Action |
 |-----|--------|
-| <kbd>↑</kbd> / <kbd>↓</kbd> | Move focus between targets (also <kbd>j</kbd> / <kbd>k</kbd>) |
-| <kbd>Tab</kbd> | Cycle focus to next target |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Move focus to the previous / next target (<kbd>j</kbd> / <kbd>k</kbd> still scroll) |
+| <kbd>Tab</kbd> | Move focus to the next target, wrapping to the first |
 | <kbd>Space</kbd> | Mark/unmark target for column comparison |
 | <kbd>c</kbd> | Toggle column view (bordered panes, one per target) |
 
