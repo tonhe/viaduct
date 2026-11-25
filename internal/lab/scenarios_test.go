@@ -1,0 +1,641 @@
+//go:build lab
+
+package lab
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/tonhe/viaduct/internal/export"
+)
+
+// mode is one probe protocol: its flags, how many TTL-limited probes via
+// sends per hop per round, and which drop counter its primary probes hit.
+type mode struct {
+	name     string
+	args     []string
+	perRound int    // 1 ICMP TTL probe + primary flows
+	primary  string // counter suffix for the primary probe's replies ("" = none)
+}
+
+var modes = []mode{
+	{name: "udp", args: nil, perRound: 7, primary: "udp"},
+	{name: "icmp", args: []string{"-P", "icmp"}, perRound: 1, primary: ""},
+	{name: "tcp", args: []string{"-P", "tcp"}, perRound: 7, primary: "tcp"},
+}
+
+var pathToDst1 = []string{r1V4, r2V4, r3V4, dst1V4}
+
+func traceArgs(m mode, rounds int, target string, extra ...string) []string {
+	args := append([]string{}, m.args...)
+	args = append(args, "-c", strconv.Itoa(rounds), "-i", "200ms")
+	args = append(args, extra...)
+	return append(args, target)
+}
+
+// Scenario 1: clean path. Every probe is answered; via's counts equal the
+// packets on the wire.
+func TestCleanPath(t *testing.T) {
+	const rounds = 10
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			reset(t)
+			var r export.Report
+			pkts := capture(t, func() { r = via(t, traceArgs(m, rounds, dst1V4)...) })
+
+			if len(r.Hops) != len(pathToDst1) {
+				t.Fatalf("hops = %d, want %d", len(r.Hops), len(pathToDst1))
+			}
+			want := rounds * m.perRound
+			if total := want * len(pathToDst1); r.Probes != total {
+				t.Errorf("report probes = %d, want %d (%d to each of %d hops)", r.Probes, total, want, len(pathToDst1))
+			}
+			onWire := probesSentByTTL(pkts, clientV4, dst1V4)
+			for i, ip := range pathToDst1 {
+				ttl := i + 1
+				wantHop(t, hopByTTL(t, r, ttl), ip, rounds, want, want)
+				if onWire[ttl] != want {
+					t.Errorf("TTL %d: %d probes on the wire, want %d", ttl, onWire[ttl], want)
+				}
+			}
+			for i, ip := range pathToDst1[:3] {
+				if got := timeExceededFrom(pkts, ip, clientV4); got != want {
+					t.Errorf("TTL %d: %d Time Exceeded on the wire from %s, want %d", i+1, got, ip, want)
+				}
+			}
+		})
+	}
+}
+
+// Scenario 2: exactly every 5th reply from r3 is dropped on its way back.
+// via must report exactly the replies that survived.
+func TestEveryFifthReplyFromR3Dropped(t *testing.T) {
+	const rounds = 20
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			reset(t)
+			script(t, "scenarios/drop-replies.sh", "r3", "5")
+			var r export.Report
+			pkts := capture(t, func() { r = via(t, traceArgs(m, rounds, dst1V4)...) })
+			c := counters(t, "r2", "ip")
+
+			// What the kernel saw and dropped, per reply type.
+			if c["seen_ttl_icmp"] != rounds || c["drop_ttl_icmp"] != rounds/5 {
+				t.Errorf("ICMP TTL replies from r3: seen %d dropped %d, want %d and %d",
+					c["seen_ttl_icmp"], c["drop_ttl_icmp"], rounds, rounds/5)
+			}
+			seen, dropped := c["seen_ttl_icmp"], c["drop_ttl_icmp"]
+			if m.primary != "" {
+				wantSeen := rounds * (m.perRound - 1)
+				s, d := c["seen_ttl_"+m.primary], c["drop_ttl_"+m.primary]
+				if s != wantSeen || d != wantSeen/5 {
+					t.Errorf("%s replies from r3: seen %d dropped %d, want %d and %d",
+						m.primary, s, d, wantSeen, wantSeen/5)
+				}
+				seen, dropped = seen+s, dropped+d
+			}
+
+			sent := rounds * m.perRound
+			wantHop(t, hopByTTL(t, r, 1), r1V4, rounds, sent, sent)
+			wantHop(t, hopByTTL(t, r, 2), r2V4, rounds, sent, sent)
+			wantHop(t, hopByTTL(t, r, 3), r3V4, rounds, sent, seen-dropped)
+			wantHop(t, hopByTTL(t, r, 4), dst1V4, rounds, sent, sent)
+
+			// The capture agrees with the kernel counters.
+			if got := timeExceededFrom(pkts, r3V4, clientV4); got != seen-dropped {
+				t.Errorf("%d Time Exceeded from r3 reached the client, want %d (seen %d - dropped %d)",
+					got, seen-dropped, seen, dropped)
+			}
+		})
+	}
+}
+
+// Second opinion: mtr over the same rules. mtr sends one ICMP probe per hop
+// per cycle, so every 5th reply dropped is exactly 20.0%.
+func TestEveryFifthReplyFromR3Dropped_MtrAgrees(t *testing.T) {
+	reset(t)
+	script(t, "scenarios/drop-replies.sh", "r3", "5")
+	loss := mtrLoss(t, dst1V4, 20)
+	want := map[string]float64{r1V4: 0, r2V4: 0, r3V4: 20, dst1V4: 0}
+	for ip, w := range want {
+		if got, ok := loss[ip]; !ok || got != w {
+			t.Errorf("mtr loss at %s = %v (present %v), want %v", ip, got, ok, w)
+		}
+	}
+}
+
+// Every reply from r2 is dropped: hop 2 never answers, the hops beyond it are
+// unaffected.
+func TestAllRepliesFromR2Dropped(t *testing.T) {
+	const rounds = 10
+	for _, m := range modes[:2] {
+		t.Run(m.name, func(t *testing.T) {
+			reset(t)
+			script(t, "scenarios/drop-replies.sh", "r2", "1")
+			r := via(t, traceArgs(m, rounds, dst1V4)...)
+			sent := rounds * m.perRound
+			wantHop(t, hopByTTL(t, r, 1), r1V4, rounds, sent, sent)
+			// The silent hop has no node, and still reports exactly what was
+			// sent to it: every probe, none answered, 100% loss.
+			h := hopByTTL(t, r, 2)
+			if len(h.Nodes) != 0 {
+				t.Errorf("TTL 2: got %d nodes, want none (every reply was dropped)", len(h.Nodes))
+			}
+			if h.Rounds != rounds || h.ProbesSent != sent || h.ProbesReceived != 0 || h.Loss != 100 {
+				t.Errorf("TTL 2: rounds %d probes sent/received %d/%d loss %.1f; want %d, %d/0, 100",
+					h.Rounds, h.ProbesSent, h.ProbesReceived, h.Loss, rounds, sent)
+			}
+			sum := 0
+			for _, hh := range r.Hops {
+				sum += hh.ProbesSent
+			}
+			if sum != r.Probes {
+				t.Errorf("sum of hops' probes_sent = %d, report probes = %d; want them equal", sum, r.Probes)
+			}
+			wantHop(t, hopByTTL(t, r, 3), r3V4, rounds, sent, sent)
+			wantHop(t, hopByTTL(t, r, 4), dst1V4, rounds, sent, sent)
+		})
+	}
+}
+
+// Scenario 6: with -c 5 the fifth round is sent, counted, and not lost.
+func TestFinalRoundIsCounted(t *testing.T) {
+	const rounds = 5
+	for _, m := range modes[:2] {
+		t.Run(m.name, func(t *testing.T) {
+			reset(t)
+			r := via(t, traceArgs(m, rounds, dst1V4)...)
+			sent := rounds * m.perRound
+			for i, ip := range pathToDst1 {
+				wantHop(t, hopByTTL(t, r, i+1), ip, rounds, sent, sent)
+			}
+		})
+	}
+}
+
+// Scenario 4: replies that take longer than the interval (300 ms delay,
+// 200 ms interval, 1 s timeout) are late, not lost.
+//
+// The 2-round case is the regression check for closing a round the moment its
+// probes are sent: with that bug the last round's replies are still in flight
+// when the run ends and hops 3 and 4 report 1 of 2 answered. In longer runs
+// other per-round work happens to delay the close, which hides the bug, so
+// the short run is the one that matters.
+func TestLateRepliesAreNotLoss(t *testing.T) {
+	for _, rounds := range []int{2, 10} {
+		for _, m := range modes[:2] {
+			t.Run(m.name+"/"+strconv.Itoa(rounds)+"-rounds", func(t *testing.T) {
+				reset(t)
+				script(t, "scenarios/delay.sh", "300ms")
+				r := via(t, traceArgs(m, rounds, dst1V4)...)
+				sent := rounds * m.perRound
+				for i, ip := range pathToDst1 {
+					h := hopByTTL(t, r, i+1)
+					wantHop(t, h, ip, rounds, sent, sent)
+					if i >= 2 && len(h.Nodes) == 1 {
+						if avg := h.Nodes[0].RTT.Avg; avg < 300 || avg > 320 {
+							t.Errorf("TTL %d: avg RTT = %.1f ms, want 300-320 (300 ms added delay)", h.TTL, avg)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// Scenario 8: IPv6, clean and with every 5th reply from r3 dropped.
+func TestIPv6(t *testing.T) {
+	const rounds = 20
+	path := []string{r1V6, r2V6, r3V6, dst1V6}
+	for _, m := range modes[:2] {
+		t.Run(m.name+"/clean", func(t *testing.T) {
+			reset(t)
+			r := via(t, traceArgs(m, rounds, dst1V6, "-6")...)
+			sent := rounds * m.perRound
+			for i, ip := range path {
+				wantHop(t, hopByTTL(t, r, i+1), ip, rounds, sent, sent)
+			}
+		})
+		t.Run(m.name+"/every-fifth-dropped", func(t *testing.T) {
+			reset(t)
+			script(t, "scenarios/drop-replies.sh", "r3", "5", "6")
+			r := via(t, traceArgs(m, rounds, dst1V6, "-6")...)
+			c := counters(t, "r2", "ip6")
+			seen, dropped := c["seen_ttl_icmp"], c["drop_ttl_icmp"]
+			if m.primary != "" {
+				seen, dropped = seen+c["seen_ttl_"+m.primary], dropped+c["drop_ttl_"+m.primary]
+			}
+			sent := rounds * m.perRound
+			if seen != sent || dropped != sent/5 {
+				t.Errorf("replies from r3: seen %d dropped %d, want %d and %d", seen, dropped, sent, sent/5)
+			}
+			wantHop(t, hopByTTL(t, r, 2), r2V6, rounds, sent, sent)
+			wantHop(t, hopByTTL(t, r, 3), r3V6, rounds, sent, seen-dropped)
+			wantHop(t, hopByTTL(t, r, 4), dst1V6, rounds, sent, sent)
+		})
+	}
+}
+
+// Scenario 5: r1 limits its ICMP errors to one per second but answers every
+// ping. via must flag r1 as rate-limited, must not flag anything else, and
+// the echo figures it reports for r1 must be the packets on the wire.
+func TestRateLimitedRouterIsFlagged(t *testing.T) {
+	const rounds = 60
+	for _, m := range modes[:2] {
+		t.Run(m.name, func(t *testing.T) {
+			reset(t)
+			script(t, "scenarios/ratelimit.sh", "r1")
+			var r export.Report
+			pkts := capture(t, func() { r = via(t, traceArgs(m, rounds, dst1V4)...) })
+
+			h1 := hopByTTL(t, r, 1)
+			if len(h1.Nodes) != 1 || h1.Nodes[0].IP != r1V4 {
+				t.Fatalf("TTL 1 nodes = %+v, want exactly %s", h1.Nodes, r1V4)
+			}
+			n := h1.Nodes[0]
+
+			// TTL probes: via received exactly the Time Exceeded that reached
+			// the client, and that is well short of what it sent.
+			onWire := timeExceededFrom(pkts, r1V4, clientV4)
+			sent := rounds * m.perRound
+			if h1.ProbesSent != sent || h1.ProbesReceived != onWire {
+				t.Errorf("r1 TTL probes sent/received = %d/%d, want %d/%d (Time Exceeded on the wire)",
+					h1.ProbesSent, h1.ProbesReceived, sent, onWire)
+			}
+			if onWire >= sent {
+				t.Fatalf("r1 answered every TTL probe (%d of %d); the rate limit did not take effect", onWire, sent)
+			}
+
+			// Echo tier: exact agreement with the capture, and no echo lost.
+			wireSent, wireRecv := echoesTo(pkts, clientV4, r1V4)
+			if n.Probes.Echo.Sent != wireSent || n.Probes.Echo.Received != wireRecv {
+				t.Errorf("r1 echo sent/received = %d/%d, capture shows %d/%d",
+					n.Probes.Echo.Sent, n.Probes.Echo.Received, wireSent, wireRecv)
+			}
+			if wireRecv != wireSent {
+				t.Errorf("r1 answered %d of %d echoes on the wire; a rate-limited router answers all of them", wireRecv, wireSent)
+			}
+			if n.RateLimited != "yes" {
+				t.Errorf("r1 rate_limited = %q, want yes", n.RateLimited)
+			}
+
+			// Nothing beyond r1 is affected or flagged.
+			for i, ip := range pathToDst1[1:] {
+				h := hopByTTL(t, r, i+2)
+				wantHop(t, h, ip, rounds, sent, sent)
+				for _, node := range h.Nodes {
+					if node.RateLimited == "yes" {
+						t.Errorf("TTL %d (%s) is flagged rate-limited; only r1 is", h.TTL, node.IP)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The text report shows a rate-limited hop's echo loss, marked ~N%†. Every
+// echo to r1 is answered, so that is ~0%†, not the TTL probe loss.
+func TestRateLimitedRouter_ReportShowsEchoLoss(t *testing.T) {
+	reset(t)
+	script(t, "scenarios/ratelimit.sh", "r1")
+	out := viaText(t, "-P", "icmp", "-c", "60", "-i", "200ms", dst1V4)
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, r1V4+" ") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no row for %s in report:\n%s", r1V4, out)
+	}
+	if !strings.Contains(row, "~0%†") {
+		t.Errorf("r1 row should show echo-derived loss ~0%%†; got:\n%s", row)
+	}
+}
+
+// A destination that throttles its ICMP errors (viaduct#71). dst1 limits Port
+// Unreachable to one per second and answers every ping. In UDP mode most of
+// the six UDP probes a round then go unanswered at the destination, and none
+// of that is loss: via must report the destination as rate-limited, with the
+// echo loss (none) as its figure, in the JSON and in the text report.
+func TestDestinationThrottlingItsErrors(t *testing.T) {
+	const rounds = 60
+	m := modes[0]
+	if m.name != "udp" {
+		t.Fatalf("modes[0] is %q, want udp", m.name)
+	}
+	reset(t)
+	script(t, "scenarios/ratelimit.sh", "dst1")
+	var r export.Report
+	pkts := capture(t, func() { r = via(t, traceArgs(m, rounds, dst1V4)...) })
+
+	sent := rounds * m.perRound
+	for i, ip := range pathToDst1[:3] {
+		wantHop(t, hopByTTL(t, r, i+1), ip, rounds, sent, sent)
+	}
+	h := hopByTTL(t, r, 4)
+	if len(h.Nodes) != 1 || h.Nodes[0].IP != dst1V4 {
+		t.Fatalf("TTL 4 nodes = %+v, want exactly %s", h.Nodes, dst1V4)
+	}
+	if h.ProbesSent != sent || h.ProbesReceived >= sent {
+		t.Fatalf("dst1 TTL probes sent/received = %d/%d, want %d sent and fewer received; the rate limit did not take effect",
+			h.ProbesSent, h.ProbesReceived, sent)
+	}
+	n := h.Nodes[0]
+	// Echo tier on the wire. The destination gets one direct echo a round at
+	// most, not one for every TTL beyond it. Echo Replies also answer the ICMP
+	// TTL probes that reach dst1: one a round at TTL 4, plus TTL 5 to 30 in
+	// round one, before its distance is known.
+	wireSent, wireRecv := echoesTo(pkts, clientV4, dst1V4)
+	if wireSent != n.Probes.Echo.Sent || wireSent > rounds {
+		byTTL := map[int]int{}
+		for _, p := range pkts {
+			if p.proto == 1 && p.icmpType == 8 && p.src == clientV4 {
+				byTTL[p.ttl]++
+			}
+		}
+		t.Errorf("direct echoes to dst1: %d on the wire, via reports %d; want them equal and at most %d (one a round). All echo requests from the client by IP TTL: %v",
+			wireSent, n.Probes.Echo.Sent, rounds, byTTL)
+	}
+	if want := wireSent + rounds + (30 - 4); wireRecv != want {
+		t.Errorf("Echo Replies from dst1 on the wire = %d, want %d (every direct echo and every ICMP TTL probe answered)", wireRecv, want)
+	}
+	if n.Probes.Echo.Received != n.Probes.Echo.Sent {
+		t.Errorf("dst1 echo sent/received = %d/%d, want all answered", n.Probes.Echo.Sent, n.Probes.Echo.Received)
+	}
+	if n.RateLimited != "yes" || h.LossKind != "rate_limited" || h.HeadlineLoss != 0 {
+		t.Errorf("dst1: rate_limited %q, loss_kind %q, headline_loss_pct %.1f; want yes, rate_limited, 0 (raw loss_pct is %.1f)",
+			n.RateLimited, h.LossKind, h.HeadlineLoss, h.Loss)
+	}
+}
+
+func TestDestinationThrottlingItsErrors_ReportShowsEchoLoss(t *testing.T) {
+	reset(t)
+	script(t, "scenarios/ratelimit.sh", "dst1")
+	out := viaText(t, "-c", "60", "-i", "200ms", dst1V4)
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, dst1V4+" ") && !strings.HasPrefix(line, "via") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no row for %s in report:\n%s", dst1V4, out)
+	}
+	if !strings.Contains(row, "~0%†") {
+		t.Errorf("destination row should show echo-derived loss ~0%%†; got:\n%s", row)
+	}
+}
+
+// Before there are 20 echo samples the cause of a hop's loss is not known,
+// and the report says so: the figure carries a "?" and loss_kind is
+// "provisional". 8 rounds is far short of 20 echoes.
+func TestLossIsProvisionalInAShortRun(t *testing.T) {
+	const rounds = 8
+	m := modes[1]
+	if m.name != "icmp" {
+		t.Fatalf("modes[1] is %q, want icmp", m.name)
+	}
+	reset(t)
+	script(t, "scenarios/drop-replies.sh", "r3", "2", "4")
+	r := via(t, traceArgs(m, rounds, dst1V4)...)
+	h := hopByTTL(t, r, 3)
+	if h.Loss != 50 || h.LossKind != "provisional" || h.HeadlineLoss != 50 {
+		t.Errorf("r3: loss_pct %.1f, loss_kind %q, headline_loss_pct %.1f; want 50, provisional, 50",
+			h.Loss, h.LossKind, h.HeadlineLoss)
+	}
+	if clean := hopByTTL(t, r, 2); clean.LossKind != "measured" || clean.Loss != 0 {
+		t.Errorf("r2: loss_pct %.1f, loss_kind %q; want 0, measured", clean.Loss, clean.LossKind)
+	}
+
+	reset(t)
+	script(t, "scenarios/drop-replies.sh", "r3", "2", "4")
+	out := viaText(t, "-P", "icmp", "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4)
+	if !strings.Contains(out, "50.0%?") {
+		t.Errorf("report should show r3's loss as 50.0%%?; got:\n%s", out)
+	}
+}
+
+// TCP replies slower than the gap between probes (viaduct#70). With 30 ms
+// added beyond r2, the reply to a flow's TTL 3 probe arrives after its TTL 4
+// probe has been sent 10 ms later. Each reply must still be credited to its
+// own hop: one node per hop, exact counts, and the added delay in the RTT.
+func TestTCPRepliesSlowerThanTheProbeGap(t *testing.T) {
+	const rounds = 10
+	m := modes[2] // tcp
+	if m.name != "tcp" {
+		t.Fatalf("modes[2] is %q, want tcp", m.name)
+	}
+	reset(t)
+	script(t, "scenarios/delay.sh", "30ms")
+	r := via(t, traceArgs(m, rounds, dst1V4)...)
+	sent := rounds * m.perRound
+	for i, ip := range pathToDst1 {
+		h := hopByTTL(t, r, i+1)
+		wantHop(t, h, ip, rounds, sent, sent)
+		if len(h.Nodes) != 1 {
+			continue
+		}
+		avg, best := h.Nodes[0].RTT.Avg, h.Nodes[0].RTT.Best
+		if i < 2 && avg > 10 {
+			t.Errorf("TTL %d: avg RTT = %.1f ms, want under 10 (before the delay)", h.TTL, avg)
+		}
+		if i >= 2 && (best < 30 || avg > 45) {
+			t.Errorf("TTL %d: RTT best %.1f avg %.1f ms, want 30-45 (30 ms added delay); a smaller figure means a reply was timed from another probe",
+				h.TTL, best, avg)
+		}
+	}
+}
+
+// Real loss is not rate limiting. Every 5th reply of every type from r3 is
+// dropped, echoes included, so TTL probe loss and echo loss are both a fifth,
+// and nothing may be flagged.
+//
+// 60 rounds, so that the test can fail (viaduct#78). The verdict needs
+// z >= 2.58. If via did not count the lost echoes, r3 would show a fifth of
+// its TTL probes lost against no echo lost: z = 3.6 in ICMP mode (12 of 60
+// against 0 of 59) and 3.8 in UDP mode (84 of 420 against 0 of 59), and r3
+// would be flagged. At 25 rounds the same mistake reaches only 2.3 and 2.4,
+// and passes.
+//
+// The premise is asserted too: via's TTL-probe and echo counts for r3 are the
+// kernel's counters, exactly.
+func TestRealLossIsNeverFlaggedAsRateLimiting(t *testing.T) {
+	const rounds = 60
+	runs := map[string]int{"udp": 2, "icmp": 4} // udp rounds are slower; the rule is the same
+	for _, m := range modes[:2] {
+		t.Run(m.name, func(t *testing.T) {
+			for run := 1; run <= runs[m.name]; run++ {
+				reset(t)
+				script(t, "scenarios/drop-replies.sh", "r3", "5")
+				r := via(t, traceArgs(m, rounds, dst1V4)...)
+				c := counters(t, "r2", "ip")
+
+				// TTL probes at r3: sent, and answered, against the counters.
+				seen, dropped := c["seen_ttl_icmp"], c["drop_ttl_icmp"]
+				if m.primary != "" {
+					seen, dropped = seen+c["seen_ttl_"+m.primary], dropped+c["drop_ttl_"+m.primary]
+				}
+				sent := rounds * m.perRound
+				if seen != sent || dropped != sent/5 {
+					t.Fatalf("run %d: TTL replies from r3: seen %d dropped %d, want %d and %d", run, seen, dropped, sent, sent/5)
+				}
+				h3 := hopByTTL(t, r, 3)
+				wantHop(t, h3, r3V4, rounds, sent, seen-dropped)
+
+				// Echoes to r3: one a round from round two, a fifth of the
+				// replies dropped, and via reports exactly that.
+				echoSeen, echoDropped := c["seen_echo"], c["drop_echo"]
+				if echoSeen != rounds-1 || echoDropped != echoSeen/5 {
+					t.Fatalf("run %d: Echo Replies from r3: seen %d dropped %d, want %d and %d",
+						run, echoSeen, echoDropped, rounds-1, (rounds-1)/5)
+				}
+				if len(h3.Nodes) == 1 {
+					echo := h3.Nodes[0].Probes.Echo
+					if echo.Sent != echoSeen || echo.Received != echoSeen-echoDropped {
+						t.Errorf("run %d: r3 echo sent/received = %d/%d, counters say %d/%d",
+							run, echo.Sent, echo.Received, echoSeen, echoSeen-echoDropped)
+					}
+				}
+				// Enough echo samples for a verdict, and the verdict is "real".
+				if h3.LossKind != "measured" || h3.HeadlineLoss != h3.Loss {
+					t.Errorf("run %d: r3 loss_kind %q headline %.2f raw %.2f; want measured, and the raw figure shown",
+						run, h3.LossKind, h3.HeadlineLoss, h3.Loss)
+				}
+				for _, h := range r.Hops {
+					for _, node := range h.Nodes {
+						if node.RateLimited == "yes" {
+							t.Errorf("run %d: TTL %d (%s) flagged rate-limited on a path with real loss only (echo %d/%d, icmp ttl %d/%d)",
+								run, h.TTL, node.IP, node.Probes.Echo.Received, node.Probes.Echo.Sent,
+								node.Probes.ICMPTTL.Received, node.Probes.ICMPTTL.Sent)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// --no-paths sends one UDP flow per hop per round instead of six, so each hop
+// gets 2 probes a round (the ICMP TTL probe and one UDP probe).
+func TestNoPathsSendsOneFlow(t *testing.T) {
+	const rounds = 10
+	reset(t)
+	var r export.Report
+	pkts := capture(t, func() {
+		r = via(t, "--no-paths", "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4)
+	})
+	want := rounds * 2
+	onWire := probesSentByTTL(pkts, clientV4, dst1V4)
+	for i, ip := range pathToDst1 {
+		wantHop(t, hopByTTL(t, r, i+1), ip, rounds, want, want)
+		if onWire[i+1] != want {
+			t.Errorf("TTL %d: %d probes on the wire, want %d", i+1, onWire[i+1], want)
+		}
+	}
+}
+
+// An IPv4-mapped IPv6 literal is traced as the IPv4 address it embeds, over
+// IPv4, along the IPv4 path.
+func TestIPv4MappedLiteralTracesOverIPv4(t *testing.T) {
+	const rounds = 5
+	reset(t)
+	r := via(t, "-P", "icmp", "-c", strconv.Itoa(rounds), "-i", "200ms", "::ffff:"+dst1V4)
+	if r.TargetIP != dst1V4 {
+		t.Errorf("target_ip = %s, want %s", r.TargetIP, dst1V4)
+	}
+	for i, ip := range pathToDst1 {
+		wantHop(t, hopByTTL(t, r, i+1), ip, rounds, rounds, rounds)
+	}
+}
+
+// Targets that cannot be traced are refused before any probe is sent.
+func TestUntraceableTargetsAreRefusedAtStartup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"IPv4 multicast", []string{"224.0.0.251"}, "multicast"},
+		{"IPv6 multicast", []string{"ff02::1"}, "multicast"},
+		{"IPv4-mapped literal with -6", []string{"-6", "::ffff:" + dst1V4}, "IPv4-mapped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset(t)
+			var stderr string
+			pkts := capture(t, func() {
+				cmd := inNS("client", viaBin, append([]string{"-r", "-n", "--no-asn", "-c", "2"}, tc.args...)...)
+				out, err := cmd.CombinedOutput()
+				stderr = string(out)
+				if err == nil {
+					t.Errorf("via exited zero; output:\n%s", out)
+				}
+			})
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("error output does not mention %q:\n%s", tc.want, stderr)
+			}
+			for _, p := range pkts {
+				if p.src == clientV4 || p.src == clientV6 {
+					if p.proto == 58 && p.icmpType >= 133 && p.icmpType <= 137 {
+						continue // neighbor discovery, not a probe
+					}
+					t.Errorf("a packet left the client for a refused target: %+v", p)
+					break
+				}
+			}
+		})
+	}
+}
+
+// Scenario 9: two targets in one session. Loss on dst1's path must not show
+// up on dst2's.
+func TestMultiTargetIsolation(t *testing.T) {
+	const rounds = 20
+	reset(t)
+	script(t, "scenarios/drop-replies.sh", "r3", "5")
+	raw := runVia(t, "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4, dst2V4)
+	var mr export.MultiReport
+	if err := json.Unmarshal(raw, &mr); err != nil {
+		t.Fatalf("parsing multi-target JSON: %v\n%s", err, raw)
+	}
+	if len(mr.Targets) != 2 {
+		t.Fatalf("targets = %d, want 2", len(mr.Targets))
+	}
+	c := counters(t, "r2", "ip")
+	seen := c["seen_ttl_icmp"] + c["seen_ttl_udp"]
+	dropped := c["drop_ttl_icmp"] + c["drop_ttl_udp"]
+	sent := rounds * 7
+	if seen != sent {
+		t.Errorf("replies from r3 seen = %d, want %d", seen, sent)
+	}
+
+	d1, d2 := mr.Targets[0], mr.Targets[1]
+	wantHop(t, hopByTTL(t, d1, 3), r3V4, rounds, sent, seen-dropped)
+	wantHop(t, hopByTTL(t, d1, 4), dst1V4, rounds, sent, sent)
+
+	for i, ip := range []string{r1V4, r2V4, r3bV4, dst2V4} {
+		wantHop(t, hopByTTL(t, d2, i+1), ip, rounds, sent, sent)
+	}
+}
+
+// Scenario 10: r2 has two equal-cost next hops toward dst1. UDP flows with
+// different source ports must reveal both, with nothing lost.
+func TestECMPDiscoversBothPaths(t *testing.T) {
+	const rounds = 10
+	reset(t)
+	script(t, "scenarios/ecmp.sh")
+	r := via(t, "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4)
+	h := hopByTTL(t, r, 3)
+	got := map[string]bool{}
+	for _, n := range h.Nodes {
+		got[n.IP] = true
+	}
+	if !got[r3V4] || !got[r3bV4] || len(got) != 2 {
+		t.Errorf("TTL 3 nodes = %v, want exactly %s and %s", got, r3V4, r3bV4)
+	}
+	if sent := rounds * 7; h.ProbesSent != sent || h.ProbesReceived != sent {
+		t.Errorf("TTL 3 probes sent/received = %d/%d, want %d/%d", h.ProbesSent, h.ProbesReceived, sent, sent)
+	}
+}

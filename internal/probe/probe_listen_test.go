@@ -17,16 +17,16 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// TestSetOnSent verifies that SetOnSent stores the callback.
-func TestSetOnSent(t *testing.T) {
+// TestSetOnRoundSent verifies that SetOnRoundSent stores the callback.
+func TestSetOnRoundSent(t *testing.T) {
 	tr := newListenTracer()
-	if tr.OnSent != nil {
-		t.Fatal("expected OnSent nil before set")
+	if tr.OnRound != nil {
+		t.Fatal("expected OnRound nil before set")
 	}
-	var sc mockSentCounter
-	tr.SetOnSent(&sc)
-	if tr.OnSent == nil {
-		t.Fatal("expected OnSent non-nil after SetOnSent")
+	var rm mockRoundMarker
+	tr.SetOnRoundSent(&rm)
+	if tr.OnRound == nil {
+		t.Fatal("expected OnRound non-nil after SetOnRoundSent")
 	}
 }
 
@@ -44,10 +44,10 @@ func TestSetOnRoundEnd(t *testing.T) {
 	}
 }
 
-// mockSentCounter satisfies SentCounter for tests.
-type mockSentCounter struct{ count int }
+// mockRoundMarker satisfies RoundMarker for tests.
+type mockRoundMarker struct{ count int }
 
-func (m *mockSentCounter) IncrementSent(_ int) { m.count++ }
+func (m *mockRoundMarker) MarkRoundSent(_ int, _ int) { m.count++ }
 
 // fakeAddr implements net.Addr, returning a fixed IPv4 string so that
 // net.ParseIP(peer.String()) in Tracer.listen succeeds.
@@ -61,10 +61,11 @@ func (a fakeAddr) String() string  { return a.s }
 // (returns a deadline error) when the channel is empty, simulating the
 // 200 ms deadline loop in Tracer.listen.
 type fakeICMPConn struct {
-	mu       sync.Mutex
-	packets  chan fakePacket
-	closed   chan struct{}
+	mu        sync.Mutex
+	packets   chan fakePacket
+	closed    chan struct{}
 	closeOnce sync.Once
+	deadline  time.Time
 }
 
 type fakePacket struct {
@@ -91,9 +92,31 @@ func (f *fakeICMPConn) pushErr(err error) {
 }
 
 func (f *fakeICMPConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	// Honor the read deadline like a real socket: when the channel is empty,
+	// return a timeout error once the deadline passes instead of blocking
+	// forever. This is what lets Tracer.listen re-check ctx.Done() every 200ms
+	// and exit on cancellation — without it, listen blocks here permanently and
+	// context-cancel tests hang (a scheduling-race flake under load).
+	f.mu.Lock()
+	dl := f.deadline
+	f.mu.Unlock()
+
+	var timeout <-chan time.Time
+	if !dl.IsZero() {
+		d := time.Until(dl)
+		if d < 0 {
+			d = 0
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+
 	select {
 	case <-f.closed:
 		return 0, nil, errors.New("use of closed network connection")
+	case <-timeout:
+		return 0, nil, errors.New("i/o timeout")
 	case pkt, ok := <-f.packets:
 		if !ok {
 			return 0, nil, errors.New("conn closed")
@@ -113,7 +136,12 @@ func (f *fakeICMPConn) Close() error {
 	return nil
 }
 
-func (f *fakeICMPConn) SetReadDeadline(_ time.Time) error { return nil }
+func (f *fakeICMPConn) SetReadDeadline(t time.Time) error {
+	f.mu.Lock()
+	f.deadline = t
+	f.mu.Unlock()
+	return nil
+}
 
 // buildIPv4Header builds a minimal 20-byte IPv4 header with the given
 // source and destination and protocol. Used to construct inner headers
@@ -187,7 +215,7 @@ func marshalEchoReply(id, seq int) []byte {
 func newListenTracer() *Tracer {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.RoundDelay = 10 * time.Millisecond
 	cfg.Timeout = 100 * time.Millisecond
 	target := net.ParseIP("192.0.2.1")
@@ -204,7 +232,7 @@ func TestListen_TimeExceeded(t *testing.T) {
 	id := proto.sessionID
 	seq := 7
 	key := probeKey{SrcPort: id, DstPort: seq, Seq: 0}
-	tr.pm.add(key, 3, 0, time.Now())
+	tr.pm.add(key, 3, 0, time.Now(), ProbeICMPTTL)
 
 	src := net.ParseIP("192.0.2.1")   // source of original probe
 	dst := net.ParseIP("192.0.2.1")   // destination of original probe
@@ -255,7 +283,7 @@ func TestListen_DstUnreachable_PortUnreachable(t *testing.T) {
 	srcPort := cfg.BasePort    // 44000
 	dstPort := 33434 + 5      // TTL=5 path
 	key := probeKey{SrcPort: srcPort, DstPort: dstPort, Seq: 0}
-	tr.pm.add(key, 5, 0, time.Now())
+	tr.pm.add(key, 5, 0, time.Now(), ProbeUDPTTL)
 
 	src := net.ParseIP("198.51.100.1") // probe source
 	dst := net.ParseIP("192.0.2.1")    // probe dest (target)
@@ -295,7 +323,7 @@ func TestListen_EchoReply(t *testing.T) {
 	id := proto.sessionID
 	seq := 3
 	key := probeKey{SrcPort: id, DstPort: seq, Seq: 0}
-	tr.pm.add(key, 10, 0, time.Now())
+	tr.pm.add(key, 10, 0, time.Now(), ProbeICMPTTL)
 
 	pkt := marshalEchoReply(id, seq)
 	peer := fakeAddr{"192.0.2.1"}
@@ -410,7 +438,7 @@ func TestListen_ReadErrorContinues(t *testing.T) {
 	id := proto.sessionID
 	seq := 5
 	key := probeKey{SrcPort: id, DstPort: seq, Seq: 0}
-	tr.pm.add(key, 2, 0, time.Now())
+	tr.pm.add(key, 2, 0, time.Now(), ProbeICMPTTL)
 
 	pkt := marshalEchoReply(id, seq)
 	peer := fakeAddr{"192.0.2.1"}
@@ -454,7 +482,7 @@ func TestListen_TimeExceeded_TargetIPMatch(t *testing.T) {
 	id := proto.sessionID
 	seq := 11
 	key := probeKey{SrcPort: id, DstPort: seq, Seq: 0}
-	tr.pm.add(key, 8, 0, time.Now())
+	tr.pm.add(key, 8, 0, time.Now(), ProbeICMPTTL)
 
 	inner := buildICMPInnerHeader(net.ParseIP("198.51.100.1"), targetIP, id, seq)
 	pkt := marshalTimeExceeded(inner)
@@ -534,7 +562,7 @@ func newRunTracer(snd *fakeSender, cfg Config, target net.IP) *Tracer {
 func TestRun_SendsProbesAllTTLs(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 5
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1
@@ -579,7 +607,7 @@ func TestRun_SendsProbesAllTTLs(t *testing.T) {
 func TestRun_RespectsPauseFlag(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 3
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1
@@ -610,11 +638,11 @@ func TestRun_RespectsPauseFlag(t *testing.T) {
 	}
 }
 
-// TestRun_OnSentCallback verifies OnSent is called for each probe dispatched.
-func TestRun_OnSentCallback(t *testing.T) {
+// TestRun_OnRoundSentCallback verifies OnRound.MarkRoundSent is called once per TTL per round.
+func TestRun_OnRoundSentCallback(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 4
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1
@@ -626,8 +654,8 @@ func TestRun_OnSentCallback(t *testing.T) {
 	snd := &fakeSender{}
 	tr := newRunTracer(snd, cfg, target)
 
-	var sc mockSentCounter
-	tr.SetOnSent(&sc)
+	var rm mockRoundMarker
+	tr.SetOnRoundSent(&rm)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -637,8 +665,9 @@ func TestRun_OnSentCallback(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	if sc.count != 4 {
-		t.Errorf("OnSent called %d times, want 4", sc.count)
+	// With MaxHops=4, NumPaths=1, MaxRounds=1: one MarkRoundSent call per TTL = 4.
+	if rm.count != 4 {
+		t.Errorf("MarkRoundSent called %d times, want 4 (one per TTL)", rm.count)
 	}
 }
 
@@ -647,7 +676,7 @@ func TestRun_OnSentCallback(t *testing.T) {
 func TestRun_TargetTTLCapsBounds(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 10
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1
@@ -682,7 +711,7 @@ func TestRun_TargetTTLCapsBounds(t *testing.T) {
 func TestRun_ContextCancelExits(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 30
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1
@@ -822,7 +851,7 @@ func TestListen_CtxCancelDuringResultSend(t *testing.T) {
 	id := proto.sessionID
 	seq := 20
 	key := probeKey{SrcPort: id, DstPort: seq, Seq: 0}
-	tr.pm.add(key, 5, 0, time.Now())
+	tr.pm.add(key, 5, 0, time.Now(), ProbeICMPTTL)
 
 	pkt := marshalEchoReply(id, seq)
 	conn := newFakeConn()
@@ -854,7 +883,7 @@ func TestListen_CtxCancelDuringResultSend(t *testing.T) {
 func TestRun_NewSenderError(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	target := net.ParseIP("192.0.2.1")
 	tr := NewTracer(target, cfg)
 	tr.newSender = func(_ context.Context, _ ProbeProtocol, _ chan<- Result) (probeSender, func(), error) {
@@ -872,7 +901,7 @@ func TestRun_NewSenderError(t *testing.T) {
 func TestRun_NewSenderCleanupCalled(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 1
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1
@@ -900,7 +929,7 @@ func TestRun_NewSenderCleanupCalled(t *testing.T) {
 func TestRun_OnRoundEndCalled(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.Protocol = NewICMPProtocol()
+	cfg.Protocol = NewICMPProtocol(cfg)
 	cfg.MaxHops = 2
 	cfg.FirstTTL = 1
 	cfg.NumPaths = 1

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tonhe/viaduct/internal/hop"
 )
 
 // --- ECMP fixtures ---
@@ -14,14 +16,14 @@ import (
 func withECMPSmall() testOpt {
 	return func(m *Model) {
 		// TTL 1: single node, both flows see same IP
-		m.table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0)
-		m.table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 1)
+		m.sessions[0].table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 1, hop.KindPrimary)
 		// TTL 2: single node, both flows see same IP
-		m.table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.5"), 10*time.Millisecond, 0)
-		m.table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.5"), 10*time.Millisecond, 1)
+		m.sessions[0].table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.5"), 10*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.5"), 10*time.Millisecond, 1, hop.KindPrimary)
 		// TTL 3: ECMP divergence — flow 0 and flow 1 see different IPs
-		m.table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.10"), 20*time.Millisecond, 0)
-		m.table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.20"), 22*time.Millisecond, 1)
+		m.sessions[0].table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.10"), 20*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.20"), 22*time.Millisecond, 1, hop.KindPrimary)
 	}
 }
 
@@ -30,24 +32,24 @@ func withECMPSmall() testOpt {
 func withECMPDivergent() testOpt {
 	return func(m *Model) {
 		// TTL 1: single convergent hop
-		m.table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0)
-		m.table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 1)
-		m.table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 2)
+		m.sessions[0].table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 1, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 2, hop.KindPrimary)
 
 		// TTL 2: two-way split
-		m.table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.1"), 10*time.Millisecond, 0)
-		m.table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.2"), 11*time.Millisecond, 1)
-		m.table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.1"), 10*time.Millisecond, 2)
+		m.sessions[0].table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.1"), 10*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.2"), 11*time.Millisecond, 1, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(2).AddSample(net.ParseIP("198.51.100.1"), 10*time.Millisecond, 2, hop.KindPrimary)
 
 		// TTL 3: three-way split
-		m.table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.10"), 20*time.Millisecond, 0)
-		m.table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.20"), 22*time.Millisecond, 1)
-		m.table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.30"), 24*time.Millisecond, 2)
+		m.sessions[0].table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.10"), 20*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.20"), 22*time.Millisecond, 1, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(3).AddSample(net.ParseIP("203.0.113.30"), 24*time.Millisecond, 2, hop.KindPrimary)
 
 		// TTL 4: two-way split (reconvergence partially)
-		m.table.GetOrCreate(4).AddSample(net.ParseIP("198.51.100.10"), 30*time.Millisecond, 0)
-		m.table.GetOrCreate(4).AddSample(net.ParseIP("198.51.100.11"), 32*time.Millisecond, 1)
-		m.table.GetOrCreate(4).AddSample(net.ParseIP("198.51.100.10"), 30*time.Millisecond, 2)
+		m.sessions[0].table.GetOrCreate(4).AddSample(net.ParseIP("198.51.100.10"), 30*time.Millisecond, 0, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(4).AddSample(net.ParseIP("198.51.100.11"), 32*time.Millisecond, 1, hop.KindPrimary)
+		m.sessions[0].table.GetOrCreate(4).AddSample(net.ParseIP("198.51.100.10"), 30*time.Millisecond, 2, hop.KindPrimary)
 	}
 }
 
@@ -63,38 +65,47 @@ func hopsIPv6Full() testOpt {
 			"2001:db8:cafe::1",
 		}
 		for i, a := range addrs {
-			m.table.GetOrCreate(i+1).AddSample(net.ParseIP(a), time.Duration(5+i*5)*time.Millisecond, 0)
+			m.sessions[0].table.GetOrCreate(i+1).AddSample(net.ParseIP(a), time.Duration(5+i*5)*time.Millisecond, 0, hop.KindPrimary)
 		}
 	}
 }
 
 // --- Rate-limited fixture ---
 
-// withRateLimitedHop constructs a hop at the given TTL that will trigger
-// hop.DetectRateLimited detection. The algorithm requires:
-//   - hop(ttl).LossPercent() > 1.0
-//   - at least one downstream hop (ttl+1) with lower loss
+// withRateLimitedHop drives the new per-node tri-state rate-limit detection
+// (hop.RateLimitYes) for the given TTL. The algorithm requires:
+//   - pn.icmpTTL.RoundLossPercent() > 0
+//   - pn.icmpEcho.Sent >= rateLimitMinEchoSamples (5)
+//   - pn.icmpEcho.ProbeLossPercent() < pn.icmpTTL.RoundLossPercent() - 5.0
 //
-// We achieve this by calling IncrementSent many times to inflate sentTotal
-// while only adding one real sample (low received count = high loss).
-// The downstream hop has zero extra sentTotal so its LossPercent stays 0.
+// hopsFull() already seeded TTL 3 with one response sample (IP 203.0.113.10).
+// We layer on top: mark that sample as "round received" then add 8 more silent
+// rounds → heavy TTL probe loss. Then add 20 echo probes, all received (0%
+// echo loss), which the classifier reads as rate limiting; the loss cell
+// shows the echo-derived figure, ~0%†.
 //
-// NOTE: Because detection is computed at render time via hop.DetectRateLimited,
-// we must ensure the hops table also contains a lower-loss downstream hop.
-// This fixture REPLACES any existing hops — callers must apply it after hopsFull()
-// so that the base hops are already seeded, then this overrides TTL 3's sent count.
+// NOTE: callers must apply this AFTER hopsFull() so the sample is already seeded.
 func withRateLimitedHop(ttl int) testOpt {
 	return func(m *Model) {
-		h := m.table.GetOrCreate(ttl)
-		// Inflate sentTotal so this hop appears to have ~50% loss.
-		// LossPercent = (sentTotal - received) / sentTotal * 100
-		// We already have 1 received sample from hopsFull().
-		// We want loss > 1%. With sentTotal=10, received=1 → 90% loss.
-		// Downstream hops (from hopsFull) have sentTotal=0 so LossPercent=0.
-		// DetectRateLimited: ttl < maxTTL && loss > 1.0 && minDownstream < loss-5.0
-		// 0 < 90.0 - 5.0 = 85.0 → true, so TTL 3 is flagged.
-		for i := 0; i < 9; i++ {
-			h.IncrementSent()
+		h := m.sessions[0].table.GetOrCreate(ttl)
+		// Round 1: mark as sent and received (the sample from hopsFull counts).
+		h.MarkRoundSent()
+		h.MarkRoundEnd() // respondedThisRound is true from hopsFull's AddSample
+		// Rounds 2-9: silent — no response.
+		for i := 0; i < 8; i++ {
+			h.MarkRoundSent()
+			h.MarkRoundEnd()
+		}
+		// roundsSent=9, roundsRecvd=1 → 8/9 ≈ 88.9% → displayed as ~89%.
+		// Now drive echo ground-truth on the primary PathNode: 20 sent, 20
+		// received (0% echo loss). TTL probe loss far above echo loss with
+		// enough echo samples (the classifier needs 20) → RateLimitYes.
+		pn := h.PrimaryNode()
+		if pn != nil {
+			for i := 0; i < 20; i++ {
+				pn.MarkEchoSent()
+				pn.AddSample(20*time.Millisecond, 0, hop.KindEcho)
+			}
 		}
 	}
 }
@@ -105,7 +116,7 @@ func withRateLimitedHop(ttl int) testOpt {
 // but left in the default healthy state (no Update calls).
 func withAlertHealthy() testOpt {
 	return func(m *Model) {
-		m.alertEngine = NewAlertEngine(5.0, 200*time.Millisecond, 3)
+		m.sessions[0].alertEngine = NewAlertEngine(5.0, 200*time.Millisecond, 3)
 		// Default state is AlertHealthy; leave as-is.
 	}
 }
@@ -114,11 +125,11 @@ func withAlertHealthy() testOpt {
 // AlertDegraded state with peak loss data, using same-package field access.
 func withAlertDegraded() testOpt {
 	return func(m *Model) {
-		m.alertEngine = NewAlertEngine(5.0, 200*time.Millisecond, 3)
-		m.alertEngine.state = AlertDegraded
-		m.alertEngine.peakLoss = 12.5
-		m.alertEngine.affectedHop = 3
-		m.alertEngine.consecutiveBad = 3
+		m.sessions[0].alertEngine = NewAlertEngine(5.0, 200*time.Millisecond, 3)
+		m.sessions[0].alertEngine.state = AlertDegraded
+		m.sessions[0].alertEngine.peakLoss = 12.5
+		m.sessions[0].alertEngine.affectedHop = 3
+		m.sessions[0].alertEngine.consecutiveBad = 3
 	}
 }
 

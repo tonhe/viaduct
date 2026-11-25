@@ -18,19 +18,49 @@ type Report struct {
 	Target    string    `json:"target"`
 	TargetIP  string    `json:"target_ip"`
 	Protocol  string    `json:"protocol"`
-	Probes    int       `json:"probes"`
-	Hops      []Hop     `json:"hops"`
+	// Probes is the number of TTL-limited probes sent to the hops in the
+	// report, over completed rounds: the sum of what was sent to each TTL,
+	// including hops that never answered.
+	Probes int   `json:"probes"`
+	Hops   []Hop `json:"hops"`
+	// Error is set in a multi-target report for a target that could not be
+	// traced (it did not resolve, or its trace failed). Such a target has no
+	// hops. A single-target run that fails prints the error and has no report.
+	Error string `json:"error,omitempty"`
 }
 
 // Hop represents a single TTL in the trace.
+//
+// Every count is in probes. Loss is per probe: (ProbesSent - ProbesReceived)
+// / ProbesSent over completed rounds. Sent equals ProbesSent; it is kept
+// because it was the probe count before interleaved probes. Rounds is the
+// number of rounds, as shown in the Rnd column. A hop that never answered has
+// no nodes but still reports what was sent to it.
+//
+// HeadlineLoss is the figure the views show, and LossKind says what it is:
+// "measured" (it equals Loss), "rate_limited" (the loss of direct echoes to
+// the hop, because its TTL-probe loss is judged to be rate limiting), or
+// "provisional" (it equals Loss, but there are not yet enough echo samples to
+// say whether that loss is rate limiting).
 type Hop struct {
-	TTL   int     `json:"ttl"`
-	Nodes []Node  `json:"nodes,omitempty"`
-	Loss  float64 `json:"loss_pct"`
-	Sent  int     `json:"sent"`
+	TTL            int     `json:"ttl"`
+	Nodes          []Node  `json:"nodes,omitempty"`
+	Loss           float64 `json:"loss_pct"`
+	HeadlineLoss   float64 `json:"headline_loss_pct"`
+	LossKind       string  `json:"loss_kind,omitempty"`
+	Rounds         int     `json:"rounds"`
+	Sent           int     `json:"sent"`
+	ProbesSent     int     `json:"probes_sent"`
+	ProbesReceived int     `json:"probes_received"`
 }
 
 // Node represents a unique responder at a given TTL.
+//
+// Sent is the TTL-limited probes sent to the node's hop and Received is the
+// replies this node sent, both in probes. At a hop with one node,
+// 1 - Received/Sent is the hop's loss; at an ECMP hop Received/Sent is the
+// node's share. Loss is the hop's raw loss, the same on each of its nodes: a
+// TTL-limited probe is addressed to a hop distance, not to a node.
 type Node struct {
 	IP        string   `json:"ip"`
 	Hostname  string   `json:"hostname,omitempty"`
@@ -43,6 +73,51 @@ type Node struct {
 	FlowIDs   []int    `json:"flow_ids,omitempty"`
 	Stability float64  `json:"stability_pct,omitempty"`
 	Trend     string   `json:"trend,omitempty"`
+
+	// Probes breaks the node's replies down by probe type. RateLimited is
+	// "yes", "no" or "undetermined": whether the node's TTL-probe loss is
+	// judged to be ICMP rate limiting rather than real loss.
+	Probes      NodeProbes `json:"probes"`
+	RateLimited string     `json:"rate_limited"`
+}
+
+// NodeProbes holds per-probe-type counts for one node.
+type NodeProbes struct {
+	ICMPTTL ProbeCount `json:"icmp_ttl"` // TTL-limited ICMP echo requests
+	Primary ProbeCount `json:"primary"`  // TTL-limited UDP or TCP probes
+	Echo    ProbeCount `json:"echo"`     // direct ICMP echo requests to this node
+}
+
+// ProbeCount is probes sent and replies received for one probe type, both in
+// probes. For the two TTL-limited types, Sent is the probes of that type sent
+// to the node's hop in the rounds the node was known, because a TTL-limited
+// probe is addressed to a hop distance, not to a node; for Echo it is the
+// echo requests sent to the node.
+type ProbeCount struct {
+	Sent     int `json:"sent"`
+	Received int `json:"received"`
+}
+
+func lossKindName(k hop.LossKind) string {
+	switch k {
+	case hop.LossRateLimited:
+		return "rate_limited"
+	case hop.LossProvisional:
+		return "provisional"
+	default:
+		return "measured"
+	}
+}
+
+func rateLimitName(s hop.RateLimitState) string {
+	switch s {
+	case hop.RateLimitYes:
+		return "yes"
+	case hop.RateLimitNo:
+		return "no"
+	default:
+		return "undetermined"
+	}
 }
 
 // RTTStats holds round-trip time statistics in milliseconds.
@@ -61,7 +136,7 @@ func msFromDuration(d time.Duration) float64 {
 
 // BuildReport constructs a Report from the current trace state.
 func BuildReport(version string, target string, targetIP net.IP,
-	protocol string, probeCount int, table *hop.Table,
+	protocol string, table *hop.Table,
 	resolver *resolve.Resolver, enricher *asn.Enricher,
 	maxTTL int) Report {
 
@@ -71,7 +146,6 @@ func BuildReport(version string, target string, targetIP net.IP,
 		Target:    target,
 		TargetIP:  targetIP.String(),
 		Protocol:  protocol,
-		Probes:    probeCount,
 	}
 
 	hops := table.Snapshot()
@@ -82,15 +156,28 @@ func BuildReport(version string, target string, targetIP net.IP,
 
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		h, ok := hopMap[ttl]
-		if !ok || h.GetIP() == nil {
+		if ok {
+			sent, _ := h.ProbeCounts()
+			r.Probes += sent // counted whether or not the hop ever answered
+		}
+		if !ok {
 			r.Hops = append(r.Hops, Hop{TTL: ttl})
 			continue
 		}
 
+		// A hop that never answered has no nodes, and still reports what was
+		// sent to it: its probes are in the report's total.
+		probesSent, probesRecvd := h.ProbeCounts()
+		headline, lossKind := h.Loss()
 		eh := Hop{
-			TTL:  ttl,
-			Loss: h.LossPercent(),
-			Sent: h.GetSent(),
+			TTL:            ttl,
+			Loss:           h.LossPercent(),
+			HeadlineLoss:   headline,
+			LossKind:       lossKindName(lossKind),
+			Rounds:         h.Rounds(),
+			Sent:           probesSent,
+			ProbesSent:     probesSent,
+			ProbesReceived: probesRecvd,
 		}
 
 		for _, node := range h.GetNodes() {
@@ -110,13 +197,21 @@ func BuildReport(version string, target string, targetIP net.IP,
 					StDev:  node.StDev(),
 					Jitter: msFromDuration(node.Jitter()),
 				},
-				Loss:      node.LossPercent(),
-				Sent:      node.GetSent(),
+				Loss:      h.LossPercent(),
+				Sent:      probesSent,
 				Received:  node.GetReceived(),
 				FlowIDs:   node.GetFlowIDs(),
 				Stability: node.StabilityPercent(),
 				Trend:     node.Trend(),
 			}
+			icmpTTL, primary, echo := node.ICMPTTLStats(), node.PrimaryStats(), node.EchoStats()
+			en.Probes = NodeProbes{
+				ICMPTTL: ProbeCount{Sent: icmpTTL.ProbesSent, Received: icmpTTL.Received},
+				Primary: ProbeCount{Sent: primary.ProbesSent, Received: primary.Received},
+				Echo:    ProbeCount{Sent: echo.Sent, Received: echo.Received},
+			}
+			// The verdict is the hop's (see hop.Hop.RateLimitState).
+			en.RateLimited = rateLimitName(h.RateLimitState())
 
 			if en.Hostname == "" && resolver != nil {
 				if name, ok := resolver.Lookup(ip); ok {

@@ -12,13 +12,43 @@ const stabilityWindowSize = 50
 const sparklineSize = 28
 const trendWindowSize = 10
 
+// SparkKind classifies what a sparkline cell represents in a given round. The
+// ladder encodes how much the tracer knows about the hop that round, so the
+// sparkline's drop criterion matches the echo-aware loss column: a cell is only
+// a drop when no tier reached the hop.
+type SparkKind uint8
+
+const (
+	SparkDrop SparkKind = iota // a probe was sent, nothing answered: genuine loss
+	SparkTTL                   // TTL/UDP reply: direct latency measurement
+	SparkEcho                  // TTL silent, echo confirms reachability: echo latency
+	SparkHeld                  // known rate-limited, not echoed this round: reachable, no reading
+)
+
+// SparkSample is one sparkline cell: a latency reading (zero for Held/Drop) and
+// the kind that determines how it renders.
+type SparkSample struct {
+	RTT  time.Duration
+	Kind SparkKind
+}
+
+// ProbeKind selects which ProbeStats slot a sample updates. Kept local to
+// this package (no dependency on internal/probe); the TUI maps
+// probe.ProbeType to ProbeKind.
+type ProbeKind int
+
+const (
+	KindICMPTTL ProbeKind = iota
+	KindPrimary
+	KindEcho
+)
+
 // PathNode tracks per-IP statistics for ECMP multipath discovery.
 // It records RTT samples, flow IDs, loss, and path stability over time.
 type PathNode struct {
 	IP       net.IP
 	Hostname string
 
-	sent     int
 	received int
 	minRTT   time.Duration
 	maxRTT   time.Duration
@@ -33,9 +63,16 @@ type PathNode struct {
 	jitterMean  float64       // running jitter mean in ms
 	jitterCount int           // number of jitter samples
 
-	sparkBuf   [sparklineSize]time.Duration // ring buffer of RTT samples (0 = loss)
+	sparkBuf   [sparklineSize]time.Duration // ring buffer of RTT samples (0 = no reading)
+	sparkKind  [sparklineSize]SparkKind     // parallel buffer: how each cell renders
 	sparkIdx   int                          // next write index
 	sparkCount int                          // entries filled (up to sparklineSize)
+
+	echoSentThisRound bool // an echo probe was dispatched to this node this round
+	isTarget          bool // this node is the trace's destination
+
+	hopVerdict    RateLimitState // the owning hop's verdict as of the last closed round
+	hopVerdictSet bool
 
 	recentAvgs     [trendWindowSize]float64 // per-round avg RTTs in ms
 	recentAvgIdx   int
@@ -45,6 +82,10 @@ type PathNode struct {
 
 	asnNum int    // Autonomous System Number (0 = unknown)
 	asnOrg string // AS organization name
+
+	icmpTTL  ProbeStats
+	primary  ProbeStats
+	icmpEcho ProbeStats
 
 	flowIDs   map[int]struct{}
 	stability [stabilityWindowSize]bool
@@ -70,9 +111,21 @@ func NewPathNode(ip net.IP) *PathNode {
 }
 
 // AddSample records an RTT measurement and the associated flow ID.
-func (pn *PathNode) AddSample(rtt time.Duration, flowID int) {
+// The kind parameter routes the sample to the appropriate per-probe-type slot.
+// Echo samples update only the icmpEcho slot and do not affect aggregate RTT/loss.
+func (pn *PathNode) AddSample(rtt time.Duration, flowID int, kind ProbeKind) {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
+
+	switch kind {
+	case KindICMPTTL:
+		pn.icmpTTL.addReply(rtt)
+	case KindPrimary:
+		pn.primary.addReply(rtt)
+	case KindEcho:
+		pn.icmpEcho.addReply(rtt)
+		return // echo is ground truth, not a latency sample: no aggregates
+	}
 
 	pn.received++
 	pn.lastRTT = rtt
@@ -119,13 +172,6 @@ func (pn *PathNode) AddSample(rtt time.Duration, flowID int) {
 	pn.stability[pn.stabIdx] = true
 }
 
-// IncrementSent increments the sent probe count.
-func (pn *PathNode) IncrementSent() {
-	pn.mu.Lock()
-	defer pn.mu.Unlock()
-	pn.sent++
-}
-
 // AvgRTT returns the average round-trip time.
 func (pn *PathNode) AvgRTT() time.Duration {
 	pn.mu.Lock()
@@ -159,10 +205,11 @@ func (pn *PathNode) GeoMean() time.Duration {
 	return time.Duration(ms * float64(time.Millisecond))
 }
 
-// recordLossLocked writes a loss sentinel to the sparkline buffer.
+// writeSparkLocked appends one sample to the sparkline ring buffer.
 // Caller must hold pn.mu.
-func (pn *PathNode) recordLossLocked() {
-	pn.sparkBuf[pn.sparkIdx] = 0 // 0 = timeout sentinel
+func (pn *PathNode) writeSparkLocked(s SparkSample) {
+	pn.sparkBuf[pn.sparkIdx] = s.RTT
+	pn.sparkKind[pn.sparkIdx] = s.Kind
 	pn.sparkIdx = (pn.sparkIdx + 1) % sparklineSize
 	if pn.sparkCount < sparklineSize {
 		pn.sparkCount++
@@ -170,47 +217,54 @@ func (pn *PathNode) recordLossLocked() {
 }
 
 // SparklineData returns the sparkline ring buffer contents in chronological order.
-func (pn *PathNode) SparklineData() []time.Duration {
+func (pn *PathNode) SparklineData() []SparkSample {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
 	if pn.sparkCount == 0 {
 		return nil
 	}
-	result := make([]time.Duration, pn.sparkCount)
+	result := make([]SparkSample, pn.sparkCount)
 	start := 0
 	if pn.sparkCount == sparklineSize {
 		start = pn.sparkIdx // oldest entry when buffer is full
 	}
 	for i := 0; i < pn.sparkCount; i++ {
-		result[i] = pn.sparkBuf[(start+i)%sparklineSize]
+		idx := (start + i) % sparklineSize
+		result[i] = SparkSample{RTT: pn.sparkBuf[idx], Kind: pn.sparkKind[idx]}
 	}
 	return result
 }
 
-// RecordRoundAvg records the per-round average RTT for trend detection
-// and sparkline. One sparkline entry per round (the round average),
-// not per probe.
+// RecordRoundAvg records one sparkline entry per round and feeds latency-trend
+// tracking. The sample kind reconciles the sparkline with the echo-based loss
+// column: a drop is written only when no tier reached the hop this round, so a
+// dot means the same thing in both places. Precedence: a direct TTL/UDP reading
+// wins; else echo latency (reachable, rate-limited); else a Held marker when the
+// hop is known rate-limited but wasn't echoed this round (reachable, no reading);
+// else a genuine Drop.
 func (pn *PathNode) RecordRoundAvg() {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
-	if pn.roundRTTCount == 0 {
-		// No probes received this round — record loss in sparkline
-		pn.recordLossLocked()
-		return
-	}
-	avgMs := float64(pn.roundRTTSum) / float64(pn.roundRTTCount) / float64(time.Millisecond)
-	pn.recentAvgs[pn.recentAvgIdx] = avgMs
-	pn.recentAvgIdx = (pn.recentAvgIdx + 1) % trendWindowSize
-	if pn.recentAvgCount < trendWindowSize {
-		pn.recentAvgCount++
-	}
 
-	// Sparkline: record round average
-	avgRTT := pn.roundRTTSum / time.Duration(pn.roundRTTCount)
-	pn.sparkBuf[pn.sparkIdx] = avgRTT
-	pn.sparkIdx = (pn.sparkIdx + 1) % sparklineSize
-	if pn.sparkCount < sparklineSize {
-		pn.sparkCount++
+	switch {
+	case pn.roundRTTCount > 0:
+		avgMs := float64(pn.roundRTTSum) / float64(pn.roundRTTCount) / float64(time.Millisecond)
+		pn.recentAvgs[pn.recentAvgIdx] = avgMs
+		pn.recentAvgIdx = (pn.recentAvgIdx + 1) % trendWindowSize
+		if pn.recentAvgCount < trendWindowSize {
+			pn.recentAvgCount++
+		}
+		avgRTT := pn.roundRTTSum / time.Duration(pn.roundRTTCount)
+		pn.writeSparkLocked(SparkSample{RTT: avgRTT, Kind: SparkTTL})
+
+	case pn.icmpEcho.respondedThisRound:
+		pn.writeSparkLocked(SparkSample{RTT: pn.icmpEcho.LastRTT, Kind: SparkEcho})
+
+	case pn.sparkRateLimitedLocked() && !pn.echoSentThisRound:
+		pn.writeSparkLocked(SparkSample{Kind: SparkHeld})
+
+	default:
+		pn.writeSparkLocked(SparkSample{Kind: SparkDrop})
 	}
 
 	pn.roundRTTSum = 0
@@ -268,17 +322,6 @@ func (pn *PathNode) JitterMean() time.Duration {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
 	return time.Duration(pn.jitterMean * float64(time.Millisecond))
-}
-
-// LossPercent returns the packet loss percentage.
-func (pn *PathNode) LossPercent() float64 {
-	pn.mu.Lock()
-	defer pn.mu.Unlock()
-
-	if pn.sent == 0 {
-		return 0
-	}
-	return float64(pn.sent-pn.received) / float64(pn.sent) * 100
 }
 
 // MarkSeen marks the current stability slot as seen (true).
@@ -368,11 +411,56 @@ func (pn *PathNode) SetASN(number int, org string) {
 	pn.asnOrg = org
 }
 
-// GetSent returns the sent count.
-func (pn *PathNode) GetSent() int {
+// MarkEchoSent records one echo probe dispatched toward this node. The
+// per-round flag lets RecordRoundAvg tell "rate-limited, not sampled this round"
+// (Held) apart from "echo sent and lost" (Drop). Reset in MarkProbeRoundEnd,
+// which runs after RecordRoundAvg reads it.
+func (pn *PathNode) MarkEchoSent() {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
-	return pn.sent
+	pn.icmpEcho.markSent()
+	pn.echoSentThisRound = true
+}
+
+// MarkProbeRoundEnd closes the per-probe-type round window. TTL kinds count
+// the round into Sent; echo does not (its Sent tracks real sends).
+func (pn *PathNode) MarkProbeRoundEnd() {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.icmpTTL.markRoundEnd(true)
+	pn.primary.markRoundEnd(true)
+	pn.icmpEcho.markRoundEnd(false)
+	pn.echoSentThisRound = false
+}
+
+// markProbesSent records the TTL-limited probes of each type sent to this
+// node's hop in the round being closed.
+func (pn *PathNode) markProbesSent(icmpTTL, primary int) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.icmpTTL.ProbesSent += icmpTTL
+	pn.primary.ProbesSent += primary
+}
+
+// ICMPTTLStats returns a snapshot of the ICMP TTL exceeded per-probe stats.
+func (pn *PathNode) ICMPTTLStats() ProbeStats {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.icmpTTL
+}
+
+// PrimaryStats returns a snapshot of the primary probe per-probe stats.
+func (pn *PathNode) PrimaryStats() ProbeStats {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.primary
+}
+
+// EchoStats returns a snapshot of the ICMP echo per-probe stats.
+func (pn *PathNode) EchoStats() ProbeStats {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.icmpEcho
 }
 
 // GetReceived returns the received count.
@@ -403,6 +491,120 @@ func (pn *PathNode) GetLastRTT() time.Duration {
 	return pn.lastRTT
 }
 
+// RateLimitState classifies whether this node's TTL loss is an artifact of
+// control-plane ICMP rate limiting, using echo probes as ground truth.
+type RateLimitState int
+
+const (
+	RateLimitUndetermined RateLimitState = iota // echo samples below guard
+	RateLimitNo
+	RateLimitYes
+)
+
+const (
+	// rateLimitMinEchoSamples is the fewest echo probes needed for a verdict.
+	rateLimitMinEchoSamples = 20
+	// rateLimitZ is the z-score the difference between ICMP TTL probe loss
+	// and echo loss must reach: 2.58 is p < 0.01, two-sided.
+	rateLimitZ = 2.58
+)
+
+func (pn *PathNode) RateLimitState() RateLimitState {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.rateLimitStateLocked()
+}
+
+// MarkTarget records that this node is the trace's destination. The
+// destination is never judged rate-limited: an echo to it is the same packet
+// on the same path as the ICMP TTL probe that reaches it, so any difference
+// between the two loss figures is sampling noise.
+func (pn *PathNode) MarkTarget() {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.isTarget = true
+}
+
+// rateLimitStateLocked is RateLimitState without acquiring pn.mu, for callers
+// that already hold it (e.g. RecordRoundAvg).
+//
+// A node is rate-limited when it answers direct echoes but not TTL-limited
+// probes: its ICMP TTL probe loss is significantly higher than its echo loss.
+// "Significantly" is a two-proportion z-test, so the verdict accounts for how
+// many probes of each kind there are; a fixed margin flags ordinary lossy
+// links whenever the two samples happen to differ.
+func (pn *PathNode) rateLimitStateLocked() RateLimitState {
+	if pn.icmpEcho.Sent < rateLimitMinEchoSamples {
+		return RateLimitUndetermined
+	}
+	if pn.isTarget {
+		return RateLimitNo
+	}
+	// ICMP TTL: one probe per round, so Sent (rounds) is probes sent.
+	return rateLimitVerdict(pn.icmpTTL.Sent, pn.icmpTTL.Sent-pn.icmpTTL.Received,
+		pn.icmpEcho.Sent, pn.icmpEcho.Sent-pn.icmpEcho.Received)
+}
+
+// rateLimitVerdict compares TTL-probe loss with echo loss: Yes when TTL
+// probes are lost significantly more often than echoes (two-proportion z-test
+// at rateLimitZ), Undetermined below rateLimitMinEchoSamples echoes.
+func rateLimitVerdict(ttlSent, ttlLost, echoSent, echoLost int) RateLimitState {
+	if echoSent < rateLimitMinEchoSamples {
+		return RateLimitUndetermined
+	}
+	if ttlSent == 0 {
+		return RateLimitNo
+	}
+	if ttlLost < 0 {
+		ttlLost = 0
+	}
+	if echoLost < 0 {
+		echoLost = 0
+	}
+	n1, n2 := float64(ttlSent), float64(echoSent)
+	lost1, lost2 := float64(ttlLost), float64(echoLost)
+	p1, p2 := lost1/n1, lost2/n2
+	pooled := (lost1 + lost2) / (n1 + n2)
+	variance := pooled * (1 - pooled) * (1/n1 + 1/n2)
+	if variance <= 0 {
+		return RateLimitNo // both lossless or both dead: nothing to tell apart
+	}
+	if (p1-p2)/math.Sqrt(variance) >= rateLimitZ {
+		return RateLimitYes
+	}
+	return RateLimitNo
+}
+
+// IsTarget reports whether this node has been marked as the destination.
+func (pn *PathNode) IsTarget() bool {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.isTarget
+}
+
+// setHopVerdict records the owning hop's rate-limit verdict, taken when a
+// round closes. The sparkline uses it to tell "reachable, not read this
+// round" from a drop; the hop verdict is the authoritative one because a
+// node cannot see the TTL probes other nodes at its hop answered.
+func (pn *PathNode) setHopVerdict(v RateLimitState) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.hopVerdict = v
+	pn.hopVerdictSet = true
+}
+
+// sparkRateLimitedLocked reports whether this node should be treated as
+// rate-limited when writing a sparkline cell.
+func (pn *PathNode) sparkRateLimitedLocked() bool {
+	if pn.isTarget {
+		return false
+	}
+	if pn.hopVerdictSet {
+		return pn.hopVerdict == RateLimitYes
+	}
+	return pn.rateLimitStateLocked() == RateLimitYes
+}
+
 // Reset clears all stats but preserves the IP address.
 func (pn *PathNode) Reset() {
 	pn.mu.Lock()
@@ -411,7 +613,6 @@ func (pn *PathNode) Reset() {
 	pn.Hostname = ""
 	pn.asnNum = 0
 	pn.asnOrg = ""
-	pn.sent = 0
 	pn.received = 0
 	pn.minRTT = 0
 	pn.maxRTT = 0
@@ -426,13 +627,21 @@ func (pn *PathNode) Reset() {
 	pn.jitterMean = 0
 	pn.jitterCount = 0
 	pn.sparkBuf = [sparklineSize]time.Duration{}
+	pn.sparkKind = [sparklineSize]SparkKind{}
 	pn.sparkIdx = 0
 	pn.sparkCount = 0
+	pn.echoSentThisRound = false
+	pn.isTarget = false
+	pn.hopVerdict = RateLimitUndetermined
+	pn.hopVerdictSet = false
 	pn.recentAvgs = [trendWindowSize]float64{}
 	pn.recentAvgIdx = 0
 	pn.recentAvgCount = 0
 	pn.roundRTTSum = 0
 	pn.roundRTTCount = 0
+	pn.icmpTTL = ProbeStats{}
+	pn.primary = ProbeStats{}
+	pn.icmpEcho = ProbeStats{}
 	pn.flowIDs = make(map[int]struct{})
 	pn.stability = [stabilityWindowSize]bool{}
 	pn.stabIdx = 0

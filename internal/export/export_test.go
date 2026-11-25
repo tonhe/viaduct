@@ -15,18 +15,18 @@ func buildTestTable() *hop.Table {
 	t := hop.NewTable(30)
 
 	h1 := t.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 6*time.Millisecond, 0)
+	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.AddSample(net.ParseIP("10.0.0.1"), 6*time.Millisecond, 0, hop.KindPrimary)
 
 	h2 := t.GetOrCreate(2)
-	h2.AddSample(net.ParseIP("192.168.1.1"), 10*time.Millisecond, 0)
-	h2.AddSample(net.ParseIP("192.168.1.2"), 12*time.Millisecond, 1)
+	h2.AddSample(net.ParseIP("192.168.1.1"), 10*time.Millisecond, 0, hop.KindPrimary)
+	h2.AddSample(net.ParseIP("192.168.1.2"), 12*time.Millisecond, 1, hop.KindPrimary)
 
 	// TTL 3 = gap hop (no samples)
 	t.GetOrCreate(3)
 
 	h4 := t.GetOrCreate(4)
-	h4.AddSample(net.ParseIP("8.8.8.8"), 20*time.Millisecond, 0)
+	h4.AddSample(net.ParseIP("8.8.8.8"), 20*time.Millisecond, 0, hop.KindPrimary)
 
 	return t
 }
@@ -34,7 +34,7 @@ func buildTestTable() *hop.Table {
 func TestBuildReport(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	if r.Version != "v0.1.0" {
 		t.Errorf("version = %q, want %q", r.Version, "v0.1.0")
@@ -103,7 +103,7 @@ func TestFormatName(t *testing.T) {
 func TestWriteJSON(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	var buf bytes.Buffer
 	if err := WriteJSON(&buf, r); err != nil {
@@ -126,7 +126,7 @@ func TestWriteJSON(t *testing.T) {
 func TestWriteCSV(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	var buf bytes.Buffer
 	if err := WriteCSV(&buf, r); err != nil {
@@ -153,7 +153,7 @@ func TestWriteCSV(t *testing.T) {
 func TestWriteDOT(t *testing.T) {
 	table := buildTestTable()
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
-		"udp", 100, table, nil, nil, 4)
+		"udp", table, nil, nil, 4)
 
 	// Set ASN data for clustering test
 	r.Hops[0].Nodes[0].ASN = 64496
@@ -200,27 +200,154 @@ func TestWriteDOT(t *testing.T) {
 // produce a hop with loss/sent data but no nodes. The gap path produces
 // Hop{TTL: ttl} with zero loss and zero sent, while the non-gap path would
 // produce a hop with loss/sent from the Hop object.
+// TestBuildReport_ProbeCounts: each hop exports the exact probe counts its
+// loss figure is computed from, so a consumer can check them against a packet
+// capture instead of trusting a percentage.
+func TestBuildReport_ProbeCounts(t *testing.T) {
+	table := hop.NewTable(1)
+	h := table.GetOrCreate(1)
+	ip := net.ParseIP("192.0.2.2")
+	// Two rounds of 7 probes; 7 answered, then 4 answered.
+	for _, answered := range []int{7, 4} {
+		h.MarkRoundSentProbes(7)
+		for i := 0; i < answered; i++ {
+			h.AddSample(ip, time.Millisecond, i, hop.KindPrimary)
+		}
+		h.MarkRoundEnd()
+	}
+
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 1)
+	if len(r.Hops) != 1 {
+		t.Fatalf("hops = %d, want 1", len(r.Hops))
+	}
+	got := r.Hops[0]
+	if got.ProbesSent != 14 || got.ProbesReceived != 11 {
+		t.Errorf("ProbesSent, ProbesReceived = %d, %d, want 14, 11", got.ProbesSent, got.ProbesReceived)
+	}
+	// Sent is in probes, as ProbesSent is; rounds have their own field.
+	if got.Sent != 14 || got.Rounds != 2 {
+		t.Errorf("Sent, Rounds = %d, %d, want 14 (probes), 2", got.Sent, got.Rounds)
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"probes_sent": 14`, `"probes_received": 11`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("JSON missing %s", want)
+		}
+	}
+}
+
+// TestBuildReport_ProbesIsTotalSent: the top-level probes field is the number
+// of TTL-limited probes sent to the hops in the report. It used to be whatever
+// the caller passed, which was 0 in report mode (viaduct#52).
+func TestBuildReport_ProbesIsTotalSent(t *testing.T) {
+	table := hop.NewTable(4)
+	ip := net.ParseIP("192.0.2.2")
+
+	h1 := table.GetOrCreate(1) // 2 rounds of 7, all answered
+	for i := 0; i < 2; i++ {
+		h1.MarkRoundSentProbes(7)
+		for j := 0; j < 7; j++ {
+			h1.AddSample(ip, time.Millisecond, j, hop.KindPrimary)
+		}
+		h1.MarkRoundEnd()
+	}
+	h2 := table.GetOrCreate(2) // 2 rounds of 7, never answered: a gap hop
+	for i := 0; i < 2; i++ {
+		h2.MarkRoundSentProbes(7)
+		h2.MarkRoundEnd()
+	}
+	h3 := table.GetOrCreate(3) // beyond the reported depth: not counted
+	h3.MarkRoundSentProbes(7)
+	h3.AddSample(ip, time.Millisecond, 0, hop.KindPrimary)
+	h3.MarkRoundEnd()
+
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 2)
+	if r.Probes != 28 {
+		t.Errorf("Probes = %d, want 28 (14 to each of the two reported hops, the silent one included)", r.Probes)
+	}
+	if len(r.Hops) != 2 || len(r.Hops[1].Nodes) != 0 {
+		t.Fatalf("fixture: want 2 hops with a silent second hop, got %+v", r.Hops)
+	}
+}
+
+// TestBuildReport_NodeProbeTypes: each node exports its per-probe-type counts
+// and its rate-limit state, so a consumer can tell real loss from ICMP rate
+// limiting and can check the echo tier against a capture.
+func TestBuildReport_NodeProbeTypes(t *testing.T) {
+	table := hop.NewTable(1)
+	h := table.GetOrCreate(1)
+	ip := net.ParseIP("192.0.2.2")
+	// Three rounds. ICMP TTL answered once, primary answered every round;
+	// two echoes sent, one answered.
+	for round := 0; round < 3; round++ {
+		h.MarkRoundSentProbes(2)
+		if round == 0 {
+			h.AddSample(ip, time.Millisecond, 0, hop.KindICMPTTL)
+		}
+		h.AddSample(ip, time.Millisecond, 0, hop.KindPrimary)
+		if round > 0 {
+			for _, n := range h.GetNodes() {
+				n.MarkEchoSent()
+			}
+		}
+		if round == 1 {
+			h.AddSample(ip, time.Millisecond, 0, hop.KindEcho)
+		}
+		h.MarkRoundEnd()
+	}
+
+	r := BuildReport("v0", "198.51.100.1", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 1)
+	n := r.Hops[0].Nodes[0]
+	if n.Probes.ICMPTTL.Received != 1 {
+		t.Errorf("icmp_ttl received = %d, want 1", n.Probes.ICMPTTL.Received)
+	}
+	if n.Probes.Primary.Received != 3 {
+		t.Errorf("primary received = %d, want 3", n.Probes.Primary.Received)
+	}
+	if n.Probes.Echo.Sent != 2 || n.Probes.Echo.Received != 1 {
+		t.Errorf("echo sent/received = %d/%d, want 2/1", n.Probes.Echo.Sent, n.Probes.Echo.Received)
+	}
+	if n.RateLimited != "undetermined" {
+		t.Errorf("rate_limited = %q, want undetermined (too few echo samples)", n.RateLimited)
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"probes"`, `"icmp_ttl"`, `"primary"`, `"echo"`, `"rate_limited": "undetermined"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("JSON missing %s", want)
+		}
+	}
+}
+
 func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	table := hop.NewTable(2)
 
 	// TTL 1: real hop with data
 	h1 := table.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0)
-	h1.IncrementSent()
+	h1.MarkRoundSent()
+	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.MarkRoundEnd()
 
-	// TTL 2: hop created in table but never receives any probe replies
-	// GetOrCreate creates it; IncrementSent makes sentTotal non-zero so
-	// LossPercent() would be non-zero. This ensures the gap path
-	// (Hop{TTL: ttl}) gives zero loss, while the non-gap path would give
-	// non-zero loss — making the two paths distinguishable.
+	// TTL 2: hop created in table but never receives any probe replies.
+	// MarkRoundSent makes roundsSent non-zero so LossPercent() would be 100%.
+	// This ensures the gap path (Hop{TTL: ttl}) gives zero loss, while the
+	// non-gap path would give non-zero loss — making the two paths distinguishable.
 	h2 := table.GetOrCreate(2)
 	for i := 0; i < 10; i++ {
-		h2.IncrementSent()
+		h2.MarkRoundSent()
+		h2.MarkRoundEnd()
 	}
 	// h2 has no AddSample calls → GetIP() returns nil → must be treated as gap.
 
 	r := BuildReport("v0.1.0", "example.com", net.ParseIP("10.0.0.1"),
-		"udp", 10, table, nil, nil, 2)
+		"udp", table, nil, nil, 2)
 
 	if len(r.Hops) != 2 {
 		t.Fatalf("expected 2 hops, got %d", len(r.Hops))
@@ -234,11 +361,26 @@ func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	if len(hop2.Nodes) != 0 {
 		t.Fatalf("TTL 2 should be a gap hop with no nodes, got %d nodes", len(hop2.Nodes))
 	}
-	// The gap path produces Hop{TTL: ttl} which has Loss=0, Sent=0.
-	// If the || → && mutant survived, we'd get Loss=100% and Sent=10 here,
-	// which would expose the mutation.
-	if hop2.Loss != 0 {
-		t.Fatalf("gap hop should have Loss=0, got %.1f (possible mutant || → &&)", hop2.Loss)
+	// A hop that was probed and never answered reports what was sent to it:
+	// 10 probes, none answered, 100% loss. (It used to export all zeros while
+	// the report's total counted its probes.)
+	if hop2.Loss != 100 || hop2.ProbesSent != 10 || hop2.ProbesReceived != 0 || hop2.Rounds != 10 {
+		t.Fatalf("silent hop: loss %.1f probes_sent %d probes_received %d rounds %d; want 100, 10, 0, 10",
+			hop2.Loss, hop2.ProbesSent, hop2.ProbesReceived, hop2.Rounds)
+	}
+}
+
+// A TTL with no hop in the table at all (never probed) is exported as a bare
+// placeholder with zero counts.
+func TestBuildReport_UnprobedTTLIsAPlaceholder(t *testing.T) {
+	table := hop.NewTable(30)
+	table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0, hop.KindPrimary)
+	r := BuildReport("v0", "example.com", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 2)
+	if len(r.Hops) != 2 {
+		t.Fatalf("hops = %d, want 2", len(r.Hops))
+	}
+	if got := r.Hops[1]; got.TTL != 2 || got.ProbesSent != 0 || got.Loss != 0 || len(got.Nodes) != 0 {
+		t.Errorf("unprobed TTL 2 = %+v, want a bare placeholder", got)
 	}
 }
 

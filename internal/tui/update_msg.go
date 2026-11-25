@@ -9,8 +9,18 @@ import (
 
 	"github.com/tonhe/viaduct/internal/config"
 	"github.com/tonhe/viaduct/internal/hop"
-	"github.com/tonhe/viaduct/internal/ping"
+	"github.com/tonhe/viaduct/internal/probe"
 )
+
+// sessionAt returns the session at idx, or nil if idx is out of range.
+// Handlers must check for nil and return early to avoid an index-out-of-bounds
+// panic when a stale or malformed message arrives with a bad TargetIdx.
+func (m Model) sessionAt(idx int) *TargetSession {
+	if idx < 0 || idx >= len(m.sessions) {
+		return nil
+	}
+	return m.sessions[idx]
+}
 
 // onSettingsSaved handles SettingsSavedMsg: closes the settings overlay and persists config.
 func (m Model) onSettingsSaved(msg SettingsSavedMsg) (Model, tea.Cmd) {
@@ -37,43 +47,43 @@ func (m Model) onWindowSize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 
 // onHopUpdate handles HopUpdateMsg: records a probe result and submits the IP for DNS.
 func (m Model) onHopUpdate(msg HopUpdateMsg) (Model, tea.Cmd) {
+	s := m.sessionAt(msg.TargetIdx)
+	if s == nil {
+		return m, nil
+	}
 	r := msg.Result
-	h := m.table.GetOrCreate(r.TTL)
-	h.AddSample(r.IP, r.RTT, r.FlowID)
-	m.probeCount++
+	h := s.table.GetOrCreate(r.TTL)
+	kind := hop.KindPrimary
+	switch r.ProbeType {
+	case probe.ProbeICMPTTL:
+		kind = hop.KindICMPTTL
+	case probe.ProbeICMPEcho:
+		kind = hop.KindEcho
+	}
+	h.AddSample(r.IP, r.RTT, r.FlowID, kind)
+	s.probeCount++
 	if r.IsTarget {
-		m.targetHit = true
-		if m.maxTTLHit == 0 || r.TTL < m.maxTTLHit {
-			m.maxTTLHit = r.TTL
+		h.MarkTarget(r.IP)
+		s.targetHit = true
+		if s.maxTTLHit == 0 || r.TTL < s.maxTTLHit {
+			s.maxTTLHit = r.TTL
 		}
 	}
-	// Submit IP for reverse DNS
-	if m.dnsEnabled {
-		m.resolver.Submit(r.IP)
+	// Submit IP for reverse DNS (skip for echo: the IP is already known/resolved)
+	if m.dnsEnabled && kind != hop.KindEcho && m.dnsSub != nil {
+		m.dnsSub.Submit(r.IP)
 	}
 	return m, nil
 }
 
-// onHostname handles HostnameMsg: sets the resolved hostname on matching path nodes.
+// onHostname handles HostnameMsg: sets the resolved hostname on matching path nodes
+// across all sessions (a shared first-hop IP may appear in every table).
 func (m Model) onHostname(msg HostnameMsg) (Model, tea.Cmd) {
-	// Find PathNode(s) with matching IP and set hostname
-	for _, h := range m.table.Snapshot() {
-		for _, node := range h.GetNodes() {
-			if ip := node.GetIP(); ip != nil && ip.Equal(msg.IP) {
-				node.SetHostname(msg.Hostname)
-			}
-		}
-	}
-	return m, nil
-}
-
-// onASN handles ASNMsg: sets the ASN info on matching path nodes.
-func (m Model) onASN(msg ASNMsg) (Model, tea.Cmd) {
-	if m.enricher != nil {
-		for _, h := range m.table.Snapshot() {
+	for _, s := range m.sessions {
+		for _, h := range s.table.Snapshot() {
 			for _, node := range h.GetNodes() {
 				if ip := node.GetIP(); ip != nil && ip.Equal(msg.IP) {
-					node.SetASN(msg.Number, msg.Org)
+					node.SetHostname(msg.Hostname)
 				}
 			}
 		}
@@ -81,60 +91,77 @@ func (m Model) onASN(msg ASNMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// onPingUpdate handles PingUpdateMsg: records a ping reply or loss in per-IP stats.
-func (m Model) onPingUpdate(msg PingUpdateMsg) (Model, tea.Cmd) {
-	if m.pingStats == nil {
+// onASN handles ASNMsg: sets the ASN info on matching path nodes across all sessions.
+func (m Model) onASN(msg ASNMsg) (Model, tea.Cmd) {
+	if m.enricher != nil {
+		for _, s := range m.sessions {
+			for _, h := range s.table.Snapshot() {
+				for _, node := range h.GetNodes() {
+					if ip := node.GetIP(); ip != nil && ip.Equal(msg.IP) {
+						node.SetASN(msg.Number, msg.Org)
+					}
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// onEchoSent attributes an echo send to the exact {IP, TTL} node.
+// Uses Get to avoid fabricating a hop row for an unknown TTL.
+func (m Model) onEchoSent(msg EchoSentMsg) (Model, tea.Cmd) {
+	s := m.sessionAt(msg.TargetIdx)
+	if s == nil {
 		return m, nil
 	}
-	key := msg.IP.String()
-	stat, ok := m.pingStats[key]
-	if !ok {
-		stat = &ping.Stat{}
-		m.pingStats[key] = stat
+	h := s.table.Get(msg.TTL)
+	if h == nil {
+		return m, nil
 	}
-	if msg.Lost {
-		stat.MarkSent()
-	} else {
-		stat.AddReply(msg.RTT)
+	for _, node := range h.GetNodes() {
+		if ip := node.GetIP(); ip != nil && ip.Equal(msg.IP) {
+			node.MarkEchoSent()
+			break
+		}
 	}
 	return m, nil
 }
 
 // onRoundEnd handles RoundEndMsg: marks round-end on all hops and updates the alert engine.
-func (m Model) onRoundEnd(_ RoundEndMsg) (Model, tea.Cmd) {
-	for _, h := range m.table.Snapshot() {
+func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
+	s := m.sessionAt(msg.TargetIdx)
+	if s == nil {
+		return m, nil
+	}
+	hops := s.table.Snapshot()
+	for _, h := range hops {
 		h.MarkRoundEnd()
 	}
+	// Collect {IP, TTL} pairs and submit to the echo sink for next-round echo probing.
+	if s.echoSink != nil {
+		// The nodes of the path, up to and including the destination's hop
+		// (see hop.Table.EchoNodes for why later hops are left out).
+		var pairs []probe.EchoTarget
+		for _, n := range s.table.EchoNodes() {
+			pairs = append(pairs, probe.EchoTarget{IP: n.IP, TTL: n.TTL})
+		}
+		s.echoSink.SubmitEchoTargets(pairs)
+	}
 	// Update alert engine with destination metrics
-	if m.alertEngine != nil {
-		hops := m.table.Snapshot()
+	if s.alertEngine != nil {
 		hopMap := make(map[int]*hop.Hop, len(hops))
 		for _, h := range hops {
 			hopMap[h.TTL] = h
 		}
-		maxTTL := m.table.MaxTTLSeen()
-		if m.maxTTLHit > 0 && m.maxTTLHit < maxTTL {
-			maxTTL = m.maxTTLHit
+		maxTTL := s.table.MaxTTLSeen()
+		if s.maxTTLHit > 0 && s.maxTTLHit < maxTTL {
+			maxTTL = s.maxTTLHit
 		}
-		// Find destination hop
-		var destLoss float64
-		var destLatency time.Duration
-		for i := maxTTL; i >= 1; i-- {
-			h, ok := hopMap[i]
-			if !ok || h == nil {
-				continue
-			}
-			pn := h.PrimaryNode()
-			if pn != nil && pn.GetReceived() > 0 {
-				destLoss = pn.LossPercent()
-				destLatency = pn.AvgRTT()
-				break
-			}
-		}
-		bell := m.alertEngine.Update(destLoss, destLatency)
-		if bell && m.alertEngine.State() == AlertDegraded {
+		destLoss, destLatency := destAlertMetrics(hopMap, maxTTL)
+		bell := s.alertEngine.Update(destLoss, destLatency)
+		if bell && s.alertEngine.State() == AlertDegraded {
 			deltas := computeDeltas(hopMap, maxTTL)
-			m.alertEngine.FindAffectedHop(hopMap, maxTTL, deltas)
+			s.alertEngine.FindAffectedHop(hopMap, maxTTL, deltas)
 		}
 		_ = bell // bell sound handled by terminal if needed
 	}
@@ -148,8 +175,12 @@ func (m Model) onTick(_ TickMsg) (Model, tea.Cmd) {
 
 // onProtocolSwitch handles ProtocolSwitchMsg: records a transient status message.
 func (m Model) onProtocolSwitch(msg ProtocolSwitchMsg) (Model, tea.Cmd) {
-	m.switchStatusMsg = fmt.Sprintf("No UDP responses, switching to %s...", strings.ToUpper(msg.NewProtocol))
-	m.switchStatusTime = time.Now()
+	s := m.sessionAt(msg.TargetIdx)
+	if s == nil {
+		return m, nil
+	}
+	s.switchStatusMsg = fmt.Sprintf("No UDP responses, switching to %s...", strings.ToUpper(msg.NewProtocol))
+	s.switchStatusTime = time.Now()
 	return m, nil
 }
 
@@ -164,8 +195,25 @@ func (m Model) onExportDone(msg ExportDoneMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// onProbeError handles ProbeErrorMsg: stores the error and quits the TUI.
+// onProbeError handles ProbeErrorMsg. A run error belongs to one target: with
+// several targets that target's row shows the error and the others keep
+// tracing, and the session ends only when no target is left. With a single
+// target the error ends the session.
 func (m Model) onProbeError(msg ProbeErrorMsg) (Model, tea.Cmd) {
+	if len(m.sessions) <= 1 {
+		m.err = msg.Err
+		return m, tea.Quit
+	}
+	s := m.sessionAt(msg.TargetIdx)
+	if s == nil {
+		return m, nil
+	}
+	s.startErr = msg.Err
+	for _, other := range m.sessions {
+		if other.startErr == nil {
+			return m, nil
+		}
+	}
 	m.err = msg.Err
 	return m, tea.Quit
 }

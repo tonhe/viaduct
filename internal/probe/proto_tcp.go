@@ -21,8 +21,17 @@ func NewTCPProtocol(dstPort int) *TCPProtocol {
 func (p *TCPProtocol) Name() string           { return "tcp" }
 func (p *TCPProtocol) SupportsMultipath() bool { return true }
 
+// tcpKeySeq is the probe-key form of a TCP sequence number.
+func tcpKeySeq(seq uint32) int { return int(seq) }
+
 // BuildProbe creates a TCP SYN packet and a matching probe key.
-// Key encoding: {SrcPort, DstPort, Seq: 0} — Seq is always 0 in the key.
+//
+// Key encoding: {SrcPort, DstPort, Seq}. The sequence number is what tells
+// one probe from another: source and destination port are the same for every
+// TTL of a flow, so a key without it made each probe overwrite the record of
+// the previous TTL's probe. The sequence number is in the first 8 bytes of
+// the TCP header, which every ICMP error quotes, and the target acknowledges
+// it plus one, so it can be recovered from either kind of reply.
 func (p *TCPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, probeKey, error) {
 	srcPort := cfg.BasePort + flowID
 
@@ -38,7 +47,7 @@ func (p *TCPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 	checksum := TCPChecksum(cfg.IPVersion, cfg.SourceIP, cfg.TargetIP, hdr)
 	binary.BigEndian.PutUint16(hdr[16:18], checksum)
 
-	key := probeKey{SrcPort: srcPort, DstPort: p.DstPort, Seq: 0}
+	key := probeKey{SrcPort: srcPort, DstPort: p.DstPort, Seq: tcpKeySeq(uint32(seq))}
 	return hdr, key, nil
 }
 
@@ -59,7 +68,15 @@ func (p *TCPProtocol) IdentifyResponse(innerHeader []byte) (*probeKey, error) {
 	if proto != 6 {
 		return nil, nil
 	}
-	key := probeKey{SrcPort: int(srcPort), DstPort: int(dstPort), Seq: 0}
+	// The quoted TCP header: ports in bytes 0-3, sequence number in 4-7.
+	// Without the sequence number the probe cannot be told from the same
+	// flow's probes at other TTLs, so such a quote identifies nothing.
+	off := TransportOffset(v, innerHeader)
+	if off < 0 || len(innerHeader) < off+8 {
+		return nil, nil
+	}
+	seq := binary.BigEndian.Uint32(innerHeader[off+4 : off+8])
+	key := probeKey{SrcPort: int(srcPort), DstPort: int(dstPort), Seq: tcpKeySeq(seq)}
 	return &key, nil
 }
 
@@ -83,11 +100,18 @@ func parseTCPResponse(tcpData []byte) (*probeKey, bool) {
 	if !isSYNACK && !isRST {
 		return nil, false
 	}
+	// Both a SYN-ACK and the reset a closed port sends in answer to a SYN
+	// carry ACK with our sequence number plus one (RFC 793). A reset without
+	// ACK answers something else and cannot be tied to a probe.
+	if flags&0x10 == 0 {
+		return nil, false
+	}
 	// Reply dst port = our original src port
 	ourSrcPort := int(binary.BigEndian.Uint16(tcpData[2:4]))
 	// Reply src port = their port
 	theirPort := int(binary.BigEndian.Uint16(tcpData[0:2]))
-	key := probeKey{SrcPort: ourSrcPort, DstPort: theirPort, Seq: 0}
+	ack := binary.BigEndian.Uint32(tcpData[8:12])
+	key := probeKey{SrcPort: ourSrcPort, DstPort: theirPort, Seq: tcpKeySeq(ack - 1)}
 	return &key, true
 }
 
@@ -120,11 +144,12 @@ func (t *Tracer) listenTCP(ctx context.Context, conn net.PacketConn, pm *probeMa
 		rtt := time.Since(rec.sentAt)
 		select {
 		case results <- Result{
-			TTL:      rec.ttl,
-			IP:       t.target,
-			RTT:      rtt,
-			IsTarget: true,
-			FlowID:   rec.flowID,
+			TTL:       rec.ttl,
+			IP:        t.target,
+			RTT:       rtt,
+			IsTarget:  true,
+			FlowID:    rec.flowID,
+			ProbeType: ProbeTCPTTL,
 		}:
 		case <-ctx.Done():
 			return

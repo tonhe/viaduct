@@ -8,6 +8,7 @@ const (
 	ViewHealth
 	ViewLatency
 	ViewVariability
+	ViewProbeDetail
 	ViewCount // sentinel for cycling
 )
 
@@ -25,6 +26,8 @@ func (v ViewMode) String() string {
 		return "Latency"
 	case ViewVariability:
 		return "Variability"
+	case ViewProbeDetail:
+		return "Probe Detail"
 	default:
 		return "Unknown"
 	}
@@ -35,13 +38,15 @@ func (v ViewMode) String() string {
 func (v ViewMode) Columns() []string {
 	switch v {
 	case ViewDefault:
-		return []string{"Loss%", "Snt", "Avg", "Best", "Wrst", "StDev", "Last", "Spark"}
+		return []string{"Loss%", "Rnd", "Avg", "Best", "Wrst", "StDev", "Last", "Spark"}
 	case ViewHealth:
 		return []string{"Loss%", "Avg", "Delta", "Spark", "Trend"}
 	case ViewLatency:
 		return []string{"Avg", "Best", "Wrst", "Last", "Delta", "GMean", "Spark"}
 	case ViewVariability:
 		return []string{"Avg", "StDev", "Jttr", "Javg", "Loss%", "Spark"}
+	case ViewProbeDetail:
+		return nil // custom renderer, not columnLayout-driven
 	default:
 		return nil
 	}

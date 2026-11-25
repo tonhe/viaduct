@@ -20,7 +20,6 @@ type Config struct {
 	DisplayMode    string  `toml:"display_mode"`
 	DNSLookups     bool    `toml:"dns_lookups"`
 	ASNLookups     bool    `toml:"asn_lookups"`
-	PingSupplement bool    `toml:"ping_supplement"`
 	AlertEnabled   bool    `toml:"alert_enabled"`
 	AlertLoss      float64 `toml:"alert_loss"`
 	AlertLatency   string  `toml:"alert_latency"`
@@ -40,7 +39,6 @@ func Default() *Config {
 		DisplayMode:    "default",
 		DNSLookups:     true,
 		ASNLookups:     true,
-		PingSupplement: true,
 		AlertEnabled:   true,
 		AlertLoss:      5.0,
 		AlertLatency:   "0s",
@@ -148,7 +146,7 @@ func Save(c *Config) error {
 		"# Number of ECMP paths to discover per hop (1–32)",
 		fmt.Sprintf("paths = %d", c.Paths),
 		"",
-		"# Display mode: default, health, latency, variability",
+		"# Display mode: default, health, latency, variability, probes",
 		fmt.Sprintf("display_mode = %q", c.DisplayMode),
 		"",
 		"# ── Lookup Settings ──────────────────────────────────────────────────────────",
@@ -158,9 +156,6 @@ func Save(c *Config) error {
 		"",
 		"# Annotate hops with AS number / org info",
 		fmt.Sprintf("asn_lookups = %v", c.ASNLookups),
-		"",
-		"# Supplement ECMP probe results with ICMP ping measurements",
-		fmt.Sprintf("ping_supplement = %v", c.PingSupplement),
 		"",
 		"# ── Alert Settings ───────────────────────────────────────────────────────────",
 		"",
@@ -223,7 +218,7 @@ func Validate(c *Config) {
 
 	// display_mode: must be one of the known values
 	switch c.DisplayMode {
-	case "default", "health", "latency", "variability":
+	case "default", "health", "latency", "variability", "probes":
 		// valid
 	default:
 		c.DisplayMode = d.DisplayMode

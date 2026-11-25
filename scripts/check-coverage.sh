@@ -15,7 +15,6 @@ declare -A FLOORS=(
   ["github.com/tonhe/viaduct/internal/sysprobe"]=82  # Linux 89.5%, Windows 84.2% — interface enumeration paths differ per-OS
   # Post-Tier-1 floors:
   ["github.com/tonhe/viaduct/internal/asn"]=73       # currently 75.9
-  ["github.com/tonhe/viaduct/internal/ping"]=71      # currently 73.5
   ["github.com/tonhe/viaduct/internal/probe"]=78     # currently 80.5 (post-Tier-4.4 socket seam; icmpSender/rawSender/Run/Discover need real sockets)
   # Post-Tier-2 floors:
   ["github.com/tonhe/viaduct/internal/resolve"]=84   # currently 86.4

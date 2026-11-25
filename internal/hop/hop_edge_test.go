@@ -29,7 +29,7 @@ func TestWelfordZeroSamples(t *testing.T) {
 // TestWelfordOneSample: mean equals the value, stdev must be 0 (not NaN).
 func TestWelfordOneSample(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
-	pn.AddSample(42*time.Millisecond, 0)
+	pn.AddSample(42*time.Millisecond, 0, KindPrimary)
 
 	if pn.AvgRTT() != 42*time.Millisecond {
 		t.Fatalf("expected mean 42ms, got %v", pn.AvgRTT())
@@ -43,8 +43,8 @@ func TestWelfordOneSample(t *testing.T) {
 // TestWelfordTwoIdenticalSamples: same value twice → stdev 0.
 func TestWelfordTwoIdenticalSamples(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
-	pn.AddSample(20*time.Millisecond, 0)
-	pn.AddSample(20*time.Millisecond, 1)
+	pn.AddSample(20*time.Millisecond, 0, KindPrimary)
+	pn.AddSample(20*time.Millisecond, 1, KindPrimary)
 
 	if pn.AvgRTT() != 20*time.Millisecond {
 		t.Fatalf("expected mean 20ms, got %v", pn.AvgRTT())
@@ -60,7 +60,7 @@ func TestWelfordTwoIdenticalSamples(t *testing.T) {
 func TestWelford1000Samples(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	for i := 1; i <= 1000; i++ {
-		pn.AddSample(time.Duration(i)*time.Millisecond, 0)
+		pn.AddSample(time.Duration(i)*time.Millisecond, 0, KindPrimary)
 	}
 	stdev := pn.StDev()
 	// Population stdev of {1..N}: sqrt((N²-1)/12)
@@ -75,7 +75,7 @@ func TestWelford1000Samples(t *testing.T) {
 func TestPathNodeResetAfterSamples(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	for i := 0; i < 20; i++ {
-		pn.AddSample(time.Duration(i)*time.Millisecond, 0)
+		pn.AddSample(time.Duration(i)*time.Millisecond, 0, KindPrimary)
 	}
 	pn.Reset()
 
@@ -97,7 +97,7 @@ func TestPathNodeResetAfterSamples(t *testing.T) {
 // TestGeoMeanSingleValue: geometric mean of one value equals that value.
 func TestGeoMeanSingleValue(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
-	pn.AddSample(50*time.Millisecond, 0)
+	pn.AddSample(50*time.Millisecond, 0, KindPrimary)
 	gm := pn.GeoMean()
 	gmMs := float64(gm) / float64(time.Millisecond)
 	if math.Abs(gmMs-50.0) > 0.1 {
@@ -109,8 +109,8 @@ func TestGeoMeanSingleValue(t *testing.T) {
 func TestGeoMeanVerySmallValues(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// 1 µs = 0.001 ms (exactly at the floor)
-	pn.AddSample(1*time.Microsecond, 0)
-	pn.AddSample(1*time.Microsecond, 0)
+	pn.AddSample(1*time.Microsecond, 0, KindPrimary)
+	pn.AddSample(1*time.Microsecond, 0, KindPrimary)
 	gm := pn.GeoMean()
 	if gm <= 0 {
 		t.Fatalf("expected positive GeoMean for sub-ms values, got %v", gm)
@@ -121,40 +121,45 @@ func TestGeoMeanVerySmallValues(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PathNode LossPercent with zero sent
+// Hop-level per-probe loss — edge cases
 // ---------------------------------------------------------------------------
 
-// TestPathNodeLossPercentZeroSent: no divide-by-zero when sent==0.
-func TestPathNodeLossPercentZeroSent(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("192.0.2.1"))
-	if pn.LossPercent() != 0 {
-		t.Fatalf("expected 0%% loss when sent==0, got %f", pn.LossPercent())
+// TestHopLossPercentZeroRounds: no divide-by-zero when no rounds sent.
+func TestHopLossPercentZeroRounds(t *testing.T) {
+	h := NewHop(1)
+	if h.LossPercent() != 0 {
+		t.Fatalf("expected 0%% loss when no rounds sent, got %f", h.LossPercent())
 	}
 }
 
-// TestPathNodeLossPercentAllTimeout: 100% loss when all probes lost.
-func TestPathNodeLossPercentAllTimeout(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("192.0.2.1"))
+// TestHopLossPercentAllTimeout: 100% loss when all rounds are silent.
+func TestHopLossPercentAllTimeout(t *testing.T) {
+	h := NewHop(1)
 	for i := 0; i < 5; i++ {
-		pn.IncrementSent()
+		h.MarkRoundSent()
+		h.MarkRoundEnd()
 	}
-	// No AddSample calls — all lost.
-	loss := pn.LossPercent()
+	// No AddSample calls — all rounds silent.
+	loss := h.LossPercent()
 	if loss != 100.0 {
 		t.Fatalf("expected 100%% loss, got %.1f%%", loss)
 	}
 }
 
-// TestPathNodeLossPercentAlternating: interleaved loss/success.
-func TestPathNodeLossPercentAlternating(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("192.0.2.1"))
-	for i := 0; i < 10; i++ {
-		pn.IncrementSent()
+// TestHopLossPercentAlternating: interleaved received/silent rounds.
+func TestHopLossPercentAlternating(t *testing.T) {
+	h := NewHop(1)
+	ip := net.ParseIP("192.0.2.1")
+	for i := 0; i < 5; i++ {
+		h.MarkRoundSent()
+		h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
+		h.MarkRoundEnd()
 	}
 	for i := 0; i < 5; i++ {
-		pn.AddSample(10*time.Millisecond, 0)
+		h.MarkRoundSent()
+		h.MarkRoundEnd()
 	}
-	loss := pn.LossPercent()
+	loss := h.LossPercent()
 	if loss != 50.0 {
 		t.Fatalf("expected 50%% loss, got %.1f%%", loss)
 	}
@@ -195,7 +200,7 @@ func TestSparklineDataFullBufferOrder(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// Fill exactly 28 rounds (sparklineSize).
 	for i := 1; i <= sparklineSize; i++ {
-		pn.AddSample(time.Duration(i)*time.Millisecond, 0)
+		pn.AddSample(time.Duration(i)*time.Millisecond, 0, KindPrimary)
 		pn.RecordRoundAvg()
 	}
 	data := pn.SparklineData()
@@ -203,12 +208,12 @@ func TestSparklineDataFullBufferOrder(t *testing.T) {
 		t.Fatalf("expected %d entries, got %d", sparklineSize, len(data))
 	}
 	// Chronologically oldest is sample 1 (1ms).
-	if data[0] != 1*time.Millisecond {
-		t.Fatalf("expected oldest=1ms, got %v", data[0])
+	if data[0].RTT != 1*time.Millisecond {
+		t.Fatalf("expected oldest=1ms, got %v", data[0].RTT)
 	}
 	// Chronologically newest is sample 28.
-	if data[sparklineSize-1] != time.Duration(sparklineSize)*time.Millisecond {
-		t.Fatalf("expected newest=%dms, got %v", sparklineSize, data[sparklineSize-1])
+	if data[sparklineSize-1].RTT != time.Duration(sparklineSize)*time.Millisecond {
+		t.Fatalf("expected newest=%dms, got %v", sparklineSize, data[sparklineSize-1].RTT)
 	}
 }
 
@@ -225,7 +230,7 @@ func TestTrendThresholdElevated(t *testing.T) {
 	// Slope ≈ 0.1; threshold = 200*0.01 = 2.0 — so slope < threshold → "stable".
 	for i := 0; i < 10; i++ {
 		rtt := time.Duration(200000+i*100) * time.Microsecond // 200.0 to 200.9 ms
-		pn.AddSample(rtt, 0)
+		pn.AddSample(rtt, 0, KindPrimary)
 		pn.RecordRoundAvg()
 	}
 	trend := pn.Trend()
@@ -261,19 +266,23 @@ func TestHopPrimaryNodeNil(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Table.IncrementSent and Table.ResetAll
+// Table.MarkRoundSent and Table.ResetAll
 // ---------------------------------------------------------------------------
 
-// TestTableIncrementSent: Table.IncrementSent creates hop + increments sentTotal.
-func TestTableIncrementSent(t *testing.T) {
+// TestTableMarkRoundSent: Table.MarkRoundSent creates hop + increments roundsSent.
+func TestTableMarkRoundSent(t *testing.T) {
 	tbl := NewTable(10)
-	tbl.IncrementSent(3)
-	tbl.IncrementSent(3)
+	tbl.MarkRoundSent(3, 1)
+	tbl.MarkRoundSent(3, 1)
 	h := tbl.GetOrCreate(3)
-	// sentTotal is private; verify via LossPercent (2 sent, 0 received → 100%).
+	if got := h.Rounds(); got != 2 {
+		t.Fatalf("Rounds = %d, want 2", got)
+	}
+	// Both rounds closed with no replies: 2 probes sent, 0 answered → 100% loss.
+	h.MarkRoundEnd()
 	loss := h.LossPercent()
 	if loss != 100.0 {
-		t.Fatalf("expected 100%% loss after 2 IncrementSent with no samples, got %.1f%%", loss)
+		t.Fatalf("expected 100%% loss after 2 closed rounds with no samples, got %.1f%%", loss)
 	}
 }
 
@@ -282,12 +291,14 @@ func TestTableResetAll(t *testing.T) {
 	tbl := NewTable(10)
 
 	h1 := tbl.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("192.0.2.1"), 10*time.Millisecond, 0)
-	h1.IncrementSent()
+	h1.MarkRoundSent()
+	h1.AddSample(net.ParseIP("192.0.2.1"), 10*time.Millisecond, 0, KindPrimary)
+	h1.MarkRoundEnd()
 
 	h2 := tbl.GetOrCreate(2)
-	h2.AddSample(net.ParseIP("192.0.2.2"), 20*time.Millisecond, 0)
-	h2.IncrementSent()
+	h2.MarkRoundSent()
+	h2.AddSample(net.ParseIP("192.0.2.2"), 20*time.Millisecond, 0, KindPrimary)
+	h2.MarkRoundEnd()
 
 	tbl.ResetAll()
 
@@ -318,10 +329,10 @@ func TestHopPrimaryNodeSecondIPWins(t *testing.T) {
 	ip1 := net.ParseIP("192.0.2.1")
 	ip2 := net.ParseIP("192.0.2.2")
 	// ip1 gets 1 sample, ip2 gets 3 — ip2 should be primary.
-	h.AddSample(ip1, 10*time.Millisecond, 0)
-	h.AddSample(ip2, 20*time.Millisecond, 1)
-	h.AddSample(ip2, 21*time.Millisecond, 1)
-	h.AddSample(ip2, 22*time.Millisecond, 1)
+	h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(ip2, 20*time.Millisecond, 1, KindPrimary)
+	h.AddSample(ip2, 21*time.Millisecond, 1, KindPrimary)
+	h.AddSample(ip2, 22*time.Millisecond, 1, KindPrimary)
 	pn := h.PrimaryNode()
 	if pn == nil {
 		t.Fatal("expected non-nil primary node")
@@ -386,127 +397,5 @@ func TestFormatFlowIDsNonConsecutive(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Rate-limit heuristic edge cases
+// (per-node tri-state tests live in ratelimit_test.go)
 // ---------------------------------------------------------------------------
-
-// TestDetectRateLimited_HopWithNoIP: a hop in the table with nil IP should
-// be skipped without panic (covers the !ok || GetIP()==nil continue path).
-func TestDetectRateLimited_HopWithNoIP(t *testing.T) {
-	tbl := NewTable(3)
-
-	// TTL 1: normal hop with replies
-	h1 := tbl.GetOrCreate(1)
-	for i := 0; i < 10; i++ {
-		h1.AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0)
-		h1.IncrementSent()
-	}
-
-	// TTL 2: hop exists but has no IP (no AddSample called, only IncrementSent).
-	h2 := tbl.GetOrCreate(2)
-	for i := 0; i < 10; i++ {
-		h2.IncrementSent()
-	}
-
-	// TTL 3: normal hop
-	h3 := tbl.GetOrCreate(3)
-	for i := 0; i < 10; i++ {
-		h3.AddSample(net.ParseIP("192.0.2.3"), time.Millisecond, 0)
-		h3.IncrementSent()
-	}
-
-	// Must not panic; TTL 2 has no IP so it should be skipped.
-	rl := DetectRateLimited(tbl.Snapshot(), 3)
-	if rl[2] {
-		t.Fatal("hop with no IP should not be flagged as rate-limited")
-	}
-}
-
-// TestDetectRateLimited_HighLossDownstream: if downstream hops ALSO have high
-// loss it is a real network issue, not rate-limiting.
-func TestDetectRateLimited_HighLossDownstream(t *testing.T) {
-	tbl := NewTable(3)
-
-	// TTL 1: 0% loss
-	h1 := tbl.GetOrCreate(1)
-	for i := 0; i < 10; i++ {
-		h1.AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0)
-		h1.IncrementSent()
-	}
-
-	// TTL 2: 50% loss
-	h2 := tbl.GetOrCreate(2)
-	for i := 0; i < 5; i++ {
-		h2.AddSample(net.ParseIP("192.0.2.2"), time.Millisecond, 0)
-	}
-	for i := 0; i < 10; i++ {
-		h2.IncrementSent()
-	}
-
-	// TTL 3 (maxTTL): also 50% loss — NOT rate-limiting at TTL 2.
-	h3 := tbl.GetOrCreate(3)
-	for i := 0; i < 5; i++ {
-		h3.AddSample(net.ParseIP("192.0.2.3"), time.Millisecond, 0)
-	}
-	for i := 0; i < 10; i++ {
-		h3.IncrementSent()
-	}
-
-	rl := DetectRateLimited(tbl.Snapshot(), 3)
-	if rl[2] {
-		t.Fatal("hop 2 should NOT be rate-limited when downstream loss is equally high")
-	}
-}
-
-// TestDetectRateLimited_LowLossHop: a hop with ≤1% loss must never be flagged.
-func TestDetectRateLimited_LowLossHop(t *testing.T) {
-	tbl := NewTable(2)
-
-	h1 := tbl.GetOrCreate(1)
-	for i := 0; i < 100; i++ {
-		h1.AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0)
-		h1.IncrementSent()
-	}
-	// 1 lost out of 100 = exactly 1% — at the boundary (threshold is >1.0)
-	h1.IncrementSent()
-
-	h2 := tbl.GetOrCreate(2)
-	for i := 0; i < 100; i++ {
-		h2.AddSample(net.ParseIP("192.0.2.2"), time.Millisecond, 0)
-		h2.IncrementSent()
-	}
-
-	rl := DetectRateLimited(tbl.Snapshot(), 2)
-	if rl[1] {
-		t.Fatal("hop with exactly 1% loss should not be rate-limited (threshold >1.0)")
-	}
-}
-
-// TestDetectRateLimited_BoundaryDifferential: the detection requires downstream
-// loss to be < hopLoss-5.  At exactly hopLoss-5 it should NOT fire.
-func TestDetectRateLimited_BoundaryDifferential(t *testing.T) {
-	tbl := NewTable(2)
-
-	// TTL 1: 50% loss
-	h1 := tbl.GetOrCreate(1)
-	for i := 0; i < 5; i++ {
-		h1.AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0)
-	}
-	for i := 0; i < 10; i++ {
-		h1.IncrementSent()
-	}
-
-	// TTL 2 (maxTTL, downstream): exactly 45% loss → loss == hopLoss - 5 (not < hopLoss-5).
-	h2 := tbl.GetOrCreate(2)
-	for i := 0; i < 55; i++ {
-		h2.AddSample(net.ParseIP("192.0.2.2"), time.Millisecond, 0)
-	}
-	for i := 0; i < 100; i++ {
-		h2.IncrementSent()
-	}
-
-	rl := DetectRateLimited(tbl.Snapshot(), 2)
-	// minDownstream after processing TTL 2 (maxTTL) = 45.
-	// For TTL 1: loss=50, condition: minDownstream(45) < loss-5.0(45) → 45 < 45 is false.
-	if rl[1] {
-		t.Fatal("hop 1 should NOT be rate-limited when downstream loss is exactly hopLoss-5")
-	}
-}

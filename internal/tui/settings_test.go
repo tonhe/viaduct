@@ -761,11 +761,11 @@ func TestSettings_DisplayState(t *testing.T) {
 	})
 
 	t.Run("DisplayMode: cycles wrap around after last mode", func(t *testing.T) {
-		// "variability" is the last mode — next should be "default"
+		// "probes" is the last mode — next should be "default"
 		s := newTestSettings()
 		s.state = settingsDisplay
 		s.displayCursor = 0
-		s.config.DisplayMode = "variability"
+		s.config.DisplayMode = "probes"
 		s2, _ := s.Update(keyPress("enter"))
 		if s2.config.DisplayMode != "default" {
 			t.Errorf("DisplayMode = %q, want %q after wrap", s2.config.DisplayMode, "default")
@@ -796,22 +796,10 @@ func TestSettings_DisplayState(t *testing.T) {
 		cmdIsNil(t, cmd)
 	})
 
-	t.Run("Ping: enter toggles PingSupplement", func(t *testing.T) {
+	t.Run("Back: enter on cursor 3 returns to main state", func(t *testing.T) {
 		s := newTestSettings()
 		s.state = settingsDisplay
 		s.displayCursor = 3
-		before := s.config.PingSupplement
-		s2, cmd := s.Update(keyPress("enter"))
-		if s2.config.PingSupplement == before {
-			t.Errorf("PingSupplement did not toggle: still %v", s2.config.PingSupplement)
-		}
-		cmdIsNil(t, cmd)
-	})
-
-	t.Run("Back: enter on cursor 4 returns to main state", func(t *testing.T) {
-		s := newTestSettings()
-		s.state = settingsDisplay
-		s.displayCursor = 4
 		s2, cmd := s.Update(keyPress("enter"))
 		if s2.state != settingsMain {
 			t.Errorf("state = %v, want settingsMain", s2.state)

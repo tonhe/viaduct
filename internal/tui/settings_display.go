@@ -8,9 +8,9 @@ import (
 	"github.com/tonhe/viaduct/internal/theme"
 )
 
-const numDisplayItems = 5 // 0:DisplayMode 1:DNS 2:ASN 3:PingSupplement 4:Back
+const numDisplayItems = 4 // 0:DisplayMode 1:DNS 2:ASN 3:Back
 
-var displayModeOptions = []string{"default", "health", "latency", "variability"}
+var displayModeOptions = []string{"default", "health", "latency", "variability", "probes"}
 
 func cycleDisplayMode(current string) string {
 	for i, m := range displayModeOptions {
@@ -50,9 +50,7 @@ func (s SettingsModel) updateDisplay(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 			s.config.DNSLookups = !s.config.DNSLookups
 		case 2: // ASN toggle
 			s.config.ASNLookups = !s.config.ASNLookups
-		case 3: // PingSupplement toggle
-			s.config.PingSupplement = !s.config.PingSupplement
-		case 4: // Back
+		case 3: // Back
 			s.state = settingsMain
 		}
 	case "esc":
@@ -97,7 +95,6 @@ func (s SettingsModel) viewDisplay() string {
 		{label: "Display Mode", value: "[" + s.config.DisplayMode + "]"},
 		{label: "DNS Lookups", isToggle: true, toggled: s.config.DNSLookups},
 		{label: "ASN Lookups", isToggle: true, toggled: s.config.ASNLookups},
-		{label: "Ping Supplement", isToggle: true, toggled: s.config.PingSupplement},
 		{label: "Back", value: ""},
 	}
 

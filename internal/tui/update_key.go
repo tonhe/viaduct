@@ -25,41 +25,80 @@ func (m Model) onMainKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		s := NewSettings(m.config, m.width, m.height)
-		m.settings = &s
+		ns := NewSettings(m.config, m.width, m.height)
+		m.settings = &ns
 		m.showSettings = true
 	case "p":
 		m.paused = !m.paused
-		if m.tracer != nil {
-			if m.paused {
-				atomic.StoreInt32(&m.tracer.Paused, 1)
-			} else {
-				atomic.StoreInt32(&m.tracer.Paused, 0)
+		paused := int32(0)
+		if m.paused {
+			paused = 1
+		}
+		for _, s := range m.sessions {
+			if s.tracer != nil {
+				atomic.StoreInt32(&s.tracer.Paused, paused)
 			}
 		}
 	case "r":
-		m.table.ResetAll()
-		m.probeCount = 0
 		m.startTime = time.Now()
-		if m.alertEngine != nil {
-			m.alertEngine.Reset()
-		}
-		for k := range m.pingStats {
-			delete(m.pingStats, k)
+		for _, s := range m.sessions {
+			s.table.ResetAll()
+			s.probeCount = 0
+			if s.alertEngine != nil {
+				s.alertEngine.Reset()
+			}
 		}
 	case "d":
 		m.viewMode = m.viewMode.Next()
-	case "j", "down":
+	case "j":
 		if m.scrollOffset > 0 {
 			m.scrollOffset--
 		}
 		m.autoScroll = m.scrollOffset == 0
-	case "k", "up":
+	case "down":
+		if len(m.sessions) > 1 {
+			if m.focusedIdx < len(m.sessions)-1 {
+				m.focusedIdx++
+			}
+			m.clampScrollToFocus()
+		} else {
+			if m.scrollOffset > 0 {
+				m.scrollOffset--
+			}
+			m.autoScroll = m.scrollOffset == 0
+		}
+	case "k":
 		maxOff := m.maxScrollOffset()
 		if m.scrollOffset < maxOff {
 			m.scrollOffset++
 		}
 		m.autoScroll = false
+	case "up":
+		if len(m.sessions) > 1 {
+			if m.focusedIdx > 0 {
+				m.focusedIdx--
+			}
+			m.clampScrollToFocus()
+		} else {
+			maxOff := m.maxScrollOffset()
+			if m.scrollOffset < maxOff {
+				m.scrollOffset++
+			}
+			m.autoScroll = false
+		}
+	case "tab":
+		if len(m.sessions) > 1 {
+			m.focusedIdx = (m.focusedIdx + 1) % len(m.sessions)
+			m.clampScrollToFocus()
+		}
+	case " ":
+		if len(m.sessions) > 1 {
+			m.focused().marked = !m.focused().marked
+		}
+	case "c":
+		if len(m.sessions) > 1 {
+			m.columnView = !m.columnView
+		}
 	case "G":
 		m.scrollOffset = 0
 		m.autoScroll = true
@@ -70,4 +109,15 @@ func (m Model) onMainKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, m.exportCmd()
 	}
 	return m, nil
+}
+
+// clampScrollToFocus clamps m.scrollOffset to the maximum valid offset for the
+// newly focused session and keeps autoScroll consistent (true iff offset is 0).
+// Call this after any change to m.focusedIdx.
+func (m *Model) clampScrollToFocus() {
+	maxOff := m.maxScrollOffset()
+	if m.scrollOffset > maxOff {
+		m.scrollOffset = maxOff
+	}
+	m.autoScroll = m.scrollOffset == 0
 }

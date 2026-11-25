@@ -13,24 +13,35 @@ type ICMPProtocol struct {
 	sessionID int // random ID to avoid collision between concurrent via instances
 }
 
-// NewICMPProtocol creates an ICMP protocol with a random session ID.
-func NewICMPProtocol() *ICMPProtocol {
+// NewICMPProtocol creates an ICMP protocol with a session ID from config or random.
+func NewICMPProtocol(cfg Config) *ICMPProtocol {
+	id := cfg.ICMPID
+	if id == 0 {
+		id = 1 + rand.Intn(65534) // 1..65534
+	}
 	return &ICMPProtocol{
-		sessionID: rand.Intn(0xFFFF-1) + 1, // 1..65534
+		sessionID: id,
 	}
 }
 
 func (p *ICMPProtocol) Name() string           { return "icmp" }
 func (p *ICMPProtocol) SupportsMultipath() bool { return false }
 
+// icmpWireSeq is the sequence number an ICMP echo carries for a run's probe
+// counter. The field is 16 bits; the counter is not, and passes 65,535 within
+// half an hour in the default mode. Probe keys use this value, because it is
+// the one that comes back in an Echo Reply or a quoted header.
+func icmpWireSeq(seq int) int { return seq & 0xffff }
+
 // BuildProbe creates an ICMP Echo Request packet and a matching probe key.
-// Key encoding: {SrcPort: sessionID, DstPort: seq, Seq: 0} — matches runICMP.
+// Key encoding: {SrcPort: sessionID, DstPort: 16-bit sequence, Seq: 0}.
 func (p *ICMPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, probeKey, error) {
-	pkt, err := buildICMPEchoRequest(cfg.IPVersion, p.sessionID, seq, cfg.PayloadSize)
+	wire := icmpWireSeq(seq)
+	pkt, err := buildICMPEchoRequest(cfg.IPVersion, p.sessionID, wire, cfg.PayloadSize)
 	if err != nil {
 		return nil, probeKey{}, err
 	}
-	key := probeKey{SrcPort: p.sessionID, DstPort: seq, Seq: 0}
+	key := probeKey{SrcPort: p.sessionID, DstPort: wire, Seq: 0}
 	return pkt, key, nil
 }
 

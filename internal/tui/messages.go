@@ -9,7 +9,8 @@ import (
 
 // HopUpdateMsg is sent when a probe response is received.
 type HopUpdateMsg struct {
-	Result probe.Result
+	TargetIdx int
+	Result    probe.Result
 }
 
 // HostnameMsg is sent when async DNS resolves a hostname.
@@ -22,15 +23,21 @@ type HostnameMsg struct {
 type TickMsg time.Time
 
 // RoundEndMsg signals the end of a probe round for stability tracking.
-type RoundEndMsg struct{}
+type RoundEndMsg struct {
+	TargetIdx int
+}
 
-// ProbeErrorMsg is sent when the probe engine fails to start.
+// ProbeErrorMsg is sent when the probe engine of the target at TargetIdx
+// fails. It ends that target's trace, not the session, unless it was the
+// last target still tracing.
 type ProbeErrorMsg struct {
-	Err error
+	TargetIdx int
+	Err       error
 }
 
 // ProtocolSwitchMsg is sent when auto mode switches to a different protocol.
 type ProtocolSwitchMsg struct {
+	TargetIdx   int
 	NewProtocol string
 }
 
@@ -41,15 +48,16 @@ type ASNMsg struct {
 	Org    string
 }
 
-// PingUpdateMsg is sent when a ping supplement result arrives.
-type PingUpdateMsg struct {
-	IP   net.IP
-	RTT  time.Duration
-	Lost bool
-}
-
 // ExportDoneMsg is sent when an export file has been written.
 type ExportDoneMsg struct {
 	Path string
 	Err  error
+}
+
+// EchoSentMsg reports one echo probe dispatched toward a known {IP, TTL}
+// pair, for per-node echo sent accounting.
+type EchoSentMsg struct {
+	TargetIdx int
+	IP        net.IP
+	TTL       int
 }

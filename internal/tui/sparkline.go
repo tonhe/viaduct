@@ -1,33 +1,54 @@
 package tui
 
 import (
-	"fmt"
 	"sort"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/tonhe/viaduct/internal/hop"
 	"github.com/tonhe/viaduct/internal/theme"
 )
 
-// Sparkline renders as a colored heat strip: each data point is a full-height
-// block (█) colored on a green → yellow → red gradient based on relative value.
-// Lost probes (0 duration) render as a dim dot (·).
+// Sparkline renders as a colored heat strip. Solidity encodes how much the
+// tracer knows about the hop each round, so the sparkline agrees with the
+// echo-based loss column:
+//   █ full   direct TTL/UDP RTT      (green → red gradient)
+//   ▓ medium echo RTT                (reachable, rate-limited; same gradient)
+//   ░ light  known rate-limited, not sampled this round (reachable, no reading)
+//   · dot    genuine drop            (a probe was sent, nothing answered)
 
 // sparkGradient returns 8 interpolated colors from the active theme.
 func sparkGradient() [8]lipgloss.Color {
 	return theme.Current.SparkGradient()
 }
 
-// sparkLossStyle returns the style for lost-probe dots.
+// sparkLossStyle returns the style for lost-probe dots and held markers.
 func sparkLossStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Current.Base03)
 }
 
+// sparkGradIdx maps an RTT to a gradient index by its deviation above the
+// median. Below median is always the greenest.
+func sparkGradIdx(d, median float64) int {
+	pct := (d - median) / median
+	switch {
+	case pct <= 0:
+		return 0
+	case pct <= 0.20:
+		return int(pct / 0.20 * 1.99) // 0-1
+	case pct <= 0.50:
+		return 2 + int((pct-0.20)/0.30*2.99) // 2-4
+	case pct <= 1.00:
+		return 5 + int((pct-0.50)/0.50*1.99) // 5-6
+	default:
+		return 7
+	}
+}
+
 // renderSparkline renders a sparkline of the given width (in characters).
-// Each character is one data point. Data is right-aligned.
-// Lost probes (0 duration) render as a dim dot.
-func renderSparkline(data []time.Duration, width int) string {
+// Each character is one round. Data is right-aligned. Cells render by kind:
+// TTL/Echo as gradient-colored blocks (█/▓), Held as a dim ░, Drop as a dim ·.
+func renderSparkline(data []hop.SparkSample, width int) string {
 	if len(data) == 0 {
 		result := make([]byte, 0, width)
 		for i := 0; i < width; i++ {
@@ -41,11 +62,11 @@ func renderSparkline(data []time.Duration, width int) string {
 		data = data[len(data)-width:]
 	}
 
-	// Compute median for threshold-based coloring (skip 0 = loss)
+	// Median for coloring, over latency-bearing cells (TTL + Echo) only.
 	var valid []float64
-	for _, d := range data {
-		if d > 0 {
-			valid = append(valid, float64(d))
+	for _, s := range data {
+		if s.RTT > 0 && (s.Kind == hop.SparkTTL || s.Kind == hop.SparkEcho) {
+			valid = append(valid, float64(s.RTT))
 		}
 	}
 
@@ -75,54 +96,20 @@ func renderSparkline(data []time.Duration, width int) string {
 	gradient := sparkGradient()
 	lossStyle := sparkLossStyle()
 
-	for _, d := range data {
-		if d == 0 {
+	for _, s := range data {
+		switch s.Kind {
+		case hop.SparkDrop:
 			result += lossStyle.Render("·")
-			continue
+		case hop.SparkHeld:
+			result += lossStyle.Render("░")
+		case hop.SparkEcho:
+			idx := sparkGradIdx(float64(s.RTT), median)
+			result += lipgloss.NewStyle().Foreground(gradient[idx]).Render("▓")
+		default: // SparkTTL
+			idx := sparkGradIdx(float64(s.RTT), median)
+			result += lipgloss.NewStyle().Foreground(gradient[idx]).Render("█")
 		}
-
-		// Color by % deviation above median:
-		//   ≤ 20% above  → idx 0-1  (green)
-		//   20-50% above  → idx 2-4  (green → gold)
-		//   50-100% above → idx 5-6  (gold → red)
-		//   > 100% above  → idx 7    (red)
-		// Below median is always green (idx 0).
-		pct := (float64(d) - median) / median
-		var idx int
-		switch {
-		case pct <= 0:
-			idx = 0
-		case pct <= 0.20:
-			idx = int(pct / 0.20 * 1.99) // 0-1
-		case pct <= 0.50:
-			idx = 2 + int((pct-0.20)/0.30*2.99) // 2-4
-		case pct <= 1.00:
-			idx = 5 + int((pct-0.50)/0.50*1.99) // 5-6
-		default:
-			idx = 7
-		}
-
-		style := lipgloss.NewStyle().Foreground(gradient[idx])
-		result += style.Render("█")
 	}
 
 	return result
-}
-
-// renderSparklineRunes returns the rune count for testing purposes.
-func renderSparklineRuneWidth(data []time.Duration, width int) int {
-	// Each data point = 1 char, plus padding = width total
-	if len(data) == 0 {
-		return width
-	}
-	if len(data) > width {
-		return width
-	}
-	return width
-}
-
-// formatSparkColumn formats the sparkline for column output with a fixed
-// visual width, wrapping in a lipgloss container to prevent overflow.
-func formatSparkColumn(data []time.Duration, width int) string {
-	return fmt.Sprintf("%-*s", width, renderSparkline(data, width))
 }

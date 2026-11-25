@@ -37,15 +37,16 @@ func TestTCPProtocol_BuildProbe(t *testing.T) {
 	wantSrcPort := cfg.BasePort + flowID
 	wantDstPort := 443
 
-	// Key must use {SrcPort: basePort+flowID, DstPort: 443, Seq: 0}
+	// Key must use {SrcPort: basePort+flowID, DstPort: 443, Seq: the probe's
+	// TCP sequence number} so that each probe has its own record (#70).
 	if key.SrcPort != wantSrcPort {
 		t.Errorf("key.SrcPort = %d, want %d", key.SrcPort, wantSrcPort)
 	}
 	if key.DstPort != wantDstPort {
 		t.Errorf("key.DstPort = %d, want %d", key.DstPort, wantDstPort)
 	}
-	if key.Seq != 0 {
-		t.Errorf("key.Seq = %d, want 0", key.Seq)
+	if key.Seq != seq {
+		t.Errorf("key.Seq = %d, want %d", key.Seq, seq)
 	}
 
 	// Packet must be 20 bytes (TCP header, no options)

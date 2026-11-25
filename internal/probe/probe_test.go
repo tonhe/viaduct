@@ -60,7 +60,7 @@ func TestResultHasFlowID(t *testing.T) {
 func TestProbeMapMatchAndExpiry(t *testing.T) {
 	pm := newProbeMap()
 	key := probeKey{SrcPort: 100, DstPort: 200, Seq: 1}
-	pm.add(key, 5, 0, time.Now())
+	pm.add(key, 5, 0, time.Now(), ProbeICMPTTL)
 
 	rec, ok := pm.match(key)
 	if !ok {
@@ -102,8 +102,8 @@ func TestProbeMapSweep(t *testing.T) {
 
 	keyOld := probeKey{SrcPort: 100, DstPort: 200, Seq: 0}
 	keyFresh := probeKey{SrcPort: 101, DstPort: 201, Seq: 0}
-	pm.add(keyOld, 3, 0, old)
-	pm.add(keyFresh, 4, 1, fresh)
+	pm.add(keyOld, 3, 0, old, ProbeICMPTTL)
+	pm.add(keyFresh, 4, 1, fresh, ProbeICMPTTL)
 
 	// Sweep entries older than 2 seconds
 	pm.sweep(2 * time.Second)
@@ -128,8 +128,8 @@ func TestProbeMapWithFlowID(t *testing.T) {
 	pm := newProbeMap()
 	key1 := probeKey{SrcPort: 44000, DstPort: 33435, Seq: 1}
 	key2 := probeKey{SrcPort: 44001, DstPort: 33435, Seq: 1}
-	pm.add(key1, 5, 0, time.Now())
-	pm.add(key2, 5, 1, time.Now())
+	pm.add(key1, 5, 0, time.Now(), ProbeUDPTTL)
+	pm.add(key2, 5, 1, time.Now(), ProbeUDPTTL)
 
 	rec, ok := pm.match(key1)
 	if !ok {

@@ -59,9 +59,6 @@ func TestDefault_AllFields(t *testing.T) {
 	if !d.ASNLookups {
 		t.Error("ASNLookups should default to true")
 	}
-	if !d.PingSupplement {
-		t.Error("PingSupplement should default to true")
-	}
 	if !d.AlertEnabled {
 		t.Error("AlertEnabled should default to true")
 	}
@@ -112,7 +109,6 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		DisplayMode:    "health",
 		DNSLookups:     false,
 		ASNLookups:     false,
-		PingSupplement: false,
 		AlertEnabled:   false,
 		AlertLoss:      12.5,
 		AlertLatency:   "150ms",
@@ -142,7 +138,6 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		{"DisplayMode", got.DisplayMode, want.DisplayMode},
 		{"DNSLookups", got.DNSLookups, want.DNSLookups},
 		{"ASNLookups", got.ASNLookups, want.ASNLookups},
-		{"PingSupplement", got.PingSupplement, want.PingSupplement},
 		{"AlertEnabled", got.AlertEnabled, want.AlertEnabled},
 		{"AlertLoss", got.AlertLoss, want.AlertLoss},
 		{"AlertLatency", got.AlertLatency, want.AlertLatency},
@@ -514,7 +509,7 @@ func TestValidate_DisplayMode_Unknown(t *testing.T) {
 
 // TestValidate_DisplayMode_ValidValues checks all known display_mode values.
 func TestValidate_DisplayMode_ValidValues(t *testing.T) {
-	for _, v := range []string{"default", "health", "latency", "variability"} {
+	for _, v := range []string{"default", "health", "latency", "variability", "probes"} {
 		t.Run(v, func(t *testing.T) {
 			c := Default()
 			c.DisplayMode = v

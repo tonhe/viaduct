@@ -4,6 +4,7 @@ package probe
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -27,22 +28,25 @@ type icmpPacketConn interface {
 
 // Config holds probe engine settings.
 type Config struct {
-	MaxHops     int
-	FirstTTL    int
-	Timeout     time.Duration
-	ProbeDelay  time.Duration
-	RoundDelay  time.Duration // pause between full probe rounds
-	PayloadSize int           // ICMP payload size in bytes
-	MaxRounds   int           // 0 = infinite
-	NoDNS       bool
-	ReportMode  bool
-	NumPaths    int           // number of ECMP flow variations (default 6)
-	BasePort    int           // starting UDP source port for flow variation
-	Protocol          ProbeProtocol // probe protocol (icmp, udp, tcp)
-	SourceIP          net.IP        // local source IP (needed for TCP checksum)
-	TargetIP          net.IP        // destination IP (needed for TCP checksum)
-	OnProtocolSwitch  func(string)  // called when auto mode switches protocol
-	IPVersion         int           // 4 or 6 — required, no default
+	MaxHops          int
+	FirstTTL         int
+	Timeout          time.Duration
+	ProbeDelay       time.Duration
+	RoundDelay       time.Duration // pause between full probe rounds
+	PayloadSize      int           // ICMP payload size in bytes
+	MaxRounds        int           // 0 = infinite
+	NoDNS            bool
+	ReportMode       bool
+	NumPaths         int           // number of ECMP flow variations (default 6)
+	BasePort         int           // starting UDP source port for flow variation
+	ICMPID           int           // ICMP session ID override; 0 = random 1..65534
+	EchoID           int           // ICMP echo-probe ID; 0 = derive random (single-tracer library use)
+	EchoBudget       int           // max echo probes per round; 0 = 64
+	Protocol         ProbeProtocol // probe protocol (icmp, udp, tcp)
+	SourceIP         net.IP        // local source IP (needed for TCP checksum)
+	TargetIP         net.IP        // destination IP (needed for TCP checksum)
+	OnProtocolSwitch func(string)  // called when auto mode switches protocol
+	IPVersion        int           // 4 or 6 — required, no default
 }
 
 // DefaultConfig returns sensible defaults.
@@ -61,18 +65,22 @@ func DefaultConfig() Config {
 	}
 }
 
-// SentCounter is called by the Tracer each time a probe is dispatched.
-type SentCounter interface {
-	IncrementSent(ttl int)
+// RoundMarker is notified once per hop per round when probes are dispatched.
+// probes is the number of TTL-limited probes actually written for that TTL
+// this round (the ICMP TTL probe plus every primary flow); echo-tier probes
+// are reported separately through the echo-sent callback.
+type RoundMarker interface {
+	MarkRoundSent(ttl int, probes int)
 }
 
 // Result is emitted for each probe response.
 type Result struct {
-	TTL      int
-	IP       net.IP
-	RTT      time.Duration
-	IsTarget bool // true if this is the final destination (Echo Reply)
-	FlowID   int  // ECMP flow identifier (0-based)
+	TTL       int
+	IP        net.IP
+	RTT       time.Duration
+	IsTarget  bool      // true if this is the final destination (Echo Reply)
+	FlowID    int       // ECMP flow identifier (0-based)
+	ProbeType ProbeType
 }
 
 // probeKey identifies an outstanding probe by port pair and sequence.
@@ -84,9 +92,15 @@ type probeKey struct {
 
 // probeRecord stores metadata for a sent probe.
 type probeRecord struct {
-	ttl    int
-	flowID int
-	sentAt time.Time
+	ttl       int
+	flowID    int
+	sentAt    time.Time
+	probeType ProbeType
+	// dst is the address the probe was sent to, for probes answered by an
+	// Echo Reply (ICMP TTL probes: the target; echo-tier probes: the hop).
+	// The listener accepts an Echo Reply only from this address. nil means
+	// unknown: no sender check.
+	dst net.IP
 }
 
 // probeMap tracks outstanding probes.
@@ -99,10 +113,65 @@ func newProbeMap() *probeMap {
 	return &probeMap{items: make(map[probeKey]probeRecord)}
 }
 
-func (pm *probeMap) add(key probeKey, ttl int, flowID int, sentAt time.Time) {
+func (pm *probeMap) add(key probeKey, ttl int, flowID int, sentAt time.Time, pt ProbeType) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	pm.items[key] = probeRecord{ttl: ttl, flowID: flowID, sentAt: sentAt}
+	pm.items[key] = probeRecord{ttl: ttl, flowID: flowID, sentAt: sentAt, probeType: pt}
+}
+
+// addTo is add for a probe whose reply must come from dst (see probeRecord.dst).
+func (pm *probeMap) addTo(key probeKey, ttl int, flowID int, sentAt time.Time, pt ProbeType, dst net.IP) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.items[key] = probeRecord{ttl: ttl, flowID: flowID, sentAt: sentAt, probeType: pt, dst: dst}
+}
+
+// pending counts the probes that are still unanswered and were sent less than
+// maxAge ago: the ones a reply can still arrive for.
+func (pm *probeMap) pending(maxAge time.Duration) int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, rec := range pm.items {
+		if now.Sub(rec.sentAt) < maxAge {
+			n++
+		}
+	}
+	return n
+}
+
+func (pm *probeMap) remove(key probeKey) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	delete(pm.items, key)
+}
+
+// matchEchoReply is match for an Echo Reply received from the given address.
+// When the probe's destination is known, a reply from any other address is
+// not a reply to that probe: it is ignored and the record is left in place,
+// so a forged reply can neither count as an answer nor use up the record
+// before the genuine reply arrives.
+func (pm *probeMap) matchEchoReply(key probeKey, from net.IP) (probeRecord, bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	rec, ok := pm.items[key]
+	if !ok {
+		return probeRecord{}, false
+	}
+	if rec.dst != nil && (from == nil || !rec.dst.Equal(from)) {
+		return probeRecord{}, false
+	}
+	delete(pm.items, key)
+	return rec, true
+}
+
+// peerIP returns the address of a packet's sender without any IPv6 zone.
+func peerIP(peer net.Addr) net.IP {
+	if a, ok := peer.(*net.IPAddr); ok {
+		return a.IP
+	}
+	return net.ParseIP(peer.String())
 }
 
 func (pm *probeMap) match(key probeKey) (probeRecord, bool) {
@@ -181,9 +250,14 @@ type Tracer struct {
 	pm            *probeMap
 	targetTTL     int32 // atomically set when target is reached; 0 = not yet found
 	responseCount int32 // atomic: tracks responses received by listen()
-	OnSent        SentCounter
+	OnRound       RoundMarker
 	OnRoundEnd    func() // called at end of each probe round
 	Paused        int32  // atomic: 1 = paused, 0 = running
+
+	// icmpProto is constructed once at Tracer creation and reused across all
+	// listener calls. Constructing it per-packet in identifyAny was wasteful;
+	// sharing is safe because IdentifyResponse does not consult sessionID.
+	icmpProto *ICMPProtocol
 
 	// listenICMP opens the ICMP listener socket. Tests may replace this
 	// with a factory that returns a fakeICMPConn to exercise Tracer.listen
@@ -194,6 +268,11 @@ type Tracer struct {
 	// replace this to exercise run() logic without raw sockets. When nil,
 	// run() uses the production socket path.
 	newSender func(ctx context.Context, proto ProbeProtocol, results chan<- Result) (probeSender, func(), error)
+
+	// echo tier state: per-tracer target set for full-TTL ICMP Echo probes
+	// dispatched from round 2 onward. Nothing here is shared across sessions.
+	echo       echoState
+	onEchoSent func(ip net.IP, ttl int)
 }
 
 // defaultListenICMP wraps icmp.ListenPacket so its return type satisfies
@@ -208,139 +287,16 @@ func NewTracer(target net.IP, cfg Config) *Tracer {
 		cfg:        cfg,
 		target:     target,
 		pm:         newProbeMap(),
+		icmpProto:  NewICMPProtocol(cfg),
 		listenICMP: defaultListenICMP,
 	}
 }
 
-// SetOnSent sets the SentCounter callback.
-func (t *Tracer) SetOnSent(s SentCounter) { t.OnSent = s }
+// SetOnRoundSent sets the RoundMarker callback.
+func (t *Tracer) SetOnRoundSent(r RoundMarker) { t.OnRound = r }
 
 // SetOnRoundEnd sets the round-end callback.
 func (t *Tracer) SetOnRoundEnd(f func()) { t.OnRoundEnd = f }
-
-// Discover runs a quick ICMP echo sweep to find the target's TTL before the
-// main trace begins. This is used when the primary protocol is UDP or TCP,
-// where the target may not send an identifiable "destination reached" response
-// (e.g., 4.2.2.2 silently accepts UDP). The discovered TTL is stored in
-// targetTTL so the main send loop is bounded from the start.
-// Results from the discovery pass are forwarded to the results channel so
-// the TUI can display hops immediately.
-func (t *Tracer) Discover(ctx context.Context, results chan<- Result) {
-	if t.cfg.Protocol.Name() == "icmp" {
-		return // ICMP mode detects the target naturally
-	}
-
-	conn, err := icmp.ListenPacket(ListenerNet(t.cfg.IPVersion), RawListenAddr(t.cfg.IPVersion))
-	if err != nil {
-		return // non-fatal: fall back to normal detection
-	}
-	defer conn.Close()
-
-	icmpProto := NewICMPProtocol()
-	pm := newProbeMap()
-
-	setTTL := func(ttl int) {
-		if t.cfg.IPVersion == 6 {
-			conn.IPv6PacketConn().SetHopLimit(ttl)
-		} else {
-			conn.IPv4PacketConn().SetTTL(ttl)
-		}
-	}
-
-	dst := &net.IPAddr{IP: t.target}
-
-	seq := 0
-	for ttl := t.cfg.FirstTTL; ttl <= t.cfg.MaxHops; ttl++ {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		seq++
-		pkt, key, err := icmpProto.BuildProbe(0, ttl, seq, t.cfg)
-		if err != nil {
-			continue
-		}
-		pm.add(key, ttl, 0, time.Now())
-		setTTL(ttl)
-		conn.WriteTo(pkt, dst)
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// Wait for responses up to the configured timeout
-	deadline := time.Now().Add(t.cfg.Timeout)
-	conn.SetReadDeadline(deadline)
-	buf := make([]byte, 1500)
-
-	for time.Now().Before(deadline) {
-		n, peer, err := conn.ReadFrom(buf)
-		if err != nil {
-			continue
-		}
-
-		msg, err := icmp.ParseMessage(ICMPProtoNum(t.cfg.IPVersion), buf[:n])
-		if err != nil {
-			continue
-		}
-
-		var key probeKey
-		var isTarget bool
-
-		switch msg.Type {
-		case TimeExceededType(t.cfg.IPVersion):
-			body, ok := msg.Body.(*icmp.TimeExceeded)
-			if !ok || len(body.Data) < 28 {
-				continue
-			}
-			k, err := icmpProto.IdentifyResponse(body.Data)
-			if err != nil || k == nil {
-				continue
-			}
-			key = *k
-
-		case EchoReplyType(t.cfg.IPVersion):
-			echo, ok := msg.Body.(*icmp.Echo)
-			if !ok {
-				continue
-			}
-			key = probeKey{SrcPort: echo.ID, DstPort: echo.Seq, Seq: 0}
-			isTarget = true
-
-		default:
-			continue
-		}
-
-		rec, ok := pm.match(key)
-		if !ok {
-			continue
-		}
-
-		peerIP := net.ParseIP(peer.String())
-		if !isTarget && peerIP != nil && peerIP.Equal(t.target) {
-			isTarget = true
-		}
-
-		rtt := time.Since(rec.sentAt)
-
-		// Forward to results so hops appear in the TUI immediately
-		select {
-		case results <- Result{
-			TTL:      rec.ttl,
-			IP:       peerIP,
-			RTT:      rtt,
-			IsTarget: isTarget,
-			FlowID:   0,
-		}:
-		default:
-		}
-
-		if isTarget {
-			atomic.StoreInt32(&t.targetTTL, int32(rec.ttl))
-			return
-		}
-	}
-}
 
 // Run starts sending probes and listening. Results are sent to the results channel.
 // If a SentCounter is set, it is called each time a probe is dispatched.
@@ -383,6 +339,22 @@ func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
 func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- Result) error {
 	proto := t.cfg.Protocol
 
+	// icmpProto is used for the tier-1 ICMP TTL probe every round, regardless
+	// of primary protocol. It shares cfg.ICMPID with the listener demux.
+	icmpProto := NewICMPProtocol(t.cfg)
+	primaryType := ProbeTypeForProtocolName(proto.Name())
+
+	// icmpSnd sends the tier-1 ICMP TTL probe. In production it uses the
+	// ICMP listener socket; tests exercising run() may leave conn nil, in
+	// which case tier-1 sends are skipped when the primary is not icmp.
+	var icmpSnd probeSender
+	if t.newSender != nil {
+		// Route tier-1 icmp sends through the same fake sender so tests can
+		// observe both tiers via a single seam.
+	} else if conn != nil {
+		icmpSnd = &icmpSender{conn: conn, ipVersion: t.cfg.IPVersion}
+	}
+
 	// newSender is nil in production; tests inject a fake to avoid raw sockets.
 	var snd probeSender
 	if t.newSender != nil {
@@ -395,13 +367,17 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		if err != nil {
 			return err
 		}
+		if icmpSnd == nil {
+			icmpSnd = snd
+		}
 	} else {
 		// Determine send socket based on protocol.
-		// For ICMP: send via the ICMP listener socket itself.
-		// For UDP/TCP: open a separate raw socket for sending.
+		// For ICMP: tier 1 already sends via the ICMP listener socket;
+		// tier 2 is skipped, so no separate sender is needed.
+		// For UDP/TCP: open a separate raw socket for tier 2 sends.
 		switch proto.Name() {
 		case "icmp":
-			snd = &icmpSender{conn: conn, ipVersion: t.cfg.IPVersion}
+			// icmpSnd already set above from conn; snd is unused.
 		default:
 			// UDP (and future TCP) use a raw IP socket for the protocol
 			rawProto := TransportListenerNet(t.cfg.IPVersion, "udp")
@@ -425,6 +401,13 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 	seq := 0
 	round := 0
 
+	// Echo tier ID fallback: mirror proto_icmp.go so direct library users
+	// who never set cfg.EchoID still get a deterministic non-zero ID for
+	// the lifetime of this run.
+	if t.cfg.EchoID == 0 {
+		t.cfg.EchoID = 1 + rand.Intn(65534)
+	}
+
 	for {
 		maxTTL := t.cfg.MaxHops
 		if reached := int(atomic.LoadInt32(&t.targetTTL)); reached > 0 {
@@ -432,48 +415,88 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		}
 
 		for ttl := t.cfg.FirstTTL; ttl <= maxTTL; ttl++ {
-			numPaths := t.cfg.NumPaths
-			if !proto.SupportsMultipath() {
-				numPaths = 1
+			// Cheap context/pause check per TTL — before tier 1.
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
 			}
-			for flow := 0; flow < numPaths; flow++ {
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-				}
-
-				if atomic.LoadInt32(&t.Paused) == 1 {
-					time.Sleep(t.cfg.ProbeDelay)
-					continue
-				}
-
-				seq++
-				pkt, key, err := proto.BuildProbe(flow, ttl, seq, t.cfg)
-				if err != nil {
-					continue
-				}
-
-				t.pm.add(key, ttl, flow, time.Now())
-
-				if err := snd.SetTTL(ttl); err != nil {
-					continue
-				}
-
-				if _, err := snd.WriteTo(pkt, dst); err != nil {
-					continue
-				}
-
-				if t.OnSent != nil {
-					t.OnSent.IncrementSent(ttl)
-				}
-
+			if atomic.LoadInt32(&t.Paused) == 1 {
 				time.Sleep(t.cfg.ProbeDelay)
+				continue
+			}
+
+			// TTL-limited probes actually written for this TTL this round.
+			// Reported to the round marker so loss is computed per probe.
+			probesSent := 0
+
+			// Tier 1: one ICMP TTL probe per hop per round.
+			if icmpSnd != nil {
+				seq++
+				if pkt, key, err := icmpProto.BuildProbe(0, ttl, seq, t.cfg); err == nil {
+					// The only Echo Reply that answers this probe comes from the target.
+					t.pm.addTo(key, ttl, 0, time.Now(), ProbeICMPTTL, t.target)
+					if icmpSnd.SetTTL(ttl) == nil {
+						if _, err := icmpSnd.WriteTo(pkt, dst); err == nil {
+							probesSent++
+						}
+					}
+				}
+				time.Sleep(t.cfg.ProbeDelay)
+			}
+
+			// Tier 2: primary flows. Skipped when the primary is ICMP —
+			// tier 1 already covers that packet.
+			if proto.Name() != "icmp" && snd != nil {
+				numPaths := t.cfg.NumPaths
+				if !proto.SupportsMultipath() {
+					numPaths = 1
+				}
+				for flow := 0; flow < numPaths; flow++ {
+					select {
+					case <-ctx.Done():
+						return nil
+					default:
+					}
+
+					if atomic.LoadInt32(&t.Paused) == 1 {
+						time.Sleep(t.cfg.ProbeDelay)
+						continue
+					}
+
+					seq++
+					pkt, key, err := proto.BuildProbe(flow, ttl, seq, t.cfg)
+					if err != nil {
+						continue
+					}
+
+					t.pm.add(key, ttl, flow, time.Now(), primaryType)
+
+					if err := snd.SetTTL(ttl); err != nil {
+						continue
+					}
+
+					if _, err := snd.WriteTo(pkt, dst); err != nil {
+						continue
+					}
+					probesSent++
+
+					time.Sleep(t.cfg.ProbeDelay)
+				}
+			}
+
+			// One round-sent notification per TTL per round, carrying the
+			// number of probes that went out.
+			if t.OnRound != nil {
+				t.OnRound.MarkRoundSent(ttl, probesSent)
 			}
 		}
 
-		if t.OnRoundEnd != nil {
-			t.OnRoundEnd()
+		// Tier 3: budgeted ICMP Echo Requests at full TTL for ground-truth
+		// reachability. Skipped on round 0; starts round 2 (index >= 1) so
+		// the first round establishes hop reachability before echoes begin.
+		if round >= 1 && icmpSnd != nil {
+			t.sendEchoes(icmpSnd, &seq)
 		}
 
 		// Sweep stale probe entries that never received a response
@@ -484,23 +507,72 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			t.checkAutoFallback()
 		}
 
-		// If auto-fallback triggered, return nil to signal Run() to restart
-		// with new sockets for the fallback protocol
+		// If auto-fallback triggered, close this round and signal Run() to
+		// restart with new sockets for the fallback protocol.
 		if auto, ok := t.cfg.Protocol.(*AutoSelector); ok && auto.HasSwitched() {
+			if t.OnRoundEnd != nil {
+				t.OnRoundEnd()
+			}
 			return nil
 		}
 
 		round++
-		if t.cfg.MaxRounds > 0 && round >= t.cfg.MaxRounds {
-			return nil
-		}
+		lastRound := t.cfg.MaxRounds > 0 && round >= t.cfg.MaxRounds
 
-		// Pause between rounds
+		// Close the round only AFTER the inter-round pause. Responses come back
+		// through an async pipeline (listener → results channel → UI), so
+		// closing the round the instant sends finish counts still-in-flight
+		// responses as loss even though they arrive and record RTT a few ms
+		// later. The pause is the response-collection window; MarkRoundEnd runs
+		// once it elapses, so a probe answered within the round is counted for it.
 		select {
 		case <-ctx.Done():
+			if t.OnRoundEnd != nil {
+				t.OnRoundEnd()
+			}
 			return nil
 		case <-time.After(t.cfg.RoundDelay):
 		}
+		// No round follows the last one to pick up its late replies, so it
+		// stays open until its probes are answered or time out.
+		if lastRound {
+			t.awaitFinalReplies(ctx)
+		}
+		if t.OnRoundEnd != nil {
+			t.OnRoundEnd()
+		}
+		if lastRound {
+			return nil
+		}
+	}
+}
+
+// finalReplyGrace is how long the last round stays open after its last reply
+// is matched, so the result can travel from the listener to the hop table
+// before the round is closed.
+const finalReplyGrace = 20 * time.Millisecond
+
+// awaitFinalReplies blocks while probes are outstanding and can still be
+// answered: until every one is matched, or the newest is Timeout old, or ctx
+// ends. With an interval shorter than the path's round-trip time the final
+// round's replies are otherwise still in flight when the run stops, and are
+// counted as lost.
+func (t *Tracer) awaitFinalReplies(ctx context.Context) {
+	if t.pm.pending(t.cfg.Timeout) == 0 {
+		return
+	}
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for t.pm.pending(t.cfg.Timeout) > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(finalReplyGrace):
 	}
 }
 
@@ -587,8 +659,17 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 			if !ok || len(body.Data) < 28 {
 				continue
 			}
-			k, err := proto.IdentifyResponse(body.Data)
-			if err != nil || k == nil {
+			// Try every known probe type's IdentifyResponse so tier-1 ICMP
+			// TTL probes and tier-2 primary probes can both be matched even
+			// when the primary is not ICMP.
+			k, ok := identifyAny(t.cfg, t.icmpProto, body.Data)
+			if !ok {
+				continue
+			}
+			// Defense in depth: drop packets whose embedded destination isn't
+			// our target. Filters out other via processes' probes (same base
+			// collision) whenever targets differ.
+			if !embeddedDestMatches(t.cfg.TargetIP, body.Data) {
 				continue
 			}
 			key = *k
@@ -599,37 +680,59 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 			if !ok || len(body.Data) < 28 {
 				continue
 			}
-			k, err := proto.IdentifyResponse(body.Data)
-			if err != nil || k == nil {
+			k, ok := identifyAny(t.cfg, t.icmpProto, body.Data)
+			if !ok {
+				continue
+			}
+			if !embeddedDestMatches(t.cfg.TargetIP, body.Data) {
 				continue
 			}
 			key = *k
 			isTarget = proto.IsDestReachedICMP(ICMPTypeNum(DestinationUnreachableType(t.cfg.IPVersion)), msg.Code)
 
 		case EchoReplyType(t.cfg.IPVersion):
-			// Echo Reply is only meaningful for ICMP protocol
-			if !proto.IsDestReachedICMP(ICMPTypeNum(EchoReplyType(t.cfg.IPVersion)), 0) {
-				continue
-			}
+			// Echo replies are meaningful in every mode: tier-1 ICMP TTL
+			// probes and (later) the ICMP echo tier both surface here.
 			echo, ok := msg.Body.(*icmp.Echo)
 			if !ok {
 				continue
 			}
 			key = probeKey{SrcPort: echo.ID, DstPort: echo.Seq, Seq: 0}
-			isTarget = true
+			// isTarget is decided after probeMap match, based on probeType.
 
 		default:
 			continue
 		}
 
-		rec, ok := t.pm.match(key)
+		peerIP := peerIP(peer)
+
+		// An Echo Reply answers a probe only if it comes from the address
+		// that probe was sent to. ICMP errors come from routers along the
+		// path, so they are matched on the quoted packet alone.
+		var rec probeRecord
+		var ok bool
+		if msg.Type == EchoReplyType(t.cfg.IPVersion) {
+			rec, ok = t.pm.matchEchoReply(key, peerIP)
+		} else {
+			rec, ok = t.pm.match(key)
+		}
 		if !ok {
 			continue
 		}
 
-		atomic.AddInt32(&t.responseCount, 1)
+		// Primary-only response counting: tier-1 ICMP TTL replies and echoes
+		// do not count for auto-fallback (which measures the primary tier).
+		if rec.probeType == ProbeUDPTTL || rec.probeType == ProbeTCPTTL {
+			atomic.AddInt32(&t.responseCount, 1)
+		}
 
-		peerIP := net.ParseIP(peer.String())
+		// For Echo Replies: only ICMP-TTL matches confer target-reached
+		// naturally (matches the pre-refactor ICMP-mode behavior). Echoes
+		// on the echo tier are ground-truth reachability, not target
+		// detection — that is handled by the peer==target check below.
+		if msg.Type == EchoReplyType(t.cfg.IPVersion) && rec.probeType == ProbeICMPTTL {
+			isTarget = true
+		}
 
 		// If the responder IS the target, mark as target even if the ICMP
 		// type was TimeExceeded (some hosts echo TTL-exceeded for their own
@@ -646,14 +749,67 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 
 		select {
 		case results <- Result{
-			TTL:      rec.ttl,
-			IP:       peerIP,
-			RTT:      rtt,
-			IsTarget: isTarget,
-			FlowID:   rec.flowID,
+			TTL:       rec.ttl,
+			IP:        peerIP,
+			RTT:       rtt,
+			IsTarget:  isTarget,
+			FlowID:    rec.flowID,
+			ProbeType: rec.probeType,
 		}:
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// innerVersion returns the IP version nibble from an ICMP inner-header body.
+// Returns 0 for empty input.
+func innerVersion(b []byte) int {
+	if len(b) == 0 {
+		return 0
+	}
+	return int(b[0] >> 4)
+}
+
+// embeddedDestMatches reports whether the packet quoted in an ICMP error was
+// addressed to target. A quote that cannot be parsed does not match: an error
+// message is only evidence about our probe if it shows the probe. The shortest
+// quote RFC 792 allows, an IP header plus 8 bytes of the original datagram
+// (28 bytes for IPv4, 48 for IPv6), parses and matches.
+//
+// With no target configured there is nothing to compare against, and the
+// quote is accepted.
+func embeddedDestMatches(target net.IP, inner []byte) bool {
+	if target == nil {
+		return true
+	}
+	v := innerVersion(inner)
+	if v != 4 && v != 6 {
+		return false
+	}
+	_, dstIP, _, _, _, err := ParseInnerHeader(v, inner)
+	if err != nil || dstIP == nil {
+		return false
+	}
+	return dstIP.Equal(target)
+}
+
+// identifyAny walks known protocol IdentifyResponse handlers so the listener
+// can demux both tier-1 (ICMP TTL) and tier-2 (primary) probes regardless of
+// the configured primary protocol. icmpProto is a pre-constructed instance
+// supplied by the caller (see Tracer.icmpProto) to avoid a per-packet
+// allocation in the hot path; IdentifyResponse does not consult sessionID,
+// so sharing the instance across packets is safe.
+func identifyAny(cfg Config, icmpProto *ICMPProtocol, inner []byte) (*probeKey, bool) {
+	// Try the configured primary first — cheapest hit in the common case.
+	if cfg.Protocol != nil {
+		if k, err := cfg.Protocol.IdentifyResponse(inner); err == nil && k != nil {
+			return k, true
+		}
+	}
+	// Tier-1 ICMP TTL probes exist in every mode; try ICMP demux next.
+	if k, err := icmpProto.IdentifyResponse(inner); err == nil && k != nil {
+		return k, true
+	}
+	return nil, false
 }

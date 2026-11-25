@@ -19,6 +19,7 @@ func buildFakeTCPPacket(srcPort, dstPort int, flags byte) []byte {
 func TestParseTCPResponse_SYNACK(t *testing.T) {
 	// SYN-ACK from server: src=443 (server), dst=44000 (our src port)
 	pkt := buildFakeTCPPacket(443, 44000, 0x12) // SYN+ACK
+	binary.BigEndian.PutUint32(pkt[8:12], 102)  // acknowledges our sequence 101
 
 	key, isTarget := parseTCPResponse(pkt)
 	if key == nil {
@@ -35,8 +36,9 @@ func TestParseTCPResponse_SYNACK(t *testing.T) {
 	if key.DstPort != 443 {
 		t.Errorf("key.DstPort = %d, want 443", key.DstPort)
 	}
-	if key.Seq != 0 {
-		t.Errorf("key.Seq = %d, want 0", key.Seq)
+	// The key carries the probe's sequence number: the acknowledgement minus one.
+	if key.Seq != 101 {
+		t.Errorf("key.Seq = %d, want 101", key.Seq)
 	}
 }
 
@@ -81,11 +83,12 @@ func TestParseTCPResponse_TooShort(t *testing.T) {
 func TestListenTCP_MatchesProbeMap(t *testing.T) {
 	// Register a probe in the probeMap
 	pm := newProbeMap()
-	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 0}
-	pm.add(key, 15, 0, time.Now())
+	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 101}
+	pm.add(key, 15, 0, time.Now(), ProbeTCPTTL)
 
-	// Build a fake SYN-ACK packet: server src=443, dst=44000
+	// Build a fake SYN-ACK packet: server src=443, dst=44000, acknowledging 101+1
 	pkt := buildFakeTCPPacket(443, 44000, 0x12)
+	binary.BigEndian.PutUint32(pkt[8:12], 102)
 
 	// Parse the response
 	gotKey, isTarget := parseTCPResponse(pkt)

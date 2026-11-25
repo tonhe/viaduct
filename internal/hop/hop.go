@@ -2,6 +2,7 @@
 package hop
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -12,8 +13,16 @@ import (
 type Hop struct {
 	TTL       int
 	Nodes     []*PathNode
-	sentTotal int // total probes sent to this TTL (all flows)
-	rounds    int // number of completed probe rounds
+	roundsSent int // rounds in which the tracer probed this TTL (includes the open round)
+
+	// Per-probe loss accounting. The running counters move as probes go out
+	// and replies come in; the closed counters are a snapshot taken when a
+	// round closes, so loss never includes probes whose replies may still be
+	// on the way.
+	probesSent   int // TTL-limited probes sent to this TTL
+	probesRecvd  int // non-echo replies received
+	closedSent   int // probesSent as of the last closed round
+	closedRecvd  int // probesRecvd as of the last closed round
 
 	mu sync.RWMutex
 }
@@ -24,7 +33,7 @@ func NewHop(ttl int) *Hop {
 }
 
 // AddSample records an RTT measurement from the given IP with a flow identifier.
-func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int) {
+func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -40,7 +49,10 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int) {
 		node = NewPathNode(ip)
 		h.Nodes = append(h.Nodes, node)
 	}
-	node.AddSample(rtt, flowID)
+	if kind != KindEcho {
+		h.probesRecvd++
+	}
+	node.AddSample(rtt, flowID, kind)
 }
 
 // IsDivergent returns true if more than one IP has been seen at this TTL.
@@ -83,14 +95,45 @@ func (h *Hop) GetNodes() []*PathNode {
 	return out
 }
 
-// MarkRoundEnd advances stability tracking for all nodes and increments the round counter.
+// MarkRoundSent records a round in which one TTL-limited probe was sent to
+// this TTL. Shorthand for MarkRoundSentProbes(1).
+func (h *Hop) MarkRoundSent() { h.MarkRoundSentProbes(1) }
+
+// MarkRoundSentProbes records that the tracer sent probes TTL-limited probes
+// to this TTL this round (ICMP TTL plus every primary flow). Called once per
+// hop per round (probe.RoundMarker via Table).
+func (h *Hop) MarkRoundSentProbes(probes int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.roundsSent++
+	if probes > 0 {
+		h.probesSent += probes
+	}
+}
+
+// MarkRoundEnd closes a probe round: probes sent so far and replies received
+// so far become the figures loss is computed from, then stability tracking
+// advances for all nodes.
 func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.rounds++
+	// Probes sent to this hop in the round being closed. A round is one ICMP
+	// TTL probe followed by the UDP or TCP flows, so the first is the ICMP
+	// probe and the rest are primary probes.
+	inRound := h.probesSent - h.closedSent
+	icmpSent, primarySent := 0, 0
+	if inRound > 0 {
+		icmpSent, primarySent = 1, inRound-1
+	}
+	h.closedSent = h.probesSent
+	h.closedRecvd = h.probesRecvd
+	verdict := h.rateLimitStateLocked()
 	for _, n := range h.Nodes {
+		n.markProbesSent(icmpSent, primarySent)
+		n.setHopVerdict(verdict)
 		n.RecordRoundAvg()
 		n.AdvanceRound()
+		n.MarkProbeRoundEnd()
 	}
 }
 
@@ -150,19 +193,160 @@ func (h *Hop) StDev() float64 {
 	return pn.StDev()
 }
 
-// LossPercent returns the packet loss percentage across all nodes.
-// Loss = (sentTotal - totalReceivedAllNodes) / sentTotal * 100
+// LossPercent returns per-probe loss: TTL-limited probes that got no reply
+// over probes sent, across completed rounds. The open round is excluded, so a
+// live view does not show probes still awaiting their replies as lost. A
+// reply that arrives after its round closed is credited when the next round
+// closes.
 func (h *Hop) LossPercent() float64 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.sentTotal == 0 {
+	if h.closedSent == 0 {
 		return 0
 	}
-	totalReceived := 0
-	for _, n := range h.Nodes {
-		totalReceived += n.GetReceived()
+	lost := h.closedSent - h.closedRecvd
+	if lost < 0 {
+		lost = 0 // duplicated replies
 	}
-	return float64(h.sentTotal-totalReceived) / float64(h.sentTotal) * 100
+	return float64(lost) / float64(h.closedSent) * 100
+}
+
+// MarkTarget records that the node with the given address at this TTL is the
+// trace's destination (see PathNode.MarkTarget).
+func (h *Hop) MarkTarget(ip net.IP) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, n := range h.Nodes {
+		if n.IP.Equal(ip) {
+			n.MarkTarget()
+		}
+	}
+}
+
+// RateLimitState is the hop's rate-limit verdict: whether the loss of
+// TTL-limited probes at this hop is the routers declining to answer them
+// rather than packets being lost.
+//
+// It compares every TTL-limited probe sent to this hop distance, of every
+// type, with every direct echo sent to the hop's nodes. The comparison has to
+// be made for the hop as a whole: a TTL-limited probe is addressed to a
+// distance, not to a node, so one node cannot tell which probes it "lost". A
+// hop that answers echoes but not its TTL probes is rate-limiting or filtering
+// them. A hop that loses both at the same rate has real loss.
+//
+// The destination is never rate-limited: an echo to it is the same packet on
+// the same path as the ICMP probe that reaches it.
+func (h *Hop) RateLimitState() RateLimitState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rateLimitStateLocked()
+}
+
+func (h *Hop) rateLimitStateLocked() RateLimitState {
+	// The destination is judged like any other hop: it throttles the Port
+	// Unreachable errors it sends in answer to UDP probes just as a router
+	// throttles Time Exceeded. Real loss on the way to it costs echoes too,
+	// and is not flagged.
+	echoSent, echoRecvd := h.echoTotalsLocked()
+	return rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
+}
+
+// echoTotalsLocked sums the echo probes sent to, and answered by, this hop's nodes.
+func (h *Hop) echoTotalsLocked() (sent, received int) {
+	for _, n := range h.Nodes {
+		s := n.EchoStats()
+		sent += s.Sent
+		received += s.Received
+	}
+	return sent, received
+}
+
+// HeadlineLoss is the loss figure every view shows for this hop, and whether
+// it is echo-derived. When the hop is judged rate-limited, its TTL probe loss
+// is an artifact of routers not answering, so the loss of direct echoes to
+// the hop's nodes is reported instead (shown as "~N%†"). Otherwise it is
+// LossPercent.
+func (h *Hop) HeadlineLoss() (loss float64, rateLimited bool) {
+	loss, kind := h.Loss()
+	return loss, kind == LossRateLimited
+}
+
+// LossKind says what a hop's loss figure is.
+type LossKind int
+
+const (
+	// LossMeasured is TTL-probe loss with nothing in doubt: either there is
+	// none, or there are enough echo samples to say it is not rate limiting.
+	LossMeasured LossKind = iota
+	// LossRateLimited is echo loss, reported because the hop's TTL-probe loss
+	// is judged to be rate limiting.
+	LossRateLimited
+	// LossProvisional is TTL-probe loss on a hop that does not yet have
+	// enough echo samples for a verdict. It may be rate limiting; it is not
+	// yet a measurement of the path.
+	LossProvisional
+)
+
+// Loss is the loss figure every view shows for this hop, and what kind of
+// figure it is. FormatLoss renders the pair.
+func (h *Hop) Loss() (pct float64, kind LossKind) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	verdict := h.rateLimitStateLocked()
+	if verdict == RateLimitYes {
+		sent, received := h.echoTotalsLocked()
+		lost := sent - received
+		if lost < 0 {
+			lost = 0
+		}
+		return float64(lost) / float64(sent) * 100, LossRateLimited
+	}
+	if h.closedSent == 0 {
+		return 0, LossMeasured
+	}
+	lost := h.closedSent - h.closedRecvd
+	if lost <= 0 {
+		return 0, LossMeasured
+	}
+	pct = float64(lost) / float64(h.closedSent) * 100
+	if verdict == RateLimitUndetermined && len(h.Nodes) > 0 {
+		return pct, LossProvisional
+	}
+	return pct, LossMeasured
+}
+
+// SettledLoss is the loss figure for decisions that must not act on a number
+// still in doubt, such as alerting: Loss, with provisional loss counted as
+// none.
+func (h *Hop) SettledLoss() float64 {
+	pct, kind := h.Loss()
+	if kind == LossProvisional {
+		return 0
+	}
+	return pct
+}
+
+// FormatLoss renders a loss figure the same way in every view: "12.3%" for a
+// measurement, "~0%†" for echo loss on a rate-limited hop, "85.7%?" while the
+// verdict is not yet possible.
+func FormatLoss(pct float64, kind LossKind) string {
+	switch kind {
+	case LossRateLimited:
+		return fmt.Sprintf("~%.0f%%†", pct)
+	case LossProvisional:
+		return fmt.Sprintf("%.1f%%?", pct)
+	default:
+		return fmt.Sprintf("%.1f%%", pct)
+	}
+}
+
+// ProbeCounts returns the TTL-limited probes sent to this TTL and the replies
+// received, as of the last closed round. These are the figures LossPercent is
+// computed from. received can exceed sent if a reply was duplicated.
+func (h *Hop) ProbeCounts() (sent, received int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.closedSent, h.closedRecvd
 }
 
 // GetMinRTT returns the primary node's minimum RTT.
@@ -198,19 +382,12 @@ func (h *Hop) GetLastRTT() time.Duration {
 	return pn.GetLastRTT()
 }
 
-// GetSent returns the number of completed rounds for this hop (thread-safe).
-// This is what the user-facing Snt column displays.
-func (h *Hop) GetSent() int {
+// Rounds returns the number of probe rounds sent to this hop (thread-safe).
+// This is what the user-facing Rnd column displays.
+func (h *Hop) Rounds() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.rounds
-}
-
-// IncrementSent increments the total sent probe count.
-func (h *Hop) IncrementSent() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.sentTotal++
+	return h.roundsSent
 }
 
 // Reset clears all nodes and zeroes counters, preserving TTL.
@@ -218,8 +395,11 @@ func (h *Hop) Reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Nodes = nil
-	h.sentTotal = 0
-	h.rounds = 0
+	h.roundsSent = 0
+	h.probesSent = 0
+	h.probesRecvd = 0
+	h.closedSent = 0
+	h.closedRecvd = 0
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.
@@ -237,6 +417,14 @@ func NewTable(maxHops int) *Table {
 	}
 }
 
+// Get returns the hop at ttl, or nil if none exists. Unlike GetOrCreate it
+// never creates a row, so lookups for unseen TTLs stay invisible.
+func (t *Table) Get(ttl int) *Hop {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.hops[ttl]
+}
+
 // GetOrCreate returns the hop for the given TTL, creating it if needed.
 func (t *Table) GetOrCreate(ttl int) *Hop {
 	t.mu.Lock()
@@ -250,10 +438,10 @@ func (t *Table) GetOrCreate(ttl int) *Hop {
 	return h
 }
 
-// IncrementSent increments the sent count for a given TTL.
-// Implements probe.SentCounter.
-func (t *Table) IncrementSent(ttl int) {
-	t.GetOrCreate(ttl).IncrementSent()
+// MarkRoundSent records that a round of probes TTL-limited probes was sent to
+// the given TTL. Implements probe.RoundMarker.
+func (t *Table) MarkRoundSent(ttl int, probes int) {
+	t.GetOrCreate(ttl).MarkRoundSentProbes(probes)
 }
 
 // Snapshot returns a sorted slice of hops from TTL 1 to MaxTTLSeen.
@@ -269,6 +457,47 @@ func (t *Table) Snapshot() []*Hop {
 		}
 	}
 	return result
+}
+
+// TargetTTL returns the destination's distance: the lowest TTL at which a
+// node marked as the target has answered, or 0 while it has not.
+func (t *Table) TargetTTL() int {
+	for _, h := range t.Snapshot() {
+		for _, n := range h.GetNodes() {
+			if n.IsTarget() {
+				return h.TTL
+			}
+		}
+	}
+	return 0
+}
+
+// EchoNode is a node to send direct echoes to, and the hop it belongs to.
+type EchoNode struct {
+	IP  net.IP
+	TTL int
+}
+
+// EchoNodes lists the nodes of the path: every known node at every hop up to
+// and including the destination's. Hops beyond the destination are left out.
+// They exist because the first round probes every TTL before the
+// destination's distance is known, and the destination answers each probe
+// that reaches it; sending echoes to those entries would multiply the echo
+// traffic at the destination by the number of unused TTLs.
+func (t *Table) EchoNodes() []EchoNode {
+	target := t.TargetTTL()
+	var out []EchoNode
+	for _, h := range t.Snapshot() {
+		if target > 0 && h.TTL > target {
+			break
+		}
+		for _, n := range h.GetNodes() {
+			if ip := n.GetIP(); ip != nil {
+				out = append(out, EchoNode{IP: ip, TTL: h.TTL})
+			}
+		}
+	}
+	return out
 }
 
 // MaxTTLSeen returns the highest TTL that has been recorded.
