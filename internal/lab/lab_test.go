@@ -172,7 +172,11 @@ func counters(t *testing.T, node, family string) map[string]int {
 func capture(t *testing.T, fn func()) []packet {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "client.pcap")
-	cmd := inNS("client", "tcpdump", "-i", "client-r1", "-U", "-n", "-s", "128", "-w", file)
+	// --immediate-mode: without it libpcap hands packets over a block at a
+	// time, and the packets of the last block (up to a second's worth) can be
+	// lost when tcpdump is interrupted. That showed as one round of echoes
+	// missing from the capture in about one run in three.
+	cmd := inNS("client", "tcpdump", "-i", "client-r1", "--immediate-mode", "-U", "-n", "-s", "128", "-w", file)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

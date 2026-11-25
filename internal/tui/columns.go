@@ -360,12 +360,19 @@ func (m Model) paneRowContent(lay paneLayout, inner, ttl int, h *hop.Hop) string
 			avgCell = fmt.Sprintf("%*s", paneAvgW, formatDuration(h.AvgRTT()))
 		}
 		if lay.showLoss {
-			loss := h.LossPercent()
-			lossStr := "0%"
-			if loss > 0 {
-				lossStr = fmt.Sprintf("%.0f%%", loss)
+			// The hop's figure, as in the detail table, in the pane's
+			// narrower cell: whole percent, "~" for echo loss on a
+			// rate-limited hop, "?" while the cause is not yet known.
+			loss, kind := h.Loss()
+			lossStr := fmt.Sprintf("%.0f%%", loss)
+			style := lossStyleFor(loss)
+			switch kind {
+			case hop.LossRateLimited:
+				lossStr, style = "~"+lossStr, rateLimitStyle()
+			case hop.LossProvisional:
+				lossStr, style = lossStr+"?", dimStyle()
 			}
-			lossCell = lossStyleFor(loss).Render(fmt.Sprintf("%*s", paneLossW, lossStr))
+			lossCell = style.Render(fmt.Sprintf("%*s", paneLossW, lossStr))
 		}
 	}
 

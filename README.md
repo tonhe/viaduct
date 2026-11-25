@@ -140,7 +140,13 @@ The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come 
 
 **How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
 
-**When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The destination is never marked. TUI, report mode and exports all show the same figure; JSON exports also carry per-node counts for each probe type and the `rate_limited` verdict. In the JSON, each hop has `probes_sent` and `probes_received`, and the top-level `probes` is the total sent to the hops in the report.
+**When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way, because a host throttles the Port Unreachable errors it sends in answer to UDP probes just as a router throttles Time Exceeded.
+
+**Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`.
+
+TUI, report mode, alerting and exports all use the same figure. In the JSON, each hop has `loss_pct` (raw TTL-probe loss), `headline_loss_pct` (the figure shown) and `loss_kind` (`measured`, `rate_limited` or `provisional`), plus `probes_sent` and `probes_received`; each node has counts for each probe type and the `rate_limited` verdict; the top-level `probes` is the total sent to the hops in the report.
+
+Echoes go to the nodes of the path only, one per node per round, up to and including the destination.
 
 ---
 

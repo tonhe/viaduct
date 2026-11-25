@@ -301,6 +301,140 @@ func TestRateLimitedRouter_ReportShowsEchoLoss(t *testing.T) {
 	}
 }
 
+// A destination that throttles its ICMP errors (viaduct#71). dst1 limits Port
+// Unreachable to one per second and answers every ping. In UDP mode most of
+// the six UDP probes a round then go unanswered at the destination, and none
+// of that is loss: via must report the destination as rate-limited, with the
+// echo loss (none) as its figure, in the JSON and in the text report.
+func TestDestinationThrottlingItsErrors(t *testing.T) {
+	const rounds = 60
+	m := modes[0]
+	if m.name != "udp" {
+		t.Fatalf("modes[0] is %q, want udp", m.name)
+	}
+	reset(t)
+	script(t, "scenarios/ratelimit.sh", "dst1")
+	var r export.Report
+	pkts := capture(t, func() { r = via(t, traceArgs(m, rounds, dst1V4)...) })
+
+	sent := rounds * m.perRound
+	for i, ip := range pathToDst1[:3] {
+		wantHop(t, hopByTTL(t, r, i+1), ip, rounds, sent, sent)
+	}
+	h := hopByTTL(t, r, 4)
+	if len(h.Nodes) != 1 || h.Nodes[0].IP != dst1V4 {
+		t.Fatalf("TTL 4 nodes = %+v, want exactly %s", h.Nodes, dst1V4)
+	}
+	if h.ProbesSent != sent || h.ProbesReceived >= sent {
+		t.Fatalf("dst1 TTL probes sent/received = %d/%d, want %d sent and fewer received; the rate limit did not take effect",
+			h.ProbesSent, h.ProbesReceived, sent)
+	}
+	n := h.Nodes[0]
+	// Echo tier on the wire. The destination gets one direct echo a round at
+	// most, not one for every TTL beyond it. Echo Replies also answer the ICMP
+	// TTL probes that reach dst1: one a round at TTL 4, plus TTL 5 to 30 in
+	// round one, before its distance is known.
+	wireSent, wireRecv := echoesTo(pkts, clientV4, dst1V4)
+	if wireSent != n.Probes.Echo.Sent || wireSent > rounds {
+		byTTL := map[int]int{}
+		for _, p := range pkts {
+			if p.proto == 1 && p.icmpType == 8 && p.src == clientV4 {
+				byTTL[p.ttl]++
+			}
+		}
+		t.Errorf("direct echoes to dst1: %d on the wire, via reports %d; want them equal and at most %d (one a round). All echo requests from the client by IP TTL: %v",
+			wireSent, n.Probes.Echo.Sent, rounds, byTTL)
+	}
+	if want := wireSent + rounds + (30 - 4); wireRecv != want {
+		t.Errorf("Echo Replies from dst1 on the wire = %d, want %d (every direct echo and every ICMP TTL probe answered)", wireRecv, want)
+	}
+	if n.Probes.Echo.Received != n.Probes.Echo.Sent {
+		t.Errorf("dst1 echo sent/received = %d/%d, want all answered", n.Probes.Echo.Sent, n.Probes.Echo.Received)
+	}
+	if n.RateLimited != "yes" || h.LossKind != "rate_limited" || h.HeadlineLoss != 0 {
+		t.Errorf("dst1: rate_limited %q, loss_kind %q, headline_loss_pct %.1f; want yes, rate_limited, 0 (raw loss_pct is %.1f)",
+			n.RateLimited, h.LossKind, h.HeadlineLoss, h.Loss)
+	}
+}
+
+func TestDestinationThrottlingItsErrors_ReportShowsEchoLoss(t *testing.T) {
+	reset(t)
+	script(t, "scenarios/ratelimit.sh", "dst1")
+	out := viaText(t, "-c", "60", "-i", "200ms", dst1V4)
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, dst1V4+" ") && !strings.HasPrefix(line, "via") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no row for %s in report:\n%s", dst1V4, out)
+	}
+	if !strings.Contains(row, "~0%†") {
+		t.Errorf("destination row should show echo-derived loss ~0%%†; got:\n%s", row)
+	}
+}
+
+// Before there are 20 echo samples the cause of a hop's loss is not known,
+// and the report says so: the figure carries a "?" and loss_kind is
+// "provisional". 8 rounds is far short of 20 echoes.
+func TestLossIsProvisionalInAShortRun(t *testing.T) {
+	const rounds = 8
+	m := modes[1]
+	if m.name != "icmp" {
+		t.Fatalf("modes[1] is %q, want icmp", m.name)
+	}
+	reset(t)
+	script(t, "scenarios/drop-replies.sh", "r3", "2", "4")
+	r := via(t, traceArgs(m, rounds, dst1V4)...)
+	h := hopByTTL(t, r, 3)
+	if h.Loss != 50 || h.LossKind != "provisional" || h.HeadlineLoss != 50 {
+		t.Errorf("r3: loss_pct %.1f, loss_kind %q, headline_loss_pct %.1f; want 50, provisional, 50",
+			h.Loss, h.LossKind, h.HeadlineLoss)
+	}
+	if clean := hopByTTL(t, r, 2); clean.LossKind != "measured" || clean.Loss != 0 {
+		t.Errorf("r2: loss_pct %.1f, loss_kind %q; want 0, measured", clean.Loss, clean.LossKind)
+	}
+
+	reset(t)
+	script(t, "scenarios/drop-replies.sh", "r3", "2", "4")
+	out := viaText(t, "-P", "icmp", "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4)
+	if !strings.Contains(out, "50.0%?") {
+		t.Errorf("report should show r3's loss as 50.0%%?; got:\n%s", out)
+	}
+}
+
+// TCP replies slower than the gap between probes (viaduct#70). With 30 ms
+// added beyond r2, the reply to a flow's TTL 3 probe arrives after its TTL 4
+// probe has been sent 10 ms later. Each reply must still be credited to its
+// own hop: one node per hop, exact counts, and the added delay in the RTT.
+func TestTCPRepliesSlowerThanTheProbeGap(t *testing.T) {
+	const rounds = 10
+	m := modes[2] // tcp
+	if m.name != "tcp" {
+		t.Fatalf("modes[2] is %q, want tcp", m.name)
+	}
+	reset(t)
+	script(t, "scenarios/delay.sh", "30ms")
+	r := via(t, traceArgs(m, rounds, dst1V4)...)
+	sent := rounds * m.perRound
+	for i, ip := range pathToDst1 {
+		h := hopByTTL(t, r, i+1)
+		wantHop(t, h, ip, rounds, sent, sent)
+		if len(h.Nodes) != 1 {
+			continue
+		}
+		avg, best := h.Nodes[0].RTT.Avg, h.Nodes[0].RTT.Best
+		if i < 2 && avg > 10 {
+			t.Errorf("TTL %d: avg RTT = %.1f ms, want under 10 (before the delay)", h.TTL, avg)
+		}
+		if i >= 2 && (best < 30 || avg > 45) {
+			t.Errorf("TTL %d: RTT best %.1f avg %.1f ms, want 30-45 (30 ms added delay); a smaller figure means a reply was timed from another probe",
+				h.TTL, best, avg)
+		}
+	}
+}
+
 // Real loss is not rate limiting. Every 5th reply of every type from r3 is
 // dropped, echoes included, so TTL probe loss and echo loss are both exactly
 // 20%. Ten runs; nothing may be flagged in any of them.

@@ -53,10 +53,10 @@ func (m Model) renderSummaryRow(i int, s *TargetSession) string {
 	}
 
 	hops := s.table.MaxTTLSeen()
-	loss, avg := destStats(s)
+	loss, lossKind, avg := destStats(s)
 	alertMsg := summaryAlert(s)
-	row := fmt.Sprintf("%s%-24s %5d %6.1f%% %8.1fms  %-16s %s",
-		prefix, truncateSummary(name, 24), hops, loss,
+	row := fmt.Sprintf("%s%-24s %5d %7s %8.1fms  %-16s %s",
+		prefix, truncateSummary(name, 24), hops, hop.FormatLoss(loss, lossKind),
 		float64(avg)/float64(time.Millisecond),
 		truncateSummary(worstHop(s), 16),
 		alertMsg)
@@ -125,19 +125,21 @@ func truncateSummary(s string, n int) string {
 	return string(runes[:n-1]) + "…"
 }
 
-// destStats returns loss% and avg RTT of the last responding hop in s's
-// table, or zeros when no hop has received any data. Walking in reverse avoids
-// reporting zeros for a trailing non-responding gap hop as the destination.
-func destStats(s *TargetSession) (float64, time.Duration) {
+// destStats returns the loss figure (see hop.Hop.Loss) and avg RTT of the last
+// responding hop in s's table, or zeros when no hop has received any data.
+// Walking in reverse avoids reporting zeros for a trailing non-responding gap
+// hop as the destination.
+func destStats(s *TargetSession) (float64, hop.LossKind, time.Duration) {
 	snap := s.table.Snapshot()
 	for i := len(snap) - 1; i >= 0; i-- {
 		h := snap[i]
 		pn := h.PrimaryNode()
 		if pn != nil && pn.GetReceived() > 0 {
-			return h.LossPercent(), h.AvgRTT()
+			loss, kind := h.Loss()
+			return loss, kind, h.AvgRTT()
 		}
 	}
-	return 0, 0
+	return 0, hop.LossMeasured, 0
 }
 
 // summaryAlert returns the alert label for a session row: the alert message

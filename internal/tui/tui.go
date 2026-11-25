@@ -93,6 +93,23 @@ func lossStyleFor(loss float64) lipgloss.Style {
 	return lossStyle()
 }
 
+// lossCell renders a hop's loss figure for the table's 8-column Loss% cell:
+// a measurement in green or red, echo loss on a rate-limited hop as "~N%†",
+// and loss whose cause is not yet known as "N%?", dimmed, so it is not read
+// as a measurement of the path.
+func lossCell(h *hop.Hop) string {
+	loss, kind := h.Loss()
+	plain := padCell(hop.FormatLoss(loss, kind), 8)
+	switch kind {
+	case hop.LossRateLimited:
+		return rateLimitStyle().Render(plain)
+	case hop.LossProvisional:
+		return dimStyle().Render(plain)
+	default:
+		return lossStyleFor(loss).Render(plain)
+	}
+}
+
 // padCell left-aligns plain (unstyled) text to width columns. Styling must be
 // applied AFTER padding: fmt pads by byte length, so styling first garbles
 // real terminals while passing color-stripped tests.
@@ -1205,18 +1222,7 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 
 	pn := h.PrimaryNode()
 
-	// Loss cell — a rate-limited hop reports echo-based ground truth with a
-	// "†" dagger; otherwise the hop's TTL-probe loss percent.
-	if loss, limited := h.HeadlineLoss(); limited {
-		plain := fmt.Sprintf("~%.0f%%†", loss)
-		parts = append(parts, rateLimitStyle().Render(padCell(plain, 8)))
-	} else {
-		plain := fmt.Sprintf("%.1f%%", loss)
-		if loss == 0 {
-			plain = "0.0%"
-		}
-		parts = append(parts, lossStyleFor(loss).Render(padCell(plain, 8)))
-	}
+	parts = append(parts, lossCell(h))
 
 	// RTT stats — hop-level for everyone; echo tier already contributes to
 	// PathNode stats so no separate ping branch is needed.
@@ -1370,19 +1376,9 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 			}
 		}
 
-		// Loss cell (first node only). Rate-limited nodes report echo-based
-		// ground truth with a "†" dagger; other cells show hop-level TTL loss.
+		// Loss cell (first node only): the hop's figure.
 		if i == 0 {
-			if loss, limited := h.HeadlineLoss(); limited {
-				plain := fmt.Sprintf("~%.0f%%†", loss)
-				parts = append(parts, rateLimitStyle().Render(padCell(plain, 8)))
-			} else {
-				plain := fmt.Sprintf("%.1f%%", loss)
-				if loss == 0 {
-					plain = "0.0%"
-				}
-				parts = append(parts, lossStyleFor(loss).Render(padCell(plain, 8)))
-			}
+			parts = append(parts, lossCell(h))
 		} else {
 			parts = append(parts, dimStyle().Render(fmt.Sprintf("%-8s", "-")))
 		}
@@ -1634,9 +1630,8 @@ func (m Model) FinalSummary() string {
 			continue
 		}
 
-		// One figure for the hop, the same one the live table shows: echo
-		// loss when the hop is rate-limited, TTL-probe loss otherwise.
-		hopLoss, rateLimited := h.HeadlineLoss()
+		// One figure for the hop, the same one the live table shows.
+		hopLossStr := hop.FormatLoss(h.Loss())
 
 		if multipath && h.IsDivergent() {
 			nodes := h.GetNodes()
@@ -1675,11 +1670,7 @@ func (m Model) FinalSummary() string {
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
-					if rateLimited {
-						lossStr = fmt.Sprintf("~%.0f%%†", hopLoss)
-					} else {
-						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
-					}
+					lossStr = hopLossStr
 					sntStr = fmt.Sprintf("%d", sent)
 				}
 
@@ -1735,12 +1726,7 @@ func (m Model) FinalSummary() string {
 				asnLabel = asnLabel[:20]
 			}
 
-			var lossStr string
-			if rateLimited {
-				lossStr = fmt.Sprintf("~%.0f%%†", hopLoss)
-			} else {
-				lossStr = fmt.Sprintf("%.1f%%", hopLoss)
-			}
+			lossStr := hopLossStr
 			sent := h.Rounds()
 			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
 			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0

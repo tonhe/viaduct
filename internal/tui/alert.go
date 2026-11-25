@@ -118,6 +118,25 @@ func (e *AlertEngine) Message() string {
 	return msg
 }
 
+// destAlertMetrics returns the loss and latency alerting decides on: those of
+// the last responding hop. The loss is the hop's settled figure, the one the
+// table shows: echo loss when the hop is rate-limited, and none while the
+// cause of its loss is not yet known. Raw TTL-probe loss would raise an alert
+// for a destination that only throttles its ICMP errors.
+func destAlertMetrics(hopMap map[int]*hop.Hop, maxTTL int) (loss float64, latency time.Duration) {
+	for i := maxTTL; i >= 1; i-- {
+		h, ok := hopMap[i]
+		if !ok || h == nil {
+			continue
+		}
+		pn := h.PrimaryNode()
+		if pn != nil && pn.GetReceived() > 0 {
+			return h.SettledLoss(), pn.AvgRTT()
+		}
+	}
+	return 0, 0
+}
+
 // FindAffectedHop walks backward from the destination to find the first hop
 // contributing to the degradation.
 func (e *AlertEngine) FindAffectedHop(hopMap map[int]*hop.Hop, maxTTL int, deltas []time.Duration) {
@@ -148,8 +167,8 @@ func (e *AlertEngine) FindAffectedHop(hopMap map[int]*hop.Hop, maxTTL int, delta
 	destNode := destHop.PrimaryNode()
 
 	// Loss alert: walk backward, find first hop with loss within 2% of destination
-	if e.lossThreshold > 0 && destHop.LossPercent() > e.lossThreshold {
-		destLoss := destHop.LossPercent()
+	if e.lossThreshold > 0 && destHop.SettledLoss() > e.lossThreshold {
+		destLoss := destHop.SettledLoss()
 		for i := destTTL - 1; i >= 1; i-- {
 			h, ok := hopMap[i]
 			if !ok || h == nil {
@@ -159,7 +178,7 @@ func (e *AlertEngine) FindAffectedHop(hopMap map[int]*hop.Hop, maxTTL int, delta
 			if pn == nil || pn.GetReceived() == 0 {
 				continue
 			}
-			if h.LossPercent() >= destLoss-2.0 {
+			if h.SettledLoss() >= destLoss-2.0 {
 				asn, org := pn.GetASN()
 				asnStr := ""
 				if asn > 0 {

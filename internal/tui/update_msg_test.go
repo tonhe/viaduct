@@ -759,6 +759,33 @@ func withEchoSink(sink echoSinkIface) testOpt {
 	}
 }
 
+// Hops beyond the destination are not echo targets: the destination is
+// recorded there only because round one probes every TTL.
+func TestOnRoundEnd_NoEchoTargetsBeyondTheDestination(t *testing.T) {
+	m := newTestModel()
+	sink := &fakeEchoSink{}
+	m.sessions[0].echoSink = sink
+	tbl := m.sessions[0].table
+	dst := net.ParseIP("198.51.100.1")
+	tbl.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0, hop.KindPrimary)
+	for ttl := 2; ttl <= 6; ttl++ {
+		h := tbl.GetOrCreate(ttl)
+		h.AddSample(dst, time.Millisecond, 0, hop.KindICMPTTL)
+		h.MarkTarget(dst)
+	}
+
+	m.onRoundEnd(RoundEndMsg{TargetIdx: 0})
+
+	if len(sink.submitted) != 2 {
+		t.Fatalf("submitted %d echo targets, want 2 (the router and the destination once): %v", len(sink.submitted), sink.submitted)
+	}
+	for _, tgt := range sink.submitted {
+		if tgt.TTL > 2 {
+			t.Errorf("echo target %v at TTL %d is beyond the destination at TTL 2", tgt.IP, tgt.TTL)
+		}
+	}
+}
+
 // TestOnEchoSent verifies EchoSentMsg attribution to per-node EchoStats.Sent.
 func TestOnEchoSent(t *testing.T) {
 	t.Run("known IP and TTL increments EchoStats.Sent on matching node", func(t *testing.T) {

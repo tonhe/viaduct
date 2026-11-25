@@ -2,6 +2,7 @@
 package hop
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -233,9 +234,10 @@ func (h *Hop) RateLimitState() RateLimitState {
 }
 
 func (h *Hop) rateLimitStateLocked() RateLimitState {
-	if pn := h.primaryNodeLocked(); pn != nil && pn.IsTarget() {
-		return RateLimitNo
-	}
+	// The destination is judged like any other hop: it throttles the Port
+	// Unreachable errors it sends in answer to UDP probes just as a router
+	// throttles Time Exceeded. Real loss on the way to it costs echoes too,
+	// and is not flagged.
 	echoSent, echoRecvd := h.echoTotalsLocked()
 	return rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
 }
@@ -256,24 +258,77 @@ func (h *Hop) echoTotalsLocked() (sent, received int) {
 // the hop's nodes is reported instead (shown as "~N%†"). Otherwise it is
 // LossPercent.
 func (h *Hop) HeadlineLoss() (loss float64, rateLimited bool) {
+	loss, kind := h.Loss()
+	return loss, kind == LossRateLimited
+}
+
+// LossKind says what a hop's loss figure is.
+type LossKind int
+
+const (
+	// LossMeasured is TTL-probe loss with nothing in doubt: either there is
+	// none, or there are enough echo samples to say it is not rate limiting.
+	LossMeasured LossKind = iota
+	// LossRateLimited is echo loss, reported because the hop's TTL-probe loss
+	// is judged to be rate limiting.
+	LossRateLimited
+	// LossProvisional is TTL-probe loss on a hop that does not yet have
+	// enough echo samples for a verdict. It may be rate limiting; it is not
+	// yet a measurement of the path.
+	LossProvisional
+)
+
+// Loss is the loss figure every view shows for this hop, and what kind of
+// figure it is. FormatLoss renders the pair.
+func (h *Hop) Loss() (pct float64, kind LossKind) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.rateLimitStateLocked() == RateLimitYes {
+	verdict := h.rateLimitStateLocked()
+	if verdict == RateLimitYes {
 		sent, received := h.echoTotalsLocked()
 		lost := sent - received
 		if lost < 0 {
 			lost = 0
 		}
-		return float64(lost) / float64(sent) * 100, true
+		return float64(lost) / float64(sent) * 100, LossRateLimited
 	}
 	if h.closedSent == 0 {
-		return 0, false
+		return 0, LossMeasured
 	}
 	lost := h.closedSent - h.closedRecvd
-	if lost < 0 {
-		lost = 0
+	if lost <= 0 {
+		return 0, LossMeasured
 	}
-	return float64(lost) / float64(h.closedSent) * 100, false
+	pct = float64(lost) / float64(h.closedSent) * 100
+	if verdict == RateLimitUndetermined && len(h.Nodes) > 0 {
+		return pct, LossProvisional
+	}
+	return pct, LossMeasured
+}
+
+// SettledLoss is the loss figure for decisions that must not act on a number
+// still in doubt, such as alerting: Loss, with provisional loss counted as
+// none.
+func (h *Hop) SettledLoss() float64 {
+	pct, kind := h.Loss()
+	if kind == LossProvisional {
+		return 0
+	}
+	return pct
+}
+
+// FormatLoss renders a loss figure the same way in every view: "12.3%" for a
+// measurement, "~0%†" for echo loss on a rate-limited hop, "85.7%?" while the
+// verdict is not yet possible.
+func FormatLoss(pct float64, kind LossKind) string {
+	switch kind {
+	case LossRateLimited:
+		return fmt.Sprintf("~%.0f%%†", pct)
+	case LossProvisional:
+		return fmt.Sprintf("%.1f%%?", pct)
+	default:
+		return fmt.Sprintf("%.1f%%", pct)
+	}
 }
 
 // ProbeCounts returns the TTL-limited probes sent to this TTL and the replies
@@ -393,6 +448,47 @@ func (t *Table) Snapshot() []*Hop {
 		}
 	}
 	return result
+}
+
+// TargetTTL returns the destination's distance: the lowest TTL at which a
+// node marked as the target has answered, or 0 while it has not.
+func (t *Table) TargetTTL() int {
+	for _, h := range t.Snapshot() {
+		for _, n := range h.GetNodes() {
+			if n.IsTarget() {
+				return h.TTL
+			}
+		}
+	}
+	return 0
+}
+
+// EchoNode is a node to send direct echoes to, and the hop it belongs to.
+type EchoNode struct {
+	IP  net.IP
+	TTL int
+}
+
+// EchoNodes lists the nodes of the path: every known node at every hop up to
+// and including the destination's. Hops beyond the destination are left out.
+// They exist because the first round probes every TTL before the
+// destination's distance is known, and the destination answers each probe
+// that reaches it; sending echoes to those entries would multiply the echo
+// traffic at the destination by the number of unused TTLs.
+func (t *Table) EchoNodes() []EchoNode {
+	target := t.TargetTTL()
+	var out []EchoNode
+	for _, h := range t.Snapshot() {
+		if target > 0 && h.TTL > target {
+			break
+		}
+		for _, n := range h.GetNodes() {
+			if ip := n.GetIP(); ip != nil {
+				out = append(out, EchoNode{IP: ip, TTL: h.TTL})
+			}
+		}
+	}
+	return out
 }
 
 // MaxTTLSeen returns the highest TTL that has been recorded.

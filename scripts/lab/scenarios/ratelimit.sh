@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ICMP error rate limiting on one router:
-#   ratelimit.sh r1
+#   ratelimit.sh r1        (or dst1, dst2: a host that throttles its errors)
 # The router sends at most one ICMP error per second to each destination
 # (Linux icmp_ratelimit; the default mask covers Time Exceeded and Destination
 # Unreachable but not Echo Reply). It keeps forwarding packets and keeps
@@ -16,10 +16,12 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 source "$here/lib.sh"
 lab_require_root
 
-hop=${1:?usage: ratelimit.sh ROUTER}
-case " $LAB_ROUTERS " in
+hop=${1:?usage: ratelimit.sh ROUTER|dst1|dst2}
+# A destination host can be limited too: it then throttles the Port
+# Unreachable errors it sends in answer to UDP probes, and still answers pings.
+case " $LAB_ROUTERS dst1 dst2 " in
   *" $hop "*) ;;
-  *) echo "unknown router $hop" >&2; exit 2 ;;
+  *) echo "unknown router or host $hop" >&2; exit 2 ;;
 esac
 lab_x "$hop" sysctl -qw net.ipv4.icmp_ratelimit=1000
 lab_x "$hop" sysctl -qw net.ipv6.icmp.ratelimit=1000

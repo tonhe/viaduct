@@ -144,7 +144,7 @@ func TestSummary_TruncateSummary(t *testing.T) {
 
 func TestSummary_DestStats_Empty(t *testing.T) {
 	s := newSession("t", net.ParseIP("192.0.2.1"), newTestModel().sessions[0].probeCfg, "udp", 0, 0, 3, true)
-	loss, avg := destStats(s)
+	loss, _, avg := destStats(s)
 	if loss != 0 || avg != 0 {
 		t.Errorf("destStats empty table = (%v, %v), want (0, 0)", loss, avg)
 	}
@@ -233,7 +233,7 @@ func TestSummary_DestStats_TrailingGapHop(t *testing.T) {
 	h2.MarkRoundSent()
 	h2.MarkRoundEnd()
 
-	loss, avg := destStats(s)
+	loss, _, avg := destStats(s)
 	// Should report TTL 1 stats, not TTL 2 zeros.
 	if avg == 0 {
 		t.Errorf("destStats with trailing gap hop: avg = 0, want non-zero (should use last responding hop)")

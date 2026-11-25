@@ -715,14 +715,11 @@ func wireEchoTier(pt tracerIface, table *hop.Table) {
 // table.Snapshot() and is used by both runReportInner and collectReport inside
 // their SetOnRoundEnd closures.
 func collectEchoTargets(table *hop.Table) []probe.EchoTarget {
-	hops := table.Snapshot()
+	// The nodes of the path, up to and including the destination's hop (see
+	// hop.Table.EchoNodes for why later hops are left out).
 	var pairs []probe.EchoTarget
-	for _, h := range hops {
-		for _, node := range h.GetNodes() {
-			if ip := node.GetIP(); ip != nil {
-				pairs = append(pairs, probe.EchoTarget{IP: ip, TTL: h.TTL})
-			}
-		}
+	for _, n := range table.EchoNodes() {
+		pairs = append(pairs, probe.EchoTarget{IP: n.IP, TTL: n.TTL})
 	}
 	return pairs
 }
@@ -986,9 +983,10 @@ func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName st
 	return err
 }
 
-// printReport writes the plain-text traceroute table to stdout. The
-// dagger (†) / tilde (~) rate-limit indicators are driven from each hop's
-// primary PathNode.RateLimitState(); no external ping source is consulted.
+// printReport writes the plain-text traceroute table to stdout. The loss
+// column is each hop's figure as the TUI shows it (hop.Hop.Loss): "~N%†" for
+// echo loss on a rate-limited hop, "N%?" while the cause of the hop's loss is
+// not yet known.
 func printReport(target string, targetIP net.IP, table *hop.Table, resolver *resolve.Resolver, enricher *asn.Enricher, maxTTLHit int, numPaths int, protocolName string) {
 	multipath := numPaths > 1
 
@@ -1064,7 +1062,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 			sort.Slice(nodes, func(i, j int) bool {
 				return nodes[i].GetReceived() > nodes[j].GetReceived()
 			})
-			hopLoss, isRateLimited := h.HeadlineLoss()
+			hopLossStr := hop.FormatLoss(h.Loss())
 			sent := h.Rounds()
 			nodeIdx := 0
 			for _, node := range nodes {
@@ -1097,13 +1095,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
-					if isRateLimited {
-						// Echo-confirmed rate limiting: mark with tilde-and-dagger
-						// so the operator sees the hop loss is an ICMP artifact.
-						lossStr = fmt.Sprintf("~%.0f%%†", hopLoss)
-					} else {
-						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
-					}
+					lossStr = hopLossStr
 					sntStr = fmt.Sprintf("%d", sent)
 				}
 
@@ -1160,16 +1152,7 @@ func printReport(target string, targetIP net.IP, table *hop.Table, resolver *res
 				asnLabel = asnLabel[:20]
 			}
 
-			loss, isRateLimited := h.HeadlineLoss()
-			var lossStr string
-			if isRateLimited {
-				// Echo-confirmed rate limiting: the TTL probe loss is an ICMP
-				// artifact, so show the loss of direct echoes to the hop,
-				// marked with tilde and dagger. Same figure as the TUI.
-				lossStr = fmt.Sprintf("~%.0f%%†", loss)
-			} else {
-				lossStr = fmt.Sprintf("%.1f%%", loss)
-			}
+			lossStr := hop.FormatLoss(h.Loss())
 			sent := h.Rounds()
 			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
 			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0

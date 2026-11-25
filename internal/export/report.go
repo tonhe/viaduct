@@ -29,10 +29,18 @@ type Report struct {
 //
 // Loss is per probe: (ProbesSent - ProbesReceived) / ProbesSent over completed
 // rounds. Sent is the number of rounds, as shown in the Rnd column.
+//
+// HeadlineLoss is the figure the views show, and LossKind says what it is:
+// "measured" (it equals Loss), "rate_limited" (the loss of direct echoes to
+// the hop, because its TTL-probe loss is judged to be rate limiting), or
+// "provisional" (it equals Loss, but there are not yet enough echo samples to
+// say whether that loss is rate limiting).
 type Hop struct {
 	TTL            int     `json:"ttl"`
 	Nodes          []Node  `json:"nodes,omitempty"`
 	Loss           float64 `json:"loss_pct"`
+	HeadlineLoss   float64 `json:"headline_loss_pct"`
+	LossKind       string  `json:"loss_kind,omitempty"`
 	Sent           int     `json:"sent"`
 	ProbesSent     int     `json:"probes_sent"`
 	ProbesReceived int     `json:"probes_received"`
@@ -73,6 +81,17 @@ type NodeProbes struct {
 type ProbeCount struct {
 	Sent     int `json:"sent"`
 	Received int `json:"received"`
+}
+
+func lossKindName(k hop.LossKind) string {
+	switch k {
+	case hop.LossRateLimited:
+		return "rate_limited"
+	case hop.LossProvisional:
+		return "provisional"
+	default:
+		return "measured"
+	}
 }
 
 func rateLimitName(s hop.RateLimitState) string {
@@ -132,9 +151,12 @@ func BuildReport(version string, target string, targetIP net.IP,
 		}
 
 		probesSent, probesRecvd := h.ProbeCounts()
+		headline, lossKind := h.Loss()
 		eh := Hop{
 			TTL:            ttl,
 			Loss:           h.LossPercent(),
+			HeadlineLoss:   headline,
+			LossKind:       lossKindName(lossKind),
 			Sent:           h.Rounds(),
 			ProbesSent:     probesSent,
 			ProbesReceived: probesRecvd,
@@ -170,13 +192,8 @@ func BuildReport(version string, target string, targetIP net.IP,
 				Primary: ProbeCount{Sent: primary.Sent, Received: primary.Received},
 				Echo:    ProbeCount{Sent: echo.Sent, Received: echo.Received},
 			}
-			// The verdict is the hop's (see hop.Hop.RateLimitState); the
-			// destination itself is never rate-limited.
-			if node.IsTarget() {
-				en.RateLimited = rateLimitName(hop.RateLimitNo)
-			} else {
-				en.RateLimited = rateLimitName(h.RateLimitState())
-			}
+			// The verdict is the hop's (see hop.Hop.RateLimitState).
+			en.RateLimited = rateLimitName(h.RateLimitState())
 
 			if en.Hostname == "" && resolver != nil {
 				if name, ok := resolver.Lookup(ip); ok {

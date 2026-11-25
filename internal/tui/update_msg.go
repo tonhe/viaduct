@@ -139,13 +139,11 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 	}
 	// Collect {IP, TTL} pairs and submit to the echo sink for next-round echo probing.
 	if s.echoSink != nil {
+		// The nodes of the path, up to and including the destination's hop
+		// (see hop.Table.EchoNodes for why later hops are left out).
 		var pairs []probe.EchoTarget
-		for _, h := range hops {
-			for _, node := range h.GetNodes() {
-				if ip := node.GetIP(); ip != nil {
-					pairs = append(pairs, probe.EchoTarget{IP: ip, TTL: h.TTL})
-				}
-			}
+		for _, n := range s.table.EchoNodes() {
+			pairs = append(pairs, probe.EchoTarget{IP: n.IP, TTL: n.TTL})
 		}
 		s.echoSink.SubmitEchoTargets(pairs)
 	}
@@ -159,21 +157,7 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 		if s.maxTTLHit > 0 && s.maxTTLHit < maxTTL {
 			maxTTL = s.maxTTLHit
 		}
-		// Find destination hop
-		var destLoss float64
-		var destLatency time.Duration
-		for i := maxTTL; i >= 1; i-- {
-			h, ok := hopMap[i]
-			if !ok || h == nil {
-				continue
-			}
-			pn := h.PrimaryNode()
-			if pn != nil && pn.GetReceived() > 0 {
-				destLoss = h.LossPercent()
-				destLatency = pn.AvgRTT()
-				break
-			}
-		}
+		destLoss, destLatency := destAlertMetrics(hopMap, maxTTL)
 		bell := s.alertEngine.Update(destLoss, destLatency)
 		if bell && s.alertEngine.State() == AlertDegraded {
 			deltas := computeDeltas(hopMap, maxTTL)
