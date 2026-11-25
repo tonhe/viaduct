@@ -265,7 +265,7 @@ func columnKeyHints() []keyHint {
 // statusParts are the pieces of a status bar, in the order they are shown.
 // Empty ones are skipped.
 type statusParts struct {
-	trace   string    // "Tracing... N hops" or "PAUSED": always shown
+	trace   string    // "Tracing... N hops" ("1 hop") or "PAUSED": always shown
 	elapsed string    // "Elapsed: 12s"
 	dns     string    // "DNS: on"
 	flows   string    // "6 flows"
@@ -308,14 +308,18 @@ func (m Model) statusLine(p statusParts) string {
 }
 
 // traceStatus is the first segment of the status bar: PAUSED, or the hop
-// count. The count is the destination's distance once it has answered and the
+// count ("1 hop", otherwise "N hops"). The count is the destination's distance once it has answered and the
 // highest TTL seen until then; the table also holds entries beyond the
 // destination, which are not part of the path (viaduct#105).
 func (m Model) traceStatus(s *TargetSession) string {
 	if m.paused {
 		return "PAUSED"
 	}
-	return "Tracing... " + strconv.Itoa(summaryHops(s)) + " hops"
+	n := summaryHops(s)
+	if n == 1 {
+		return "Tracing... 1 hop"
+	}
+	return "Tracing... " + strconv.Itoa(n) + " hops"
 }
 
 // separatorLine is the rule under the header: the terminal's width, or 60

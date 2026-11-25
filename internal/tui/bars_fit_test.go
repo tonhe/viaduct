@@ -123,3 +123,41 @@ func TestBars_UnchangedWhenTheyFit(t *testing.T) {
 		}
 	}
 }
+
+// The status bar's hop count is pluralised: "1 hop", otherwise "N hops"
+// (viaduct#143).
+func TestTraceStatus_PluralisesTheHopCount(t *testing.T) {
+	tests := []struct {
+		hops int
+		want string
+	}{
+		{0, "Tracing... 0 hops"},
+		{1, "Tracing... 1 hop"},
+		{2, "Tracing... 2 hops"},
+		{12, "Tracing... 12 hops"},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d", tt.hops), func(t *testing.T) {
+			m := multiTargetModel(200, 30, 1, tt.hops)
+			if got := m.traceStatus(m.focused()); got != tt.want {
+				t.Errorf("traceStatus = %q, want %q", got, tt.want)
+			}
+			// The rendered status bar carries the same text, followed by
+			// the next segment and not by a stray "s".
+			lines := strings.Split(strings.TrimRight(stripANSI(m.View()), "\n"), "\n")
+			status := lines[len(lines)-1]
+			if !strings.HasPrefix(status, tt.want+"    ") {
+				t.Errorf("status bar %q does not start with %q", status, tt.want)
+			}
+		})
+	}
+}
+
+// A paused trace shows PAUSED whatever the hop count.
+func TestTraceStatus_Paused(t *testing.T) {
+	m := multiTargetModel(200, 30, 1, 1)
+	m.paused = true
+	if got := m.traceStatus(m.focused()); got != "PAUSED" {
+		t.Errorf("traceStatus = %q, want PAUSED", got)
+	}
+}
