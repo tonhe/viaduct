@@ -16,6 +16,8 @@ make test-all    # what CI runs: build, race tests, coverage gate
 
 `via` opens raw sockets, so running it needs `sudo` or, on Linux, `sudo setcap cap_net_raw+ep ./via`. The unit tests need neither.
 
+A few tests in `internal/probe` open real raw sockets on the loopback addresses and skip without root. `make test-root-build && sudo make test-root` runs them on Linux and macOS, with `VIA_REQUIRE_RAW_SOCKETS=1` set so that a skip is a failure. CI runs them on every pull request.
+
 The network lab (`make lab-build && sudo make lab-test`, or `make lab-docker`) checks `via`'s numbers against real packets on Linux. CI runs it on every pull request.
 
 ## Issues

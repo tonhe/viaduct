@@ -514,6 +514,24 @@ make golden-update
 Then review the diff to `internal/tui/testdata/**/*.golden` and commit
 alongside the code change.
 
+### Root-only tests
+
+A few tests in `internal/probe` open real raw sockets (and `/dev/bpf*` on
+macOS) and send to the loopback addresses, `127.0.0.1` and `::1`. Without
+root they skip, so `make test` and `make test-all` never run them. To run
+them, on Linux or macOS:
+
+```
+make test-root-build     # as your normal user
+sudo make test-root
+```
+
+`make test-root` sets `VIA_REQUIRE_RAW_SOCKETS=1`, which turns those tests'
+skips into failures: a host that cannot open a raw socket, or has no IPv6
+loopback, fails the run instead of passing with the test skipped. CI runs
+them on every pull request: on macOS in the `macos-latest` test job, on
+Linux in the `lab` job.
+
 ### Soak tests (opt-in)
 
 Long-running live-network sweep to catch environmental, timing, and leak
