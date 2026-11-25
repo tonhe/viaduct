@@ -240,7 +240,7 @@ The TUI switches to a **summary+detail layout**: a header row per target shows t
 | <kbd>Tab</kbd> | Move focus to the next target, wrapping from the last to the first |
 | <kbd>j</kbd> / <kbd>k</kbd> | Scroll the focused target's hop table down / up (they do not move focus) |
 | <kbd>Space</kbd> | Mark/unmark target — also selects which panes show in column view |
-| <kbd>c</kbd> | Toggle column view — bordered panes side by side (`# IP Host Avg Loss`), one per target, dividing the terminal width equally; the focused pane has a heavy border |
+| <kbd>c</kbd> | Toggle column view — bordered panes side by side (`# IP Host Avg Loss`), one per target, dividing the terminal width equally; every pane has the same light border, and the focused pane is shown by an accent-colored border and a bold label |
 
 Global keys (`p` pause, `r` reset, `d` display mode) apply to all targets simultaneously.
 

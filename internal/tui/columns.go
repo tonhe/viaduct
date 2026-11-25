@@ -45,8 +45,8 @@ func paneBorderStyle(focused bool) lipgloss.Style {
 // columnTargets picks which session indices the column view shows, in order.
 // If any session is marked (and not errored), only marked sessions are shown.
 // Otherwise as many non-errored sessions as fit the terminal width (up to
-// maxPanes) are shown. The focused session is always included so its heavy
-// border is visible. Errored sessions are always excluded.
+// maxPanes) are shown. The focused session is always included so its
+// accent-colored border is visible. Errored sessions are always excluded.
 func (m Model) columnTargets() []int {
 	// n panes need n*minPaneWidth + (n-1) gap columns, so fit = (width+1)/(minPaneWidth+1).
 	fit := (m.width + 1) / (minPaneWidth + 1)
@@ -163,7 +163,8 @@ func computePaneLayout(inner, needIP int) paneLayout {
 
 // renderColumns renders the side-by-side comparison view: one bordered pane per
 // selected target, panes dividing the terminal width equally. The focused pane
-// uses a heavy border. A "+N more" line appears when targets are cut off.
+// is shown by an accent-colored border and a bold label; every pane uses the
+// light border. A "+N more" line appears when targets are cut off.
 func (m Model) renderColumns() string {
 	idxs := m.columnTargets()
 	if len(idxs) == 0 {
