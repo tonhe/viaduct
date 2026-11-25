@@ -27,7 +27,9 @@ import (
 )
 
 var (
-	version      = "0.2.0"
+	// version is injected by release builds (-ldflags "-X main.version=<tag>").
+	// Left at "dev", it is replaced at startup from the build info; see version.go.
+	version      = "dev"
 	buildVersion = "dev" // injected at build time via -ldflags
 )
 
@@ -510,7 +512,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create TUI model using NewMulti (works for 1 or N sessions).
-	versionStr := "v" + version + " (" + buildVersion + ")"
+	versionStr := displayVersion(version) + " (" + buildVersion + ")"
 	model := tui.NewMulti(specs, versionStr, noASN, alertLoss, alertLatency, alertRounds, noAlert, appCfg)
 
 	// Create bubbletea program AFTER model is fully wired.
@@ -650,7 +652,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 	}
 
 	// Multi-target path.
-	versionStr := "v" + version + " (" + buildVersion + ")"
+	versionStr := displayVersion(version) + " (" + buildVersion + ")"
 	// A target that fails does not stop the others. Its error goes to stderr,
 	// it stays in structured output with the error and no hops, and the run
 	// as a whole fails so the exit status is non-zero.
@@ -994,7 +996,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	}
 
 	if outputFmt != "" {
-		versionStr := "v" + version + " (" + buildVersion + ")"
+		versionStr := displayVersion(version) + " (" + buildVersion + ")"
 		report := export.BuildReport(versionStr, target, targetIP, protocolName, table, resolver, enricher, maxTTL)
 		switch outputFmt {
 		case "json":
