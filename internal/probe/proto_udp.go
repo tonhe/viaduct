@@ -3,6 +3,14 @@ package probe
 import (
 	"encoding/binary"
 	"net"
+	"os"
+	"sync"
+)
+
+// EXPERIMENT ONLY, not for merge: see BuildProbe.
+var (
+	expNoUDPChecksumOnce sync.Once
+	expNoUDPChecksum     bool
 )
 
 // udpChecksumV6 computes the UDP checksum for an IPv6 datagram: the RFC 1071
@@ -70,7 +78,15 @@ func (p *UDPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 	// IPv4 but unusual enough that middleboxes may drop it, so IPv4 probes
 	// carry one too. If either address is unknown (or is not of the probe's
 	// family) the checksum cannot be computed and the field stays zero.
-	if cfg.SourceIP != nil && cfg.TargetIP != nil {
+	// EXPERIMENT ONLY, not for merge: a file named via-exp-no-udp-checksum in
+	// the working directory leaves the checksum field zero, as v0.2.1 did, to
+	// test whether the checksum is what changed the IPv6 UDP result on macOS
+	// (viaduct#115).
+	expNoUDPChecksumOnce.Do(func() {
+		_, err := os.Stat("via-exp-no-udp-checksum")
+		expNoUDPChecksum = err == nil
+	})
+	if !expNoUDPChecksum && cfg.SourceIP != nil && cfg.TargetIP != nil {
 		switch {
 		case cfg.IPVersion == 6:
 			binary.BigEndian.PutUint16(pkt[6:8], udpChecksumV6(cfg.SourceIP, cfg.TargetIP, pkt))
