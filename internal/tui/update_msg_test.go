@@ -752,13 +752,6 @@ func (f *fakeEchoSink) SubmitEchoTargets(targets []probe.EchoTarget) {
 	f.submitted = append(f.submitted, targets...)
 }
 
-// withEchoSink injects a fake echoSink into session 0.
-func withEchoSink(sink echoSinkIface) testOpt {
-	return func(m *Model) {
-		m.sessions[0].echoSink = sink
-	}
-}
-
 // Hops beyond the destination are not echo targets: the destination is
 // recorded there only because round one probes every TTL.
 func TestOnRoundEnd_NoEchoTargetsBeyondTheDestination(t *testing.T) {
