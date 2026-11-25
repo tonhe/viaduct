@@ -436,20 +436,59 @@ func TestTCPRepliesSlowerThanTheProbeGap(t *testing.T) {
 }
 
 // Real loss is not rate limiting. Every 5th reply of every type from r3 is
-// dropped, echoes included, so TTL probe loss and echo loss are both exactly
-// 20%. Ten runs; nothing may be flagged in any of them.
+// dropped, echoes included, so TTL probe loss and echo loss are both a fifth,
+// and nothing may be flagged.
+//
+// 60 rounds, so that the test can fail (viaduct#78). The verdict needs
+// z >= 2.58. If via did not count the lost echoes, r3 would show a fifth of
+// its TTL probes lost against no echo lost: z = 3.6 in ICMP mode (12 of 60
+// against 0 of 59) and 3.8 in UDP mode (84 of 420 against 0 of 59), and r3
+// would be flagged. At 25 rounds the same mistake reaches only 2.3 and 2.4,
+// and passes.
+//
+// The premise is asserted too: via's TTL-probe and echo counts for r3 are the
+// kernel's counters, exactly.
 func TestRealLossIsNeverFlaggedAsRateLimiting(t *testing.T) {
-	const rounds = 25
-	runs := map[string]int{"icmp": 10, "udp": 3} // udp rounds are slower; the rule is the same
+	const rounds = 60
+	runs := map[string]int{"udp": 2, "icmp": 4} // udp rounds are slower; the rule is the same
 	for _, m := range modes[:2] {
 		t.Run(m.name, func(t *testing.T) {
 			for run := 1; run <= runs[m.name]; run++ {
 				reset(t)
 				script(t, "scenarios/drop-replies.sh", "r3", "5")
 				r := via(t, traceArgs(m, rounds, dst1V4)...)
+				c := counters(t, "r2", "ip")
+
+				// TTL probes at r3: sent, and answered, against the counters.
+				seen, dropped := c["seen_ttl_icmp"], c["drop_ttl_icmp"]
+				if m.primary != "" {
+					seen, dropped = seen+c["seen_ttl_"+m.primary], dropped+c["drop_ttl_"+m.primary]
+				}
+				sent := rounds * m.perRound
+				if seen != sent || dropped != sent/5 {
+					t.Fatalf("run %d: TTL replies from r3: seen %d dropped %d, want %d and %d", run, seen, dropped, sent, sent/5)
+				}
 				h3 := hopByTTL(t, r, 3)
-				if h3.ProbesReceived >= h3.ProbesSent {
-					t.Fatalf("run %d: no loss at r3 (%d/%d); the drop rule did not take effect", run, h3.ProbesReceived, h3.ProbesSent)
+				wantHop(t, h3, r3V4, rounds, sent, seen-dropped)
+
+				// Echoes to r3: one a round from round two, a fifth of the
+				// replies dropped, and via reports exactly that.
+				echoSeen, echoDropped := c["seen_echo"], c["drop_echo"]
+				if echoSeen != rounds-1 || echoDropped != echoSeen/5 {
+					t.Fatalf("run %d: Echo Replies from r3: seen %d dropped %d, want %d and %d",
+						run, echoSeen, echoDropped, rounds-1, (rounds-1)/5)
+				}
+				if len(h3.Nodes) == 1 {
+					echo := h3.Nodes[0].Probes.Echo
+					if echo.Sent != echoSeen || echo.Received != echoSeen-echoDropped {
+						t.Errorf("run %d: r3 echo sent/received = %d/%d, counters say %d/%d",
+							run, echo.Sent, echo.Received, echoSeen, echoSeen-echoDropped)
+					}
+				}
+				// Enough echo samples for a verdict, and the verdict is "real".
+				if h3.LossKind != "measured" || h3.HeadlineLoss != h3.Loss {
+					t.Errorf("run %d: r3 loss_kind %q headline %.2f raw %.2f; want measured, and the raw figure shown",
+						run, h3.LossKind, h3.HeadlineLoss, h3.Loss)
 				}
 				for _, h := range r.Hops {
 					for _, node := range h.Nodes {
