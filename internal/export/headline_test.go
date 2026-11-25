@@ -111,29 +111,38 @@ var wantCSVHeader = []string{
 	"icmp_ttl_sent", "icmp_ttl_received",
 	"primary_sent", "primary_received",
 	"echo_sent", "echo_received",
+	"error",
 }
 
 // wantHeadlineRows is the data rows WriteCSV must produce for headlineReport.
 var wantHeadlineRows = [][]string{
 	{"1", "192.0.2.1", "r1.example", "64496", "EXAMPLE-A", "0.0", "42", "42",
 		"1.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"0.0", "measured", "no", "21", "21", "21", "21", "21", "21"},
+		"0.0", "measured", "no", "21", "21", "21", "21", "21", "21", ""},
 	{"2", "192.0.2.2", "", "64497", "EXAMPLE-B", "85.7", "42", "6",
 		"2.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"0.0", "rate_limited", "yes", "21", "4", "21", "2", "21", "21"},
+		"0.0", "rate_limited", "yes", "21", "4", "21", "2", "21", "21", ""},
 	{"3", "198.51.100.3", "", "0", "", "85.7", "14", "2",
 		"3.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"85.7", "provisional", "undetermined", "7", "1", "7", "1", "7", "7"},
+		"85.7", "provisional", "undetermined", "7", "1", "7", "1", "7", "7", ""},
 	// The silent hop: no node fields, the hop's own figures.
 	{"4", "*", "", "", "", "100.0", "42", "0",
 		"", "", "", "", "", "", "", "", "",
-		"100.0", "measured", "", "", "", "", "", "", ""},
+		"100.0", "measured", "", "", "", "", "", "", "", ""},
 	{"5", "203.0.113.5", "", "64496", "EXAMPLE-A", "0.0", "42", "22",
 		"5.50", "0.00", "0.00", "0.00", "0.00", "0.00", "0;2", "0.0", "",
-		"0.0", "measured", "no", "21", "11", "21", "11", "21", "21"},
+		"0.0", "measured", "no", "21", "11", "21", "11", "21", "21", ""},
 	{"5", "203.0.113.6", "", "0", "", "0.0", "42", "20",
 		"6.50", "0.00", "0.00", "0.00", "0.00", "0.00", "1", "0.0", "",
-		"0.0", "measured", "no", "21", "10", "21", "10", "21", "20"},
+		"0.0", "measured", "no", "21", "10", "21", "10", "21", "20", ""},
+}
+
+// failedRow is the CSV row (without the target column) of a target that could
+// not be traced: every column empty but error.
+func failedRow(msg string) []string {
+	row := make([]string, len(wantCSVHeader))
+	row[len(row)-1] = msg
+	return row
 }
 
 func withTarget(target string, rows [][]string) [][]string {
@@ -147,11 +156,12 @@ func withTarget(target string, rows [][]string) [][]string {
 func TestCSV_HeadlineLossAndProbeCounts(t *testing.T) {
 	multiWant := [][]string{append([]string{"target"}, wantCSVHeader...)}
 	multiWant = append(multiWant, withTarget("a.example", wantHeadlineRows)...)
-	// bad.example failed: it has no hops and contributes no rows.
+	// bad.example failed: one row with its name and error, nothing else.
+	multiWant = append(multiWant, append([]string{"bad.example"}, failedRow("no such host")...))
 	multiWant = append(multiWant, []string{"b.example",
 		"1", "198.51.100.77", "", "0", "", "50.0", "14", "7",
 		"7.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"50.0", "measured", "undetermined", "14", "7", "0", "0", "7", "7"})
+		"50.0", "measured", "undetermined", "14", "7", "0", "0", "7", "7", ""})
 
 	tests := []struct {
 		name  string
@@ -233,9 +243,13 @@ func TestCSV_UnprobedTTLRowIsBlank(t *testing.T) {
 	}
 }
 
-// A multi-target export in which every target failed is a header and no rows.
-func TestWriteCSVMulti_FailedTargetHasNoRows(t *testing.T) {
+// A failed target is one row with its name and error; a good target's rows
+// have an empty error column.
+func TestWriteCSVMulti_FailedTargetHasErrorRow(t *testing.T) {
+	good := Report{Target: "good.example", Hops: []Hop{{TTL: 1, LossKind: "measured", ProbesSent: 2, ProbesReceived: 2,
+		Nodes: []Node{{IP: "192.0.2.1", Sent: 2, Received: 2}}}}}
 	m := MultiReport{Targets: []Report{
+		good,
 		{Target: "bad.example", Error: "no such host"},
 		{Target: "worse.example", Error: "trace failed"},
 	}}
@@ -245,10 +259,71 @@ func TestWriteCSVMulti_FailedTargetHasNoRows(t *testing.T) {
 	}
 	got, err := csv.NewReader(&buf).ReadAll()
 	if err != nil {
+		t.Fatalf("output is not a rectangular CSV: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("rows = %d, want header + 1 good + 2 failed\n%q", len(got), got)
+	}
+	last := len(got[0]) - 1
+	if got[0][last] != "error" {
+		t.Errorf("last header column = %q, want error", got[0][last])
+	}
+	if got[1][0] != "good.example" || got[1][2] != "192.0.2.1" || got[1][last] != "" {
+		t.Errorf("good row = %q, want good.example, its node and an empty error", got[1])
+	}
+	for i, want := range []struct{ target, msg string }{
+		{"bad.example", "no such host"},
+		{"worse.example", "trace failed"},
+	} {
+		wantRow := append([]string{want.target}, failedRow(want.msg)...)
+		if !reflect.DeepEqual(got[i+2], wantRow) {
+			t.Errorf("failed row %d:\n got %q\nwant %q", i, got[i+2], wantRow)
+		}
+	}
+}
+
+// A single-target report that carries an error is written the same way.
+func TestWriteCSV_ErrorRow(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteCSV(&buf, Report{Target: "bad.example", Error: "no such host"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0][0] != "target" {
-		t.Errorf("rows = %q, want the header only", got)
+	got, err := csv.NewReader(&buf).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{wantCSVHeader, failedRow("no such host")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows = %q, want %q", got, want)
+	}
+}
+
+// Single- and multi-target CSV have the same columns apart from the leading
+// target, and error is the last of them.
+func TestCSV_SingleAndMultiSameColumns(t *testing.T) {
+	var single, multi bytes.Buffer
+	if err := WriteCSV(&single, headlineReport("a.example")); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCSVMulti(&multi, headlineMulti()); err != nil {
+		t.Fatal(err)
+	}
+	s, err := csv.NewReader(&single).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := csv.NewReader(&multi).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) == 0 || m[0] != "target" {
+		t.Fatalf("multi header = %q, want a leading target column", m)
+	}
+	if !reflect.DeepEqual(m[1:], s) {
+		t.Errorf("multi columns after target = %q, single columns = %q", m[1:], s)
+	}
+	if s[len(s)-1] != "error" {
+		t.Errorf("last column = %q, want error", s[len(s)-1])
 	}
 }
 
