@@ -70,10 +70,15 @@ func (p *UDPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 	// IPv4 but unusual enough that middleboxes may drop it, so IPv4 probes
 	// carry one too. If either address is unknown (or is not of the probe's
 	// family) the checksum cannot be computed and the field stays zero.
-	if cfg.SourceIP != nil && cfg.TargetIP != nil {
+	//
+	// On an IPv6 send socket with IPV6_CHECKSUM the kernel fills the field,
+	// over the source address it really sends from, and it is left zero here
+	// (checksum6.go).
+	kernelFills := cfg.IPVersion == 6 && cfg.kernelChecksum
+	if !kernelFills && cfg.SourceIP != nil && cfg.TargetIP != nil {
 		switch {
 		case cfg.IPVersion == 6:
-			binary.BigEndian.PutUint16(pkt[6:8], udpChecksumV6(cfg.SourceIP, cfg.TargetIP, pkt))
+			binary.BigEndian.PutUint16(pkt[udpChecksumOffset:], udpChecksumV6(cfg.SourceIP, cfg.TargetIP, pkt))
 		case cfg.SourceIP.To4() != nil && cfg.TargetIP.To4() != nil:
 			binary.BigEndian.PutUint16(pkt[6:8], udpChecksumV4(cfg.SourceIP, cfg.TargetIP, pkt))
 		}
