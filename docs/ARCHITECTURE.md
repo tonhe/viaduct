@@ -97,7 +97,11 @@ Each match becomes a `probe.Result` with the TTL, responder address, RTT, flow I
 
 **Per-node, per-probe-type stats** (`ProbeStats`) are kept for ICMP TTL, primary and echo probes. The two TTL-limited kinds are counted by round at node level, because a TTL-limited probe is addressed to a hop distance and not to a node: sent is the number of rounds the node was known, and a round counts as answered if the node replied in it. The echo kind counts actual sends and replies. Echo replies update only the echo slot. They don't feed RTT averages, jitter or the hop's loss.
 
-**Rate-limit verdict.** `PathNode.RateLimitState` returns undetermined, no or yes. It is undetermined until 20 echo probes have been sent to the node. After that it is yes when the node's ICMP TTL-probe loss exceeds its echo loss by a two-proportion z-test at z >= 2.58 (p < 0.01). The destination node is never yes. `Hop.HeadlineLoss` returns the echo loss for a hop whose primary node is rate-limited and the per-probe loss otherwise.
+**Rate-limit verdict.** The verdict is made for the hop: `Hop.RateLimitState` returns undetermined, no or yes. It compares every TTL-limited probe sent to the hop, of every type, with every echo sent to the hop's nodes. It is undetermined until 20 echoes have been sent to the hop's nodes. After that it is yes when the TTL-probe loss exceeds the echo loss by a two-proportion z-test at z >= 2.58 (p < 0.01). The destination is judged the same way as any other hop.
+
+**The figure shown.** `Hop.Loss` returns the figure every view shows and its kind: echo loss for a rate-limited hop (`~N%†`), TTL-probe loss marked provisional while the verdict is undetermined and there is loss (`N%?`), and plain TTL-probe loss otherwise. `hop.FormatLoss` renders it. Alerting uses `Hop.SettledLoss`, which counts provisional loss as none.
+
+**Hops beyond the destination.** Round one probes every TTL, so the destination is recorded at its own TTL and at every TTL beyond; those entries never update again. `Table.TargetTTL` gives the destination's distance, `Table.EchoNodes` stops there, and views and exports read nothing past it.
 
 **Sparkline samples.** At each round end a node records one sample: its average RTT that round if a TTL-limited probe was answered, else the echo RTT if an echo was answered, else a "held" marker if the node is rate-limited and wasn't echoed that round, else a drop. The last 28 samples are kept.
 
