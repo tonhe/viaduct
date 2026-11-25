@@ -296,7 +296,7 @@ func TestDOT_LabelShowsHeadlineLoss(t *testing.T) {
 				return "ip_" + strings.ReplaceAll(ip, ".", "_")
 			},
 			gapID:  "gap_a_example_4",
-			extras: []string{`ip_198_51_100_77 [label="198.51.100.77\\navg=7.5ms loss=50.0%"];`},
+			extras: []string{`ip_198_51_100_77 [label="198.51.100.77\navg=7.5ms loss=50.0%"];`},
 		},
 	}
 	for _, tc := range tests {
@@ -308,12 +308,12 @@ func TestDOT_LabelShowsHeadlineLoss(t *testing.T) {
 			out := buf.String()
 
 			want := []string{
-				tc.id(1, "192.0.2.1") + ` [label="192.0.2.1\\nr1.example\\navg=1.5ms loss=0.0%"];`,
-				tc.id(2, "192.0.2.2") + ` [label="192.0.2.2\\navg=2.5ms loss=~0%†"];`,
-				tc.id(3, "198.51.100.3") + ` [label="198.51.100.3\\navg=3.5ms loss=85.7%?"];`,
-				tc.gapID + ` [label="TTL 4\\n* * *", style=dashed`,
-				tc.id(5, "203.0.113.5") + ` [label="203.0.113.5\\navg=5.5ms loss=0.0%"];`,
-				tc.id(5, "203.0.113.6") + ` [label="203.0.113.6\\navg=6.5ms loss=0.0%"];`,
+				tc.id(1, "192.0.2.1") + ` [label="192.0.2.1\nr1.example\navg=1.5ms loss=0.0%"];`,
+				tc.id(2, "192.0.2.2") + ` [label="192.0.2.2\navg=2.5ms loss=~0%†"];`,
+				tc.id(3, "198.51.100.3") + ` [label="198.51.100.3\navg=3.5ms loss=85.7%?"];`,
+				tc.gapID + ` [label="TTL 4\n* * *", style=dashed`,
+				tc.id(5, "203.0.113.5") + ` [label="203.0.113.5\navg=5.5ms loss=0.0%"];`,
+				tc.id(5, "203.0.113.6") + ` [label="203.0.113.6\navg=6.5ms loss=0.0%"];`,
 			}
 			want = append(want, tc.extras...)
 			for _, s := range want {

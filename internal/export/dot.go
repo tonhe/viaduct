@@ -26,14 +26,43 @@ func formatHeadline(pct float64, kind string) string {
 	return hop.FormatLoss(pct, k)
 }
 
-// dotNodeLabel is the label of a responding node: IP, hostname if known, the
-// node's average RTT and its hop's headline loss.
-func dotNodeLabel(h Hop, n Node) string {
-	label := n.IP
-	if n.Hostname != "" {
-		label += fmt.Sprintf("\\n%s", n.Hostname)
+// dotEscaper escapes text for use inside a DOT double-quoted string.
+// Backslashes are doubled so Graphviz does not read data as one of its label
+// escapes (\n, \l, \N, ...), double quotes are escaped so they cannot end the
+// string early, and raw line breaks become DOT's \n escape.
+var dotEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	`"`, `\"`,
+	"\r\n", `\n`,
+	"\n", `\n`,
+	"\r", `\n`,
+)
+
+// dotQuote returns s as a DOT double-quoted string. Unlike Go's %q it follows
+// DOT's escaping rules and leaves non-ASCII text as it is.
+func dotQuote(s string) string {
+	return `"` + dotEscaper.Replace(s) + `"`
+}
+
+// dotLabel returns a DOT double-quoted label whose lines are separated by
+// DOT's \n line-break escape. Each line is escaped as dotQuote does.
+func dotLabel(lines ...string) string {
+	esc := make([]string, len(lines))
+	for i, l := range lines {
+		esc[i] = dotEscaper.Replace(l)
 	}
-	return label + fmt.Sprintf("\\navg=%.1fms loss=%s", n.RTT.Avg, formatHeadline(h.HeadlineLoss, h.LossKind))
+	return `"` + strings.Join(esc, `\n`) + `"`
+}
+
+// dotNodeLabel is the quoted label of a responding node: IP, hostname if
+// known, the node's average RTT and its hop's headline loss, one per line.
+func dotNodeLabel(h Hop, n Node) string {
+	lines := []string{n.IP}
+	if n.Hostname != "" {
+		lines = append(lines, n.Hostname)
+	}
+	lines = append(lines, fmt.Sprintf("avg=%.1fms loss=%s", n.RTT.Avg, formatHeadline(h.HeadlineLoss, h.LossKind)))
+	return dotLabel(lines...)
 }
 
 // sortedASNs returns the keys of an ASN-keyed map in ascending order, so the
@@ -52,7 +81,7 @@ func sortedASNs[V any](m map[int]V) []int {
 // rendered as dashed circles. Edges connect consecutive TTLs.
 // A node's label carries its hop's headline loss (see formatHeadline).
 func WriteDOT(w io.Writer, r Report) error {
-	fmt.Fprintf(w, "digraph %q {\n", "via → "+r.Target)
+	fmt.Fprintf(w, "digraph %s {\n", dotQuote("via → "+r.Target))
 	fmt.Fprintln(w, "  rankdir=TB;")
 	fmt.Fprintln(w, "  node [shape=box, style=filled, fillcolor=\"#e8e8e8\", fontname=\"monospace\", fontsize=10];")
 	fmt.Fprintln(w, "  edge [fontname=\"monospace\", fontsize=9];")
@@ -75,7 +104,7 @@ func WriteDOT(w io.Writer, r Report) error {
 	for _, h := range r.Hops {
 		if len(h.Nodes) == 0 {
 			gapID := fmt.Sprintf("gap_%d", h.TTL)
-			gapLabel := fmt.Sprintf("TTL %d\\n* * *", h.TTL)
+			gapLabel := dotLabel(fmt.Sprintf("TTL %d", h.TTL), "* * *")
 			gapNodes = append(gapNodes, nodeInfo{id: gapID, label: gapLabel})
 			orderedTTLs = append(orderedTTLs, ttlNodes{ids: []string{gapID}})
 			continue
@@ -101,13 +130,13 @@ func WriteDOT(w io.Writer, r Report) error {
 		nodes := asnGroups[asNum]
 		orgName := asnNames[asNum]
 		fmt.Fprintf(w, "  subgraph cluster_AS%d {\n", asNum)
-		fmt.Fprintf(w, "    label=%q;\n", fmt.Sprintf("AS%d (%s)", asNum, orgName))
+		fmt.Fprintf(w, "    label=%s;\n", dotQuote(fmt.Sprintf("AS%d (%s)", asNum, orgName)))
 		fmt.Fprintln(w, "    style=dashed;")
 		fmt.Fprintln(w, "    color=\"#888888\";")
 		fmt.Fprintln(w, "    fontname=\"monospace\";")
 		fmt.Fprintln(w, "    fontsize=11;")
 		for _, n := range nodes {
-			fmt.Fprintf(w, "    %s [label=%q];\n", n.id, n.label)
+			fmt.Fprintf(w, "    %s [label=%s];\n", n.id, n.label)
 		}
 		fmt.Fprintln(w, "  }")
 		fmt.Fprintln(w)
@@ -115,12 +144,12 @@ func WriteDOT(w io.Writer, r Report) error {
 
 	// Ungrouped nodes (no ASN)
 	for _, n := range ungrouped {
-		fmt.Fprintf(w, "  %s [label=%q];\n", n.id, n.label)
+		fmt.Fprintf(w, "  %s [label=%s];\n", n.id, n.label)
 	}
 
 	// Gap hop nodes
 	for _, n := range gapNodes {
-		fmt.Fprintf(w, "  %s [label=%q, style=dashed, shape=ellipse, fillcolor=\"#f0f0f0\"];\n", n.id, n.label)
+		fmt.Fprintf(w, "  %s [label=%s, style=dashed, shape=ellipse, fillcolor=\"#f0f0f0\"];\n", n.id, n.label)
 	}
 	fmt.Fprintln(w)
 

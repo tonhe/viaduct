@@ -59,7 +59,7 @@ func WriteCSVMulti(w io.Writer, m MultiReport) error {
 //     are unrelated; merging them would falsely imply a shared router.
 func WriteDOTMulti(w io.Writer, m MultiReport) error {
 	title := "via → multi-target"
-	fmt.Fprintf(w, "digraph %q {\n", title)
+	fmt.Fprintf(w, "digraph %s {\n", dotQuote(title))
 	fmt.Fprintln(w, "  rankdir=TB;")
 	fmt.Fprintln(w, "  node [shape=box, style=filled, fillcolor=\"#e8e8e8\", fontname=\"monospace\", fontsize=10];")
 	fmt.Fprintln(w, "  edge [fontname=\"monospace\", fontsize=9];")
@@ -105,7 +105,7 @@ func WriteDOTMulti(w io.Writer, m MultiReport) error {
 				gapID := fmt.Sprintf("gap_%s_%d", sanitizedTarget, h.TTL)
 				if !seenNodes[gapID] {
 					seenNodes[gapID] = true
-					gapLabel := fmt.Sprintf("TTL %d\\n* * *", h.TTL)
+					gapLabel := dotLabel(fmt.Sprintf("TTL %d", h.TTL), "* * *")
 					gapNodes = append(gapNodes, nodeInfo{id: gapID, label: gapLabel})
 				}
 				orderedTTLs = append(orderedTTLs, ttlNodes{ids: []string{gapID}})
@@ -157,13 +157,13 @@ func WriteDOTMulti(w io.Writer, m MultiReport) error {
 		nodes := asnGroups[asNum]
 		orgName := asnNames[asNum]
 		fmt.Fprintf(w, "  subgraph cluster_AS%d {\n", asNum)
-		fmt.Fprintf(w, "    label=%q;\n", fmt.Sprintf("AS%d (%s)", asNum, orgName))
+		fmt.Fprintf(w, "    label=%s;\n", dotQuote(fmt.Sprintf("AS%d (%s)", asNum, orgName)))
 		fmt.Fprintln(w, "    style=dashed;")
 		fmt.Fprintln(w, "    color=\"#888888\";")
 		fmt.Fprintln(w, "    fontname=\"monospace\";")
 		fmt.Fprintln(w, "    fontsize=11;")
 		for _, n := range nodes {
-			fmt.Fprintf(w, "    %s [label=%q];\n", n.id, n.label)
+			fmt.Fprintf(w, "    %s [label=%s];\n", n.id, n.label)
 		}
 		fmt.Fprintln(w, "  }")
 		fmt.Fprintln(w)
@@ -171,12 +171,12 @@ func WriteDOTMulti(w io.Writer, m MultiReport) error {
 
 	// Emit ungrouped nodes.
 	for _, n := range ungrouped {
-		fmt.Fprintf(w, "  %s [label=%q];\n", n.id, n.label)
+		fmt.Fprintf(w, "  %s [label=%s];\n", n.id, n.label)
 	}
 
 	// Emit gap nodes.
 	for _, n := range gapNodes {
-		fmt.Fprintf(w, "  %s [label=%q, style=dashed, shape=ellipse, fillcolor=\"#f0f0f0\"];\n", n.id, n.label)
+		fmt.Fprintf(w, "  %s [label=%s, style=dashed, shape=ellipse, fillcolor=\"#f0f0f0\"];\n", n.id, n.label)
 	}
 	fmt.Fprintln(w)
 
