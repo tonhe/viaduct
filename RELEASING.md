@@ -4,7 +4,7 @@ How viaduct versions are numbered, when a release is cut, and how work gets from
 
 ## Versions
 
-The git tag is the only source of the version. The release build injects it into the binary, and the release workflow fails if the built binary's `--version` does not contain the tag. `make build` injects `git describe` (the tag on a tagged commit, `tag-N-gHASH` after it, `-dirty` for a modified tree). A build that injects nothing reports what the Go toolchain recorded: the module version or the VCS revision (`cmd/via/version.go`).
+The git tag is the only source of the version. The release build injects it into the binary. Before anything is published, the release workflow builds one linux/amd64 binary with the release's build settings and fails if its `--version` does not report exactly the tag without the leading `v`. `make build` injects `git describe` (the tag on a tagged commit, `tag-N-gHASH` after it, `-dirty` for a modified tree). A build that injects nothing reports what the Go toolchain recorded: the module version or the VCS revision (`cmd/via/version.go`).
 
 While the project is on 0.x:
 
@@ -50,7 +50,7 @@ GitHub releases are the project's changelog. There is no `CHANGELOG.md` in the r
 
 Tagging and approving the `release` environment are always the owner's. No agent tags a release or approves the environment.
 
-The mechanics after a `v*` tag is pushed are in `.github/workflows/release.yml`: the workflow waits for approval in the `release` environment, then GoReleaser builds archives for macOS, Linux and Windows on amd64 and arm64 plus `.deb` and `.rpm` packages and checksums, the Windows installers are built and attached, and the Homebrew tap formula is updated.
+The mechanics after a `v*` tag is pushed are in `.github/workflows/release.yml`: the workflow waits for approval in the `release` environment, then builds one linux/amd64 binary (`goreleaser build --single-target`) and checks that its `--version` reports the tag. A mismatch fails the run there, with no release, archive or tap update made. Only after that check does GoReleaser (`goreleaser release`) build archives for macOS, Linux and Windows on amd64 and arm64 plus `.deb` and `.rpm` packages and checksums, the Windows installers are built and attached, and the Homebrew tap formula is updated.
 
 ## Where the tooling differs from this policy today
 
