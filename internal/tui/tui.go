@@ -340,8 +340,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the TUI.
+// View renders the TUI: the frame for the current view, never taller than the
+// terminal.
 func (m Model) View() string {
+	return clipFrame(m.renderView(), m.height)
+}
+
+// clipFrame cuts a frame to at most height lines. The last line is kept, since
+// it is the status bar; the lines above it are cut from the bottom. A frame
+// taller than the terminal scrolls the header off the top, which is what
+// happened when the summary panel of a 16-target session left no room on a
+// short terminal. A height of zero or less means the size is not known yet.
+func clipFrame(frame string, height int) string {
+	if height <= 0 {
+		return frame
+	}
+	// A frame may end with a newline; that is not an extra line.
+	body := strings.TrimSuffix(frame, "\n")
+	lines := strings.Split(body, "\n")
+	if len(lines) <= height {
+		return frame
+	}
+	kept := append(lines[:height-1:height-1], lines[len(lines)-1])
+	return strings.Join(kept, "\n") + frame[len(body):]
+}
+
+// renderView renders the frame for the current view at whatever height it
+// comes to; View clips it.
+func (m Model) renderView() string {
 	if m.err != nil {
 		return m.errorView()
 	}
@@ -582,7 +608,7 @@ func (m Model) View() string {
 	}
 
 	if alertLine != "" {
-		b.WriteString(lineBg(alertStyle().Render(alertLine), m.width))
+		b.WriteString(lineBg(alertStyle().Render(m.fitLine(alertLine)), m.width))
 		b.WriteString("\n")
 	}
 
@@ -1561,9 +1587,19 @@ func computeIPColWidth(hops []*hop.Hop) int {
 	return w
 }
 
-// FinalSummary returns a plain-text summary table for printing to stdout after the TUI exits.
+// FinalSummary returns the plain-text summary printed to stdout after the TUI
+// exits: one table per target, in session order, separated by a blank line. A
+// target that failed to start gets its error line.
 func (m Model) FinalSummary() string {
-	s := m.focused()
+	parts := make([]string, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		parts = append(parts, m.finalSummaryFor(s))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// finalSummaryFor returns the summary table for one target.
+func (m Model) finalSummaryFor(s *TargetSession) string {
 	var b strings.Builder
 
 	// Guard: if the session failed to resolve (errored spec), emit a short error
