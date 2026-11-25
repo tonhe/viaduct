@@ -17,7 +17,7 @@ func headlineReport(target string) Report {
 	return Report{
 		Version: "test", Target: target, TargetIP: "203.0.113.9", Protocol: "udp", Probes: 182,
 		Hops: []Hop{
-			{TTL: 1, Loss: 0, HeadlineLoss: 0, LossKind: "measured", Rounds: 21, Sent: 42, ProbesSent: 42, ProbesReceived: 42,
+			{TTL: 1, Loss: 0, HeadlineLoss: 0, LossKind: "measured", Rounds: 21, Sent: 42, ProbesSent: 42, ProbesReceived: 42, EchoSent: 21, EchoReceived: 21,
 				Nodes: []Node{{
 					IP: "192.0.2.1", Hostname: "r1.example", ASN: 64496, ASOrg: "EXAMPLE-A",
 					RTT: RTTStats{Avg: 1.5}, Loss: 0, Sent: 42, Received: 42,
@@ -28,7 +28,7 @@ func headlineReport(target string) Report {
 					},
 					RateLimited: "no",
 				}}},
-			{TTL: 2, Loss: 85.7, HeadlineLoss: 0, LossKind: "rate_limited", Rounds: 21, Sent: 42, ProbesSent: 42, ProbesReceived: 6,
+			{TTL: 2, Loss: 85.7, HeadlineLoss: 0, LossKind: "rate_limited", Rounds: 21, Sent: 42, ProbesSent: 42, ProbesReceived: 6, EchoSent: 21, EchoReceived: 21,
 				Nodes: []Node{{
 					IP: "192.0.2.2", ASN: 64497, ASOrg: "EXAMPLE-B",
 					RTT: RTTStats{Avg: 2.5}, Loss: 85.7, Sent: 42, Received: 6,
@@ -39,7 +39,7 @@ func headlineReport(target string) Report {
 					},
 					RateLimited: "yes",
 				}}},
-			{TTL: 3, Loss: 85.7, HeadlineLoss: 85.7, LossKind: "provisional", Rounds: 7, Sent: 14, ProbesSent: 14, ProbesReceived: 2,
+			{TTL: 3, Loss: 85.7, HeadlineLoss: 85.7, LossKind: "provisional", Rounds: 7, Sent: 14, ProbesSent: 14, ProbesReceived: 2, EchoSent: 7, EchoReceived: 7,
 				Nodes: []Node{{
 					IP:  "198.51.100.3",
 					RTT: RTTStats{Avg: 3.5}, Loss: 85.7, Sent: 14, Received: 2,
@@ -51,7 +51,7 @@ func headlineReport(target string) Report {
 					RateLimited: "undetermined",
 				}}},
 			{TTL: 4, Loss: 100, HeadlineLoss: 100, LossKind: "measured", Rounds: 21, Sent: 42, ProbesSent: 42},
-			{TTL: 5, Loss: 0, HeadlineLoss: 0, LossKind: "measured", Rounds: 21, Sent: 42, ProbesSent: 42, ProbesReceived: 42,
+			{TTL: 5, Loss: 0, HeadlineLoss: 0, LossKind: "measured", Rounds: 21, Sent: 42, ProbesSent: 42, ProbesReceived: 42, EchoSent: 42, EchoReceived: 41,
 				Nodes: []Node{
 					{
 						IP: "203.0.113.5", ASN: 64496, ASOrg: "EXAMPLE-A",
@@ -88,7 +88,7 @@ func headlineMulti() MultiReport {
 			headlineReport("a.example"),
 			{Version: "test", Target: "bad.example", Protocol: "udp", Error: "no such host"},
 			{Version: "test", Target: "b.example", TargetIP: "203.0.113.10", Protocol: "udp", Probes: 14,
-				Hops: []Hop{{TTL: 1, Loss: 50, HeadlineLoss: 50, LossKind: "measured", Rounds: 7, Sent: 14, ProbesSent: 14, ProbesReceived: 7,
+				Hops: []Hop{{TTL: 1, Loss: 50, HeadlineLoss: 50, LossKind: "measured", Rounds: 7, Sent: 14, ProbesSent: 14, ProbesReceived: 7, EchoSent: 7, EchoReceived: 7,
 					Nodes: []Node{{
 						IP:  "198.51.100.77",
 						RTT: RTTStats{Avg: 7.5}, Loss: 50, Sent: 14, Received: 7,
@@ -111,6 +111,7 @@ var wantCSVHeader = []string{
 	"icmp_ttl_sent", "icmp_ttl_received",
 	"primary_sent", "primary_received",
 	"echo_sent", "echo_received",
+	"echo_ignored", "hop_echo_sent", "hop_echo_received",
 	"error",
 }
 
@@ -118,23 +119,23 @@ var wantCSVHeader = []string{
 var wantHeadlineRows = [][]string{
 	{"1", "192.0.2.1", "r1.example", "64496", "EXAMPLE-A", "0.0", "42", "42",
 		"1.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"0.0", "measured", "no", "21", "21", "21", "21", "21", "21", ""},
+		"0.0", "measured", "no", "21", "21", "21", "21", "21", "21", "false", "21", "21", ""},
 	{"2", "192.0.2.2", "", "64497", "EXAMPLE-B", "85.7", "42", "6",
 		"2.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"0.0", "rate_limited", "yes", "21", "4", "21", "2", "21", "21", ""},
+		"0.0", "rate_limited", "yes", "21", "4", "21", "2", "21", "21", "false", "21", "21", ""},
 	{"3", "198.51.100.3", "", "0", "", "85.7", "14", "2",
 		"3.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"85.7", "provisional", "undetermined", "7", "1", "7", "1", "7", "7", ""},
+		"85.7", "provisional", "undetermined", "7", "1", "7", "1", "7", "7", "false", "7", "7", ""},
 	// The silent hop: no node fields, the hop's own figures.
 	{"4", "*", "", "", "", "100.0", "42", "0",
 		"", "", "", "", "", "", "", "", "",
-		"100.0", "measured", "", "", "", "", "", "", "", ""},
+		"100.0", "measured", "", "", "", "", "", "", "", "", "0", "0", ""},
 	{"5", "203.0.113.5", "", "64496", "EXAMPLE-A", "0.0", "42", "22",
 		"5.50", "0.00", "0.00", "0.00", "0.00", "0.00", "0;2", "0.0", "",
-		"0.0", "measured", "no", "21", "11", "21", "11", "21", "21", ""},
+		"0.0", "measured", "no", "21", "11", "21", "11", "21", "21", "false", "42", "41", ""},
 	{"5", "203.0.113.6", "", "0", "", "0.0", "42", "20",
 		"6.50", "0.00", "0.00", "0.00", "0.00", "0.00", "1", "0.0", "",
-		"0.0", "measured", "no", "21", "10", "21", "10", "21", "20", ""},
+		"0.0", "measured", "no", "21", "10", "21", "10", "21", "20", "false", "42", "41", ""},
 }
 
 // failedRow is the CSV row (without the target column) of a target that could
@@ -161,7 +162,7 @@ func TestCSV_HeadlineLossAndProbeCounts(t *testing.T) {
 	multiWant = append(multiWant, []string{"b.example",
 		"1", "198.51.100.77", "", "0", "", "50.0", "14", "7",
 		"7.50", "0.00", "0.00", "0.00", "0.00", "0.00", "", "0.0", "",
-		"50.0", "measured", "undetermined", "14", "7", "0", "0", "7", "7", ""})
+		"50.0", "measured", "undetermined", "14", "7", "0", "0", "7", "7", "false", "7", "7", ""})
 
 	tests := []struct {
 		name  string

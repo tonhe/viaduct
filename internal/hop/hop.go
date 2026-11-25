@@ -47,8 +47,11 @@ type Hop struct {
 	// echo loss that went with it. Once a hop has had a verdict it keeps one:
 	// while its echo totals are below the samples a verdict needs, these stand
 	// in (see holdVerdictLocked). Undetermined until the first verdict.
-	heldVerdict  RateLimitState
-	heldEchoLoss float64
+	// heldEchoSent and heldEchoRecvd are the echo totals both were made from.
+	heldVerdict   RateLimitState
+	heldEchoLoss  float64
+	heldEchoSent  int
+	heldEchoRecvd int
 
 	mu sync.RWMutex
 }
@@ -354,6 +357,7 @@ func (h *Hop) holdVerdictLocked() {
 	}
 	h.heldVerdict = verdict
 	h.heldEchoLoss = echoLossPercent(sent, received)
+	h.heldEchoSent, h.heldEchoRecvd = sent, received
 }
 
 // beforeEchoAnswerLocked runs before an echo answer from node is recorded.
@@ -518,6 +522,42 @@ func (h *Hop) EchoCounts() (sent, received, countedSent, countedReceived int) {
 	return sent, received, countedSent, countedReceived
 }
 
+// VerdictEchoTotals returns the echo totals the hop's rate-limit verdict and
+// headline loss were made from: echoes sent to the hop's nodes and answers
+// received, without the nodes left out for ignoring ping (see EchoIgnored).
+// While the hop holds an earlier verdict because those totals fell below the
+// samples a verdict needs, they are the totals the held verdict was made
+// from, so a rate-limited headline is always the loss of the totals returned.
+func (h *Hop) VerdictEchoTotals() (sent, received int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	sent, received = h.echoTotalsLocked()
+	if sent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined {
+		return h.heldEchoSent, h.heldEchoRecvd
+	}
+	return sent, received
+}
+
+// EchoIgnored reports whether the node with the given address is left out of
+// the hop's echo totals: it has answered none of its first echoSilentAfter
+// echoes while another node of the hop answers echo. A node that starts
+// answering is no longer left out; the echoes it ignored before stay out of
+// the totals.
+func (h *Hop) EchoIgnored(ip net.IP) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ignores, othersAnswer := false, false
+	for _, n := range h.Nodes {
+		s := n.EchoStats()
+		if n.IP.Equal(ip) {
+			ignores = s.Received == 0 && s.Sent >= echoSilentAfter
+		} else if s.Received > 0 {
+			othersAnswer = true
+		}
+	}
+	return ignores && othersAnswer
+}
+
 // String names the kind as the JSON export does (loss_kind).
 func (k LossKind) String() string {
 	switch k {
@@ -605,6 +645,7 @@ func (h *Hop) Reset() {
 	h.openPrimary = 0
 	h.heldVerdict = RateLimitUndetermined
 	h.heldEchoLoss = 0
+	h.heldEchoSent, h.heldEchoRecvd = 0, 0
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.

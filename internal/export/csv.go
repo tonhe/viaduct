@@ -19,6 +19,11 @@ var csvHeader = []string{
 	"icmp_ttl_sent", "icmp_ttl_received",
 	"primary_sent", "primary_received",
 	"echo_sent", "echo_received",
+	// echo_sent and echo_received above are the node's raw echo counts.
+	// echo_ignored marks a node left out of its hop's echo totals, and
+	// hop_echo_sent and hop_echo_received are those totals, the ones the
+	// verdict and the headline were made from, repeated on each node's row.
+	"echo_ignored", "hop_echo_sent", "hop_echo_received",
 	// error is the last column: the message for a target that could not be
 	// traced, empty on every row of a target that was.
 	"error",
@@ -31,6 +36,8 @@ const (
 	csvColReceived = 7
 	csvColHeadline = 17
 	csvColLossKind = 18
+	csvColHopEchoS = 27
+	csvColHopEchoR = 28
 )
 
 // csvColError is the position in csvHeader of the error column.
@@ -73,6 +80,8 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 				row[csvColReceived] = fmt.Sprintf("%d", h.ProbesReceived)
 				row[csvColHeadline] = fmt.Sprintf("%.1f", h.HeadlineLoss)
 				row[csvColLossKind] = csvLossKind(h)
+				row[csvColHopEchoS] = fmt.Sprintf("%d", h.EchoSent)
+				row[csvColHopEchoR] = fmt.Sprintf("%d", h.EchoReceived)
 			}
 			if withTarget {
 				row = append([]string{r.Target}, row...)
@@ -116,6 +125,9 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 				fmt.Sprintf("%d", n.Probes.Primary.Received),
 				fmt.Sprintf("%d", n.Probes.Echo.Sent),
 				fmt.Sprintf("%d", n.Probes.Echo.Received),
+				fmt.Sprintf("%t", n.EchoIgnored),
+				fmt.Sprintf("%d", h.EchoSent),
+				fmt.Sprintf("%d", h.EchoReceived),
 				"", // error
 			}
 			if withTarget {
