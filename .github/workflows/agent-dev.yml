@@ -18,6 +18,7 @@ on:
 permissions:
   contents: read
   issues: read
+  actions: read   # the nightly selection waits for an unfinished agent-backlog run
 # Label events other than agent:urgent get their own throwaway group, so they can never
 # displace a queued nightly or urgent run.
 concurrency:

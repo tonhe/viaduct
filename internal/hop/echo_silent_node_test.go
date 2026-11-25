@@ -131,10 +131,11 @@ func TestHopLoss_HopWhereNoNodeAnswersEchoIsMeasured(t *testing.T) {
 	}
 }
 
-// A hop where no node answered echo, and one then starts to: the echoes
-// ignored until then leave the totals, so the hop has too few echo samples
-// for a verdict and its loss is provisional until 20 more have been sent.
-func TestHopLoss_FirstEchoAnswerOnASilentHopRestartsTheVerdict(t *testing.T) {
+// A hop where no node answered echo, and one then starts to (viaduct#149):
+// nothing had been left out of the totals, so the node that starts answering
+// keeps every echo it ignored. The hop still has its echo samples and its
+// verdict; it does not start over.
+func TestHopLoss_FirstEchoAnswerOnASilentHopKeepsTheVerdict(t *testing.T) {
 	h := NewHop(6)
 	for round := 0; round < 30; round++ {
 		runECMPRound(h, round, func(string) bool { return false })
@@ -144,14 +145,22 @@ func TestHopLoss_FirstEchoAnswerOnASilentHopRestartsTheVerdict(t *testing.T) {
 	}
 	answersA := func(ip string) bool { return ip == silentNodeA }
 	runECMPRound(h, 30, answersA)
-	if loss, kind := h.Loss(); kind != LossProvisional || !approx(loss, 6.0/7.0*100) {
-		t.Errorf("after A's first answer Loss = %.2f, %v; want 85.71, LossProvisional", loss, kind)
+	if sent, received := h.GetNodes()[0].echoTotals(); sent != 31 || received != 1 {
+		t.Errorf("A's echo totals after its first answer = %d/%d, want 1/31: its ignored echoes stay in", received, sent)
+	}
+	if loss, kind := h.Loss(); kind != LossMeasured || !approx(loss, 6.0/7.0*100) {
+		t.Errorf("after A's first answer Loss = %.2f, %v; want 85.71, LossMeasured", loss, kind)
 	}
 	for round := 31; round < 50; round++ {
 		runECMPRound(h, round, answersA)
+		if _, kind := h.Loss(); kind == LossProvisional {
+			t.Fatalf("round %d: LossProvisional; the hop has had a verdict", round)
+		}
 	}
-	if loss, kind := h.Loss(); kind != LossRateLimited || loss != 0 {
-		t.Errorf("after 20 answered echoes Loss = %.2f, %v; want 0, LossRateLimited", loss, kind)
+	// A: 50 echoes, the first 30 ignored. B, which still ignores ping, is out
+	// now that another node answers.
+	if loss, kind := h.Loss(); kind != LossRateLimited || !approx(loss, 60) {
+		t.Errorf("after 20 answered echoes Loss = %.2f, %v; want 60, LossRateLimited", loss, kind)
 	}
 }
 
@@ -187,23 +196,29 @@ func TestHopLoss_AnsweringNodeThatGoesSilentKeepsCounting(t *testing.T) {
 }
 
 // A node is left out only once it has ignored 20 echoes. One that answers
-// within its first 20 is counted in full, lost echoes included.
+// within its first 20 is counted in full, lost echoes included. One that
+// answers later counts from that answer on if it was being left out (leftOut:
+// another node of its hop answers echo, so the hop calls joinEchoTotals), and
+// in full if it was not (viaduct#149).
 func TestPathNode_EchoTotals(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		silent       int // echoes ignored before the first answer
 		answered     int // echoes answered after that
+		leftOut      bool
 		wantSent     int
 		wantReceived int
 	}{
-		{"never echoed", 0, 0, 0, 0},
-		{"answers every echo", 0, 30, 30, 30},
-		{"silent below the limit", 19, 0, 19, 0},
-		{"silent at the limit", 20, 0, 0, 0},
-		{"silent past the limit", 50, 0, 0, 0},
-		{"answers its 20th echo", 19, 5, 24, 5},
-		{"answers its 21st echo", 20, 5, 5, 5},
-		{"answers after a long silence", 50, 3, 3, 3},
+		{"never echoed", 0, 0, true, 0, 0},
+		{"answers every echo", 0, 30, true, 30, 30},
+		{"silent below the limit", 19, 0, true, 19, 0},
+		{"silent at the limit", 20, 0, true, 0, 0},
+		{"silent past the limit", 50, 0, true, 0, 0},
+		{"answers its 20th echo", 19, 5, true, 24, 5},
+		{"left out, answers its 21st echo", 20, 5, true, 5, 5},
+		{"left out, answers after a long silence", 50, 3, true, 3, 3},
+		{"not left out, answers its 21st echo", 20, 5, false, 25, 5},
+		{"not left out, answers after a long silence", 50, 3, false, 53, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pn := NewPathNode(net.ParseIP("2001:db8::1"))
@@ -212,6 +227,9 @@ func TestPathNode_EchoTotals(t *testing.T) {
 			}
 			for i := 0; i < tc.answered; i++ {
 				pn.MarkEchoSent()
+				if tc.leftOut {
+					pn.joinEchoTotals()
+				}
 				pn.AddSample(time.Millisecond, 0, KindEcho)
 			}
 			sent, received := pn.echoTotals()
@@ -235,6 +253,7 @@ func TestPathNode_EchoTotalsCountLateAnswers(t *testing.T) {
 		pn.MarkEchoSent()
 	}
 	for i := 0; i < 40; i++ {
+		pn.joinEchoTotals() // left out: another node of the hop answers echo
 		pn.AddSample(time.Millisecond, 0, KindEcho)
 	}
 	if sent, received := pn.echoTotals(); sent != 40 || received != 40 {
@@ -248,6 +267,7 @@ func TestPathNode_ResetForgetsEchoSilence(t *testing.T) {
 		pn.MarkEchoSent()
 	}
 	pn.MarkEchoSent()
+	pn.joinEchoTotals()
 	pn.AddSample(time.Millisecond, 0, KindEcho)
 	pn.Reset()
 	for i := 0; i < 4; i++ {

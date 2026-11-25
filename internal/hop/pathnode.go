@@ -87,7 +87,8 @@ type PathNode struct {
 	icmpEcho ProbeStats
 
 	// echoIgnored is the number of echoes this node ignored before its first
-	// answer, when it ignored echoSilentAfter or more. See echoTotals.
+	// answer, when it ignored echoSilentAfter or more and was left out of its
+	// hop's echo totals for it. See echoTotals and joinEchoTotals.
 	echoIgnored int
 
 	flowIDs   map[int]struct{}
@@ -126,11 +127,6 @@ func (pn *PathNode) AddSample(rtt time.Duration, flowID int, kind ProbeKind) {
 	case KindPrimary:
 		pn.primary.addReply(rtt)
 	case KindEcho:
-		if pn.icmpEcho.Received == 0 && pn.icmpEcho.Sent > echoSilentAfter {
-			// First answer after ignoring echoSilentAfter echoes or more:
-			// the echoes before the one answered stay out of the hop's totals.
-			pn.echoIgnored = pn.icmpEcho.Sent - 1
-		}
 		pn.icmpEcho.addReply(rtt)
 		return // echo is ground truth, not a latency sample: no aggregates
 	}
@@ -479,8 +475,8 @@ const echoSilentAfter = 20
 // toward its hop's echo totals (Hop.RateLimitState, Hop.Loss). A node that
 // has answered none of its first echoSilentAfter echoes ignores ping: its
 // unanswered echoes are its own filter and say nothing about the path, so it
-// contributes nothing. If it answers later, it counts from that answer on.
-// EchoStats keeps the raw counters.
+// contributes nothing. If it answers later, it counts from that answer on
+// (joinEchoTotals). EchoStats keeps the raw counters.
 func (pn *PathNode) echoTotals() (sent, received int) {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
@@ -494,6 +490,20 @@ func (pn *PathNode) echoTotals() (sent, received int) {
 		sent = received
 	}
 	return sent, received
+}
+
+// joinEchoTotals is called by the owning hop just before it records an echo
+// answer from this node, when the node was being left out of the hop's echo
+// totals: another node of the hop answers echo. If this is the node's first
+// answer after it ignored echoSilentAfter echoes or more, the echoes before
+// the one answered stay out of the totals for good. A node on a hop where no
+// node answered echo was never left out, and keeps every echo it ignored.
+func (pn *PathNode) joinEchoTotals() {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	if pn.icmpEcho.Received == 0 && pn.icmpEcho.Sent > echoSilentAfter {
+		pn.echoIgnored = pn.icmpEcho.Sent - 1
+	}
 }
 
 // GetReceived returns the received count.
