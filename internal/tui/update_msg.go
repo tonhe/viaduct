@@ -195,8 +195,25 @@ func (m Model) onExportDone(msg ExportDoneMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// onProbeError handles ProbeErrorMsg: stores the error and quits the TUI.
+// onProbeError handles ProbeErrorMsg. A run error belongs to one target: with
+// several targets that target's row shows the error and the others keep
+// tracing, and the session ends only when no target is left. With a single
+// target the error ends the session.
 func (m Model) onProbeError(msg ProbeErrorMsg) (Model, tea.Cmd) {
+	if len(m.sessions) <= 1 {
+		m.err = msg.Err
+		return m, tea.Quit
+	}
+	s := m.sessionAt(msg.TargetIdx)
+	if s == nil {
+		return m, nil
+	}
+	s.startErr = msg.Err
+	for _, other := range m.sessions {
+		if other.startErr == nil {
+			return m, nil
+		}
+	}
 	m.err = msg.Err
 	return m, tea.Quit
 }

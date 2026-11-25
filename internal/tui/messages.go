@@ -27,7 +27,9 @@ type RoundEndMsg struct {
 	TargetIdx int
 }
 
-// ProbeErrorMsg is sent when the probe engine fails to start.
+// ProbeErrorMsg is sent when the probe engine of the target at TargetIdx
+// fails. It ends that target's trace, not the session, unless it was the
+// last target still tracing.
 type ProbeErrorMsg struct {
 	TargetIdx int
 	Err       error
