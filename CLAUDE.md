@@ -109,6 +109,8 @@ Every step applies to every issue an agent files. An issue missing one of them i
 4. **Milestone.** If the new issue blocks something that is in a milestone, put it in the same milestone. Otherwise leave the milestone empty; triage never assigns one.
 5. **Review findings.** An issue that comes from reviewing a pull request carries a `Refs #<PR>` line.
 6. **Owner decisions.** If the fix touches IPv6-protected code or reverses an earlier owner decision, the acceptance criteria say an Owner decision is needed, and the issue stays open until the owner has posted it. Do not close such an issue with your own fix report, and never write a comment that begins "Owner decision".
+7. **Every finding becomes an issue.** Anything you notice and do not fix (a bug, a doc gap, a follow-up, tech debt) becomes an issue before you finish, even if it is out of scope. Never leave a finding only in a comment, PR description, chat message or "noted here" list. If you are unsure whether it is worth an issue, file it as `needs:human` and let the owner close it.
+8. **Check your own report before calling a task done.** If it lists something as "not filed", "left over", "noticed", "not changed" or "for a follow-up" without an issue link, file the issue first and put the link in the report.
 
 ## Other rules
 
