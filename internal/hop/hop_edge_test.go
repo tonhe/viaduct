@@ -397,5 +397,5 @@ func TestFormatFlowIDsNonConsecutive(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Rate-limit heuristic edge cases
-// (per-node tri-state tests live in ratelimit_test.go)
+// (rate-limit verdict tests live in ratelimit_test.go and ratelimit_hop_test.go)
 // ---------------------------------------------------------------------------

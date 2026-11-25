@@ -6,31 +6,13 @@ import (
 	"time"
 )
 
-// A node is judged rate-limited when its ICMP TTL probe loss is significantly
+// A hop is judged rate-limited when its TTL-probe loss is significantly
 // higher than its direct echo loss: a two-proportion z-test at z >= 2.58
-// (p < 0.01), with at least 20 echo samples. The destination is never
-// flagged. (viaduct#53)
+// (p < 0.01), with at least 20 echo samples (viaduct#53). The verdict is the
+// hop's, the destination included (viaduct#71, #79); these cases exercise the
+// classifier it uses.
 
-// mkNode builds a node with the given ICMP TTL probes (sent, answered) and
-// echo probes (sent, answered).
-func mkNode(ttlSent, ttlRecv, echoSent, echoRecv int) *PathNode {
-	pn := NewPathNode(net.ParseIP("198.51.100.9"))
-	for i := 0; i < ttlSent; i++ {
-		if i < ttlRecv {
-			pn.AddSample(time.Millisecond, 0, KindICMPTTL)
-		}
-		pn.MarkProbeRoundEnd()
-	}
-	for i := 0; i < echoSent; i++ {
-		pn.MarkEchoSent()
-	}
-	for i := 0; i < echoRecv; i++ {
-		pn.AddSample(time.Millisecond, 0, KindEcho)
-	}
-	return pn
-}
-
-func TestRateLimitState(t *testing.T) {
+func TestRateLimitVerdict(t *testing.T) {
 	tests := []struct {
 		name               string
 		ttlSent, ttlRecv   int
@@ -53,6 +35,10 @@ func TestRateLimitState(t *testing.T) {
 		{"no loss at all", 100, 100, 100, 100, RateLimitNo},
 		{"total loss on both", 50, 0, 50, 0, RateLimitNo},
 		{"echo loss higher than ttl loss", 100, 90, 100, 60, RateLimitNo},
+		{"no ttl probes sent", 0, 0, 20, 20, RateLimitNo},
+		// Duplicated replies: more answers than probes counts as no loss.
+		{"more ttl replies than probes", 20, 25, 20, 20, RateLimitNo},
+		{"more echo replies than echoes", 100, 20, 20, 25, RateLimitYes},
 
 		// Rate limiting: TTL probes go unanswered, echoes are answered.
 		{"80% ttl loss, echo clean, n=40", 40, 8, 39, 39, RateLimitYes},
@@ -65,41 +51,25 @@ func TestRateLimitState(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pn := mkNode(tc.ttlSent, tc.ttlRecv, tc.echoSent, tc.echoRecv)
-			if got := pn.RateLimitState(); got != tc.want {
-				t.Errorf("RateLimitState = %v, want %v", got, tc.want)
+			got := rateLimitVerdict(tc.ttlSent, tc.ttlSent-tc.ttlRecv, tc.echoSent, tc.echoSent-tc.echoRecv)
+			if got != tc.want {
+				t.Errorf("rateLimitVerdict = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestRateLimitState_DestinationIsNeverFlagged(t *testing.T) {
-	// For the destination, the echo probe and the ICMP TTL probe are the same
-	// kind of packet on the same path, so a difference between them is noise.
-	pn := mkNode(100, 20, 100, 100) // would be a clear Yes for a router
-	if got := pn.RateLimitState(); got != RateLimitYes {
-		t.Fatalf("precondition: state = %v, want Yes before marking the target", got)
-	}
+func TestPathNodeReset_ClearsTargetMarkAndHopVerdict(t *testing.T) {
+	pn := NewPathNode(net.ParseIP("198.51.100.9"))
 	pn.MarkTarget()
-	if got := pn.RateLimitState(); got != RateLimitNo {
-		t.Errorf("RateLimitState for the destination = %v, want No", got)
-	}
-}
-
-func TestRateLimitState_ResetClearsTargetMark(t *testing.T) {
-	pn := mkNode(100, 20, 100, 100)
-	pn.MarkTarget()
+	pn.setHopVerdict(RateLimitYes)
 	pn.Reset()
-	for i := 0; i < 100; i++ {
-		if i < 20 {
-			pn.AddSample(time.Millisecond, 0, KindICMPTTL)
-		}
-		pn.MarkProbeRoundEnd()
-		pn.MarkEchoSent()
-		pn.AddSample(time.Millisecond, 0, KindEcho)
+	if pn.IsTarget() {
+		t.Error("target mark survived Reset")
 	}
-	if got := pn.RateLimitState(); got != RateLimitYes {
-		t.Errorf("state after Reset = %v, want Yes (target mark must not survive Reset)", got)
+	pn.RecordRoundAvg() // a silent round, no echo sent
+	if got := pn.SparklineData(); len(got) != 1 || got[0].Kind != SparkDrop {
+		t.Errorf("sparkline after Reset = %+v, want one SparkDrop: the hop verdict must not survive Reset", got)
 	}
 }
 
@@ -107,27 +77,12 @@ func TestHopMarkTarget_MarksOnlyThatNode(t *testing.T) {
 	h := NewHop(4)
 	target := net.ParseIP("198.51.100.1")
 	other := net.ParseIP("192.0.2.10")
-	for i := 0; i < 100; i++ {
-		h.MarkRoundSent()
-		if i < 20 {
-			h.AddSample(target, time.Millisecond, 0, KindICMPTTL)
-			h.AddSample(other, time.Millisecond, 0, KindICMPTTL)
-		}
-		for _, n := range h.GetNodes() {
-			n.MarkEchoSent()
-		}
-		h.AddSample(target, time.Millisecond, 0, KindEcho)
-		h.AddSample(other, time.Millisecond, 0, KindEcho)
-		h.MarkRoundEnd()
-	}
+	h.AddSample(target, time.Millisecond, 0, KindICMPTTL)
+	h.AddSample(other, time.Millisecond, 0, KindICMPTTL)
 	h.MarkTarget(target)
 	for _, n := range h.GetNodes() {
-		want := RateLimitYes
-		if n.GetIP().Equal(target) {
-			want = RateLimitNo
-		}
-		if got := n.RateLimitState(); got != want {
-			t.Errorf("node %s: state = %v, want %v", n.GetIP(), got, want)
+		if got, want := n.IsTarget(), n.GetIP().Equal(target); got != want {
+			t.Errorf("node %s: IsTarget = %v, want %v", n.GetIP(), got, want)
 		}
 	}
 }

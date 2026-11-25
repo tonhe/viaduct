@@ -234,8 +234,7 @@ func (h *Hop) MarkTarget(ip net.IP) {
 // hop that answers echoes but not its TTL probes is rate-limiting or filtering
 // them. A hop that loses both at the same rate has real loss.
 //
-// The destination is never rate-limited: an echo to it is the same packet on
-// the same path as the ICMP probe that reaches it.
+// The destination is judged like any other hop.
 func (h *Hop) RateLimitState() RateLimitState {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

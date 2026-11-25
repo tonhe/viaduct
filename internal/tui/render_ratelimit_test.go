@@ -9,8 +9,8 @@ import (
 )
 
 // TestRenderHopRateLimitedCell exercises the loss-cell branch that used to
-// consult the pingStats supplement. Task 12 rewired it to read the primary
-// node's tri-state RateLimitState() / EchoStats().
+// consult the pingStats supplement. It now reads the hop's tri-state
+// RateLimitState() and the echo stats of its nodes.
 //
 //   - RateLimitYes: cell shows "~N%†" where N is echoLoss.ProbeLossPercent(),
 //     padded (with the dagger counted) to width 8.
@@ -111,11 +111,7 @@ func TestRenderHopRateLimitedCell(t *testing.T) {
 		if h == nil {
 			t.Fatal("TTL 3 hop missing from fixture")
 		}
-		pn := h.PrimaryNode()
-		if pn == nil {
-			t.Fatal("TTL 3 has no primary node")
-		}
-		if got := pn.RateLimitState(); got != hop.RateLimitYes {
+		if got := h.RateLimitState(); got != hop.RateLimitYes {
 			t.Errorf("fixture RateLimitState = %v, want RateLimitYes (%v)", got, hop.RateLimitYes)
 		}
 		// Rendered elapsed field is derived from time.Since; irrelevant here.

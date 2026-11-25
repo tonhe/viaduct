@@ -729,13 +729,11 @@ func TestResolveTargetSpecs_EmptyAnswer(t *testing.T) {
 // ── printReport rate-limit dagger regression ──────────────────────────────
 //
 // Verifies that printReport renders the tilde+dagger loss form when the
-// primary node's RateLimitState() == RateLimitYes and plain "%.1f%%" when
-// the state is Undetermined. The rendering must come from the hop table
-// alone — no ping supplement path exists any more.
+// hop's RateLimitState() == RateLimitYes and plain "%.1f%%" when the state
+// is Undetermined. The rendering must come from the hop table alone.
 
 // seedHopRateLimit populates an already-created hop with per-kind samples
-// that drive its primary node's RateLimitState. Mirrors the recipe in
-// internal/hop/ratelimit_test.go's mkNode helper.
+// that drive the hop's RateLimitState.
 func seedHopRateLimit(t *testing.T, tbl *hop.Table, ttl int, ip net.IP, ttlRounds, ttlRecv, echoSent, echoRecv int) *hop.Hop {
 	t.Helper()
 	h := tbl.GetOrCreate(ttl)
