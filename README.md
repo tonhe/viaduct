@@ -358,9 +358,27 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
 | `--no-alert` | | | Disable alerting |
 | `--theme` | | (config) | Color theme slug (e.g. 'dracula', 'nord') |
-| `--debug-log` | | | Append probe engine diagnostics to this file: each address a send failed for (once per address) and, for each round, the probes that could not be sent |
+| `--debug-log` | | | Append diagnostics to this file: send failures, one line per completed round, a per-hop loss snapshot every 10 rounds and at exit, and alerts raised and cleared. See [Debug log](#debug-log) |
 | `--version` | `-v` | | Print `via version <version> (build <build>)` and exit. A release build prints the release number (`0.3.0`). `make build` prints `git describe` without the leading `v` (`0.2.1-21-gc6df19c`: 21 commits after v0.2.1, with `-dirty` for a modified tree). A build that sets no version (`go build`, `go install`) prints the module version the Go toolchain recorded; if there is none, `dev+<revision>` (the first 12 characters of the commit, with `.dirty` for a modified tree); if there is no revision either, `dev` |
 | `--help` | `-h` | | Print usage and the flag list, then exit |
+
+### Debug log
+
+`--debug-log <file>` appends timestamped lines to a file, in the TUI and in report mode. Each line is tagged with the target's address, so one file holds every target of a run. Without the flag nothing is written.
+
+```
+2026-11-25T04:38:44.123Z [192.0.2.9] send failed: icmp-ttl to 192.0.2.9 (ttl 3): no buffer space available; logged once for this address
+2026-11-25T04:38:45.201Z [192.0.2.9] round 12: probes not sent: icmp-ttl 0 timed out, 3 failed, 0 skipped
+2026-11-25T04:38:46.214Z [192.0.2.9] round 12: took 1.214s; sent icmp-ttl=8 udp-ttl=24 icmp-echo=8; replies icmp-ttl=8 udp-ttl=21 icmp-echo=8; no reply from 1 of 8 hops probed
+2026-11-25T04:38:54.302Z [192.0.2.9] snapshot round=20 ttl=3 nodes=198.51.100.1,198.51.100.2 loss=~0%† kind=rate_limited icmp-ttl=20/0 udp-ttl=60/41 echo=38/0 echo-counted=38/0 rate-limited=yes
+2026-11-25T04:38:57.310Z [192.0.2.9] round 23: alert raised: Sustained loss to destination: 33.3% (hop 8 affected)
+2026-11-25T04:39:05.330Z [192.0.2.9] round 31: alert cleared: Sustained loss to destination: 45.0% (hop 8 affected)
+```
+
+- **Send failures**: each address a send failed for (once per address, with the error) and, for each round, the probes that could not be sent.
+- **Round line**, one per completed round: the time since the previous round closed, the probes sent in the round by type, the replies counted in the round by type, and how many of the hops probed answered none of their TTL-limited probes. A round in which every probed hop is silent reads `no reply from 8 of 8 hops probed`. A reply is counted in the round in which it arrives, as it is for loss.
+- **Snapshot**, one line per hop up to the destination, every 10 rounds (`snapshot`) and once at exit (`final`): the hop's addresses, its loss exactly as the views show it (`12.3%`, `85.7%?`, `~0%†`) with its kind, and the counts behind it as `sent/lost` over completed rounds: TTL-limited probes by type, direct echoes (`echo`), the echoes that count toward the verdict (`echo-counted`, which leaves out a node that ignores ping) and the rate-limit verdict.
+- **Alerts**: a line when an alert is raised and a line when it clears, with the alert's text. Report mode shows no alerts; its log records the ones the TUI would have raised with the same `--alert-*` settings.
 
 ---
 

@@ -77,6 +77,8 @@ Every probe goes out through `Tracer.send` (`send.go`), which sets the hop limit
 
 With `--debug-log <file>` the tracer writes one line for each address a send failed for (once per address, with the error) and one line for each round in which probes were not sent, with the counts per probe type.
 
+The same file takes each target's round records, written by `tui.RoundDebug` from the hop table once a round has been closed: one line per round (probes sent and replies counted by type, hops that answered nothing), a per-hop snapshot every 10 rounds and at exit (the headline loss from `hop.Hop.Loss` and the counts behind it), and a line when an alert is raised or cleared. The TUI's sessions and both report-mode paths call it at the point where they close the round, so the log shows the figures the views show. The README's "Debug log" section describes the lines.
+
 ### Matching replies
 
 Every probe sent is recorded in the tracer's `probeMap` under a key built from its ports (UDP, TCP) or its ICMP ID and sequence (ICMP). Entries older than twice the timeout are swept at the end of each round.

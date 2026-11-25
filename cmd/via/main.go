@@ -91,7 +91,7 @@ func main() {
 	rootCmd.Flags().String("theme", "", "color theme (slug name, e.g. 'dracula')")
 	rootCmd.Flags().StringP("output", "o", "", "export format: json, csv, or dot (implies --report)")
 	rootCmd.Flags().String("targets", "", "file containing one target per line (combined with positional args)")
-	rootCmd.Flags().String("debug-log", "", "append probe engine diagnostics (send failures) to this file")
+	rootCmd.Flags().String("debug-log", "", "append diagnostics to this file: send failures, a line per round, per-hop loss snapshots, alerts")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -494,7 +494,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		NumPaths: numPaths,
 	}
 
-	// --debug-log: the probe engine's send failures go to a file.
+	// --debug-log: the probe engine's send failures and each target's round
+	// records (rounds, per-hop snapshots, alerts) go to a file.
+	reportAlert.loss, reportAlert.latency, reportAlert.rounds, reportAlert.off = alertLoss, alertLatency, alertRounds, noAlert
 	debugLogPath, _ := cmd.Flags().GetString("debug-log")
 	closeDebugLog, err := applyDebugLog(&baseCfg, debugLogPath)
 	if err != nil {
@@ -579,6 +581,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Create TUI model using NewMulti (works for 1 or N sessions).
 	versionStr := displayVersion(version) + " (" + buildVersion + ")"
 	model := tui.NewMulti(specs, versionStr, noASN, alertLoss, alertLatency, alertRounds, noAlert, appCfg)
+	model.SetDebugLog(baseCfg.Debugf)
 
 	// Create bubbletea program AFTER model is fully wired.
 	// Note: model is passed by value into tea.NewProgram; SetSessionTracer must
@@ -691,6 +694,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	cancel()
 
 	if m, ok := finalModel.(tui.Model); ok {
+		m.DebugFinal()
 		fmt.Print(m.FinalSummary())
 	}
 	return nil
@@ -876,11 +880,9 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	// Echo attribution via shared helper.
 	wireEchoTier(tracer, table)
 
+	debug := newReportDebug(targetIP, cfg)
 	tracer.SetOnRoundEnd(func() {
-		hops := table.Snapshot()
-		for _, h := range hops {
-			h.MarkRoundEnd()
-		}
+		debug.RoundClosed(table, tui.CloseRound(table))
 		// Recompute the echo-target set from the live table each round; the
 		// tracer round-robins through it under EchoBudget.
 		tracer.SubmitEchoTargets(collectEchoTargets(table))
@@ -922,6 +924,7 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	time.Sleep(500 * time.Millisecond)
 	cancel()
 	<-collectorDone
+	debug.Final(table)
 
 	maxTTL := table.MaxTTLSeen()
 	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
@@ -1001,11 +1004,9 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	// Echo attribution via shared helper.
 	wireEchoTier(tracer, table)
 
+	debug := newReportDebug(targetIP, cfg)
 	tracer.SetOnRoundEnd(func() {
-		hops := table.Snapshot()
-		for _, h := range hops {
-			h.MarkRoundEnd()
-		}
+		debug.RoundClosed(table, tui.CloseRound(table))
 		// Recompute the echo-target set from the live table each round; the
 		// tracer round-robins through it under EchoBudget.
 		tracer.SubmitEchoTargets(collectEchoTargets(table))
@@ -1054,6 +1055,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	time.Sleep(500 * time.Millisecond)
 	cancel()
 	<-collectorDone // wait for collector goroutine to exit
+	debug.Final(table)
 
 	maxTTL := table.MaxTTLSeen()
 	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {

@@ -136,15 +136,8 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 	if s == nil {
 		return m, nil
 	}
-	hops := s.table.Snapshot()
 	// The TTLs probes were sent to in the round being closed.
-	sentTo := make(map[int]bool, len(hops))
-	for _, h := range hops {
-		if h.RoundOpen() {
-			sentTo[h.TTL] = true
-		}
-		h.MarkRoundEnd()
-	}
+	sentTo := CloseRound(s.table)
 	// Collect {IP, TTL} pairs and submit to the echo sink for next-round echo probing.
 	if s.echoSink != nil {
 		// The nodes of the path, up to and including the destination's hop
@@ -156,30 +149,8 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 		s.echoSink.SubmitEchoTargets(pairs)
 	}
 	// Update alert engine with destination metrics
-	if s.alertEngine != nil {
-		hopMap := make(map[int]*hop.Hop, len(hops))
-		for _, h := range hops {
-			hopMap[h.TTL] = h
-		}
-		maxTTL := s.table.MaxTTLSeen()
-		if s.maxTTLHit > 0 && s.maxTTLHit < maxTTL {
-			maxTTL = s.maxTTLHit
-		}
-		// A round that sent nothing to the destination's hop (the trace was
-		// paused, or no send to it succeeded) is no evidence about the path:
-		// the alert engine counts consecutive bad rounds, and such a round is
-		// neither bad nor good.
-		if dest := destAlertTTL(hopMap, maxTTL); dest > 0 && !sentTo[dest] {
-			return m, nil
-		}
-		destLoss, destLatency := destAlertMetrics(hopMap, maxTTL)
-		bell := s.alertEngine.Update(destLoss, destLatency)
-		if bell && s.alertEngine.State() == AlertDegraded {
-			deltas := computeDeltas(hopMap, maxTTL)
-			s.alertEngine.FindAffectedHop(hopMap, maxTTL, deltas)
-		}
-		_ = bell // bell sound handled by terminal if needed
-	}
+	s.alertEngine.ObserveRound(s.table.Snapshot(), sentTo, alertMaxTTL(s.table, s.maxTTLHit))
+	s.debug.RoundClosed(s.table, sentTo)
 	return m, nil
 }
 
