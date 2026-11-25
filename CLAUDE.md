@@ -37,6 +37,8 @@ Conventions:
 
 Floors only go up. If your change drops a package below its floor, add tests. Do not lower the floor.
 
+The owner raises the floors, by hand, because the script is a protected path. A floor that sits below a package's current coverage is expected and is not something to report or open an issue about.
+
 ## IPv6-protected code
 
 The IPv6 code paths are regression-protected:
@@ -77,9 +79,11 @@ Lab assertions are exact counts. A scenario drops exactly every Nth reply, kerne
 
 Loss is per probe: TTL-limited probes that got no reply, divided by TTL-limited probes sent, counted over completed rounds. The round still waiting for replies is excluded, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
 
-A hop is marked rate-limited (`~N%†`) only when its ICMP TTL-probe loss is significantly higher than its direct-echo loss (two-proportion z-test, p < 0.01) with at least 20 echo probes sent. The destination is never marked. A marked hop shows its echo loss.
+A hop is marked rate-limited (`~N%†`) only when its TTL-probe loss is significantly higher than its direct-echo loss (two-proportion z-test, p < 0.01) with at least 20 echo probes sent. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way. A marked hop shows its echo loss.
 
-The TUI and report mode show the same loss figure for a hop. JSON exports carry the per-probe loss with the probe counts it was computed from, plus per-node counts for each probe type and the `rate_limited` verdict. A change that makes these outputs disagree with each other is a bug.
+Until a hop has 20 echo samples, loss there may be rate limiting or real. It is shown as `N%?` and does not count toward alerting.
+
+The TUI, report mode and alerting use the same loss figure for a hop (`hop.Hop.Loss`, rendered by `hop.FormatLoss`). JSON exports carry it as `headline_loss_pct` with `loss_kind` (`measured`, `rate_limited`, `provisional`), next to the raw per-probe `loss_pct`, the probe counts, per-node counts for each probe type and the `rate_limited` verdict. A change that makes these outputs disagree with each other is a bug.
 
 ## Commits and pull requests
 
