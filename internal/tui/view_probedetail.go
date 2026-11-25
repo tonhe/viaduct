@@ -329,14 +329,7 @@ func (m Model) viewProbeDetail() string {
 	}
 
 	// Status bar.
-	maxTTL := s.table.MaxTTLSeen()
 	elapsed := m.now().Sub(m.startTime).Truncate(time.Second)
-	traceStatus := fmt.Sprintf("Tracing... %d hops", maxTTL)
-	if m.paused {
-		traceStatus = "PAUSED"
-	} else if s.targetHit {
-		traceStatus = fmt.Sprintf("Tracing... %d/%d hops", maxTTL, s.maxTTLHit)
-	}
 	dnsLabel := "on"
 	if !m.dnsEnabled {
 		dnsLabel = "off"
@@ -350,33 +343,20 @@ func (m Model) viewProbeDetail() string {
 	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
 		notice = m.exportStatusMsg
 	}
-	noticeFull := ""
-	if notice != "" {
-		noticeFull = "    " + notice
-	}
 	scrollHint := ""
 	if !m.autoScroll && len(hopLines) > availableRows {
-		scrollHint = " [scrolled] G:bottom g:top"
+		scrollHint = "[scrolled] G:bottom g:top"
 	}
-	multiHint := ""
-	if len(m.sessions) > 1 {
-		multiHint = "    ↑/↓:target space:mark c:columns"
-	}
-	footerNote := "echo cadence: ceil(pairs/budget) rounds"
-	keys := "j/k:scroll p:pause r:reset [d] " + m.viewMode.Next().String()
-	status := m.statusLine(
-		fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s    %s q:quit%s    %s%s",
-			traceStatus, elapsed, dnsLabel, noticeFull, keys, scrollHint, footerNote, multiHint),
-		statusParts{
-			trace:   traceStatus,
-			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
-			dns:     "DNS: " + dnsLabel,
-			notice:  notice,
-			keys:    keys,
-			scroll:  strings.TrimSpace(scrollHint),
-			multi:   strings.TrimSpace(multiHint),
-			footer:  footerNote,
-		})
+	status := m.statusLine(statusParts{
+		trace:   m.traceStatus(s),
+		elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+		dns:     "DNS: " + dnsLabel,
+		notice:  notice,
+		keys:    m.viewKeyHints(),
+		scroll:  scrollHint,
+		footer:  "echo cadence: ceil(pairs/budget) rounds",
+		targets: m.targetKeyHints(),
+	})
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
 
 	// Settings overlay — rendered on top of everything else.
