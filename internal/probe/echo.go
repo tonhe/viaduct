@@ -3,6 +3,7 @@ package probe
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,11 +60,30 @@ const echoFullTTL = 64
 // forged replies from growing the set of addresses via pings without bound.
 const maxEchoTargetsPerTTL = 8
 
+// unzonedLinkLocal reports whether ip is an IPv6 link-local address. An echo
+// target is an address without a zone (Result.IP carries none), and a
+// link-local address without its zone does not say which link it is on: the
+// kernel refuses the packet or picks an interface itself. Such a node is not
+// echoed. It then has no echo samples, so loss at its hop stays provisional
+// ("N%?") instead of being judged against echoes that could not be delivered.
+func unzonedLinkLocal(ip net.IP) bool {
+	return ip.To4() == nil && ip.IsLinkLocalUnicast()
+}
+
 // sendEchoes emits up to budget echo probes, round-robining through the
 // target set across rounds. seq resolution: each send registers its pair in
 // the probeMap keyed {EchoID, seq}, so the reply attributes to the exact
 // {IP, TTL} entry (demux invariant 3).
+//
+// Nothing is sent while the trace is paused. A send that fails or times out
+// is not an echo sent: its record is removed and the echo-sent callback is
+// not called. Once a write on the socket has timed out this round (here or
+// in the TTL tier, which shares the socket), the remaining echoes of the
+// round are not attempted.
 func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
+	if atomic.LoadInt32(&t.Paused) == 1 {
+		return
+	}
 	budget := t.cfg.EchoBudget
 	if budget <= 0 {
 		budget = 64
@@ -79,8 +99,22 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		budget = len(targets)
 	}
 	for i := 0; i < budget; i++ {
+		if atomic.LoadInt32(&t.Paused) == 1 {
+			break
+		}
+		// The socket stopped accepting writes this round: leave the rest of
+		// the budget for the next round, cursor in place.
+		if t.sends.isStalled(sockICMP) {
+			t.sends.counts[ProbeICMPEcho].skipped += budget - i
+			break
+		}
 		tgt := targets[cursor]
 		cursor = (cursor + 1) % len(targets)
+		if unzonedLinkLocal(tgt.IP) {
+			t.logOnce("echo-skip "+tgt.IP.String(),
+				"echo not sent to %s (hop %d): link-local address without a zone; logged once for this address", tgt.IP, tgt.TTL)
+			continue
+		}
 		*seq++
 		// Keyed on the 16-bit sequence the echo carries (see icmpWireSeq).
 		wire := icmpWireSeq(*seq)
@@ -91,11 +125,7 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		key := probeKey{SrcPort: t.cfg.EchoID, DstPort: wire, Seq: 0}
 		// The reply must come from the address this echo is sent to.
 		t.pm.addTo(key, tgt.TTL, 0, time.Now(), ProbeICMPEcho, tgt.IP)
-		if snd.SetTTL(echoFullTTL) != nil {
-			t.pm.remove(key)
-			continue
-		}
-		if _, err := snd.WriteTo(pkt, &net.IPAddr{IP: tgt.IP}); err != nil {
+		if !t.send(snd, sockICMP, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: tgt.IP}) {
 			t.pm.remove(key)
 			continue
 		}

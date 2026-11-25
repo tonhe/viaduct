@@ -69,6 +69,16 @@ After the TTL walk:
 
 Probes are spaced 10 ms apart. After the last send the tracer waits one `--interval`, then closes the round. That wait is the collection window, so a reply that arrives during it counts for the round it belongs to.
 
+While the trace is paused nothing is sent, in any tier. The echo tier does not echo an IPv6 link-local address: an echo target is an address without a zone, and a link-local address without one does not name a link.
+
+### Sends that fail
+
+Every probe goes out through `Tracer.send` (`send.go`), which sets the hop limit, then a write deadline of 100 ms, then writes. A write that fails or does not complete by the deadline is a probe that was not sent: its `probeMap` record is removed, it is not reported as sent, and the loop moves on. After a write times out, the remaining sends to that socket in the round are skipped and counted as not sent, so a socket that has stopped accepting writes costs a round one deadline and not one per probe. The next round tries the socket again. The ICMP TTL probes and the echo tier share the ICMP socket; the UDP or TCP flows have their own.
+
+With `--debug-log <file>` the tracer writes one line for each address a send failed for (once per address, with the error) and one line for each round in which probes were not sent, with the counts per probe type.
+
+The same file takes each target's round records, written by `tui.RoundDebug` from the hop table once a round has been closed: one line per round (probes sent and replies counted by type, hops that answered nothing), a per-hop snapshot every 10 rounds and at exit (the headline loss from `hop.Hop.Loss` and the counts behind it), and a line when an alert is raised or cleared. The TUI's sessions and both report-mode paths call it at the point where they close the round, so the log shows the figures the views show. The README's "Debug log" section describes the lines.
+
 ### Matching replies
 
 Every probe sent is recorded in the tracer's `probeMap` under a key built from its ports (UDP, TCP) or its ICMP ID and sequence (ICMP). Entries older than twice the timeout are swept at the end of each round.
@@ -93,7 +103,7 @@ Each match becomes a `probe.Result` with the TTL, responder address, RTT, flow I
 
 `hop.Table` maps TTL to `hop.Hop`. A `Hop` holds one `PathNode` per responder address seen at that TTL. More than one node means ECMP divergence at that hop. The node with the most replies is the hop's primary node and supplies the hop-level RTT figures.
 
-**Loss** is per probe, at hop level. The tracer reports how many TTL-limited probes it wrote for a TTL each round (`MarkRoundSent`). Replies other than echo-tier replies count as received. At round end the running counters are copied to closed counters, and `LossPercent` is computed from the closed ones. Probes in the open round are never counted as lost. `Rounds` is what the `Rnd` column shows.
+**Loss** is per probe, at hop level. The tracer reports how many TTL-limited probes of each type it wrote for a TTL each round (`MarkRoundSentByType`; a probe whose send failed is not among them). A round in which nothing was written for a TTL is not a round for that hop: no probes, no `Rnd`, no sparkline cell. Replies other than echo-tier replies count as received. At round end the running counters are copied to closed counters, and `LossPercent` is computed from the closed ones. Probes in the open round are never counted as lost. `Rounds` is what the `Rnd` column shows.
 
 **Per-node, per-probe-type stats** (`ProbeStats`) are kept for ICMP TTL, primary and echo probes. The two TTL-limited kinds are counted by round at node level, because a TTL-limited probe is addressed to a hop distance and not to a node: sent is the number of rounds the node was known, and a round counts as answered if the node replied in it. The echo kind counts actual sends and replies. Echo replies update only the echo slot. They don't feed RTT averages, jitter or the hop's loss.
 
@@ -118,7 +128,7 @@ Per session, `main.go` starts:
 
 Shared by all sessions: one resolver, one enricher, and one forwarding goroutine for each that turns results into `HostnameMsg` and `ASNMsg`.
 
-The tracer also calls back at three points: probes written for a TTL (straight into the session's `hop.Table`, which is mutex-guarded), an echo sent (`EchoSentMsg`), and round end (`RoundEndMsg`). On `RoundEndMsg` the model closes the round on every hop, hands the tracer the next echo-target set, and updates the alert engine.
+The tracer also calls back at three points: probes written for a TTL (straight into the session's `hop.Table`, which is mutex-guarded), an echo sent (`EchoSentMsg`), and round end (`RoundEndMsg`). On `RoundEndMsg` the model closes the round on every hop, hands the tracer the next echo-target set, and updates the alert engine. The alert engine counts consecutive bad rounds, so a round that sent nothing to the destination's hop (paused, or no send succeeded) is skipped: it is neither a bad round nor a good one.
 
 Messages that belong to one target carry a `TargetIdx`. Hostname and ASN results are applied to matching addresses in every session, because two targets often share their first hops.
 
@@ -188,6 +198,8 @@ shared
 ## Gotchas
 
 **Raw sockets.** Every mode needs a raw ICMP socket, and UDP and TCP modes need a second raw socket for sending. That means root, or `CAP_NET_RAW` on Linux. `sysprobe` deliberately does not test socket permissions. It answers "does this host have this address family", and the permission failure is left to the capability check so the `sudo` re-exec still happens.
+
+**A raw-socket write can block.** When the kernel answers a write with `EAGAIN`, Go parks the goroutine until the socket is writable, which on macOS over IPv6 was seen never to happen. No probe is written without a write deadline (see "Sends that fail"). A write the kernel accepts and then never transmits cannot be told from a lost probe, and is counted as one.
 
 **One keyspace for all tiers.** The `probeMap` is shared by ICMP, UDP/TCP and echo probes. ICMP keys are `{ID, sequence}` and UDP keys are `{source port, destination port}`, so an ICMP ID equal to a UDP source port would eventually collide as the sequence counter climbs into the destination-port range. `initPortAllocator` keeps the ID range and the port range disjoint for that reason.
 

@@ -25,6 +25,19 @@ type Hop struct {
 	closedRecvd  int // probesRecvd as of the last closed round
 	closedRounds int // roundsSent as of the last closed round
 
+	// The ICMP TTL probes' share of the counters above, kept so the debug log
+	// can give a hop's probes by type (ProbeCountsByType). The rest are
+	// primary (UDP or TCP) probes.
+	icmpSent        int
+	icmpRecvd       int
+	closedICMPSent  int
+	closedICMPRecvd int
+
+	// TTL-limited probes of each type sent in the open round, as the tracer
+	// reported them. Moved to the nodes when the round closes.
+	openICMP    int
+	openPrimary int
+
 	// draining is set by Reset when this hop's round was open at the reset.
 	// Replies still on their way answer probes whose sends Reset discarded,
 	// so they are dropped until that round closes or a new round is sent.
@@ -70,6 +83,9 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind
 	}
 	if kind != KindEcho {
 		h.probesRecvd++
+		if kind == KindICMPTTL {
+			h.icmpRecvd++
+		}
 	} else {
 		h.beforeEchoAnswerLocked(node)
 	}
@@ -122,45 +138,77 @@ func (h *Hop) GetNodes() []*PathNode {
 func (h *Hop) MarkRoundSent() { h.MarkRoundSentProbes(1) }
 
 // MarkRoundSentProbes records that the tracer sent probes TTL-limited probes
-// to this TTL this round (ICMP TTL plus every primary flow). Called once per
-// hop per round (probe.RoundMarker via Table).
+// to this TTL this round, given as a total: the first is taken to be the ICMP
+// TTL probe and the rest primary flows. A caller that knows the split uses
+// MarkRoundSentByType.
 func (h *Hop) MarkRoundSentProbes(probes int) {
+	if probes <= 0 {
+		h.MarkRoundSentByType(0, 0)
+		return
+	}
+	h.MarkRoundSentByType(1, probes-1)
+}
+
+// MarkRoundSentByType records the TTL-limited probes the tracer actually
+// wrote for this TTL this round: icmpTTL ICMP TTL probes and primary UDP or
+// TCP flow probes. Called once per hop per round (probe.RoundTypeMarker via
+// Table).
+//
+// A probe that did not leave (the write failed, timed out or was skipped) is
+// not in these counts, so it is neither sent nor lost. When nothing left for
+// this TTL, the round is not a round for this hop: no probes, no Rnd, and no
+// sparkline cell or stability slot when it closes.
+func (h *Hop) MarkRoundSentByType(icmpTTL, primary int) {
+	if icmpTTL < 0 {
+		icmpTTL = 0
+	}
+	if primary < 0 {
+		primary = 0
+	}
+	if icmpTTL+primary == 0 {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// A new round's probes are out: replies from here on may answer them.
 	h.draining = false
 	h.roundsSent++
-	if probes > 0 {
-		h.probesSent += probes
-	}
+	h.probesSent += icmpTTL + primary
+	h.icmpSent += icmpTTL
+	h.openICMP += icmpTTL
+	h.openPrimary += primary
+}
+
+// RoundOpen reports whether probes were sent to this hop in a round that has
+// not been closed yet: whether the next MarkRoundEnd closes a round for it.
+func (h *Hop) RoundOpen() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.roundsSent > h.closedRounds
 }
 
 // MarkRoundEnd closes a probe round: probes sent so far and replies received
 // so far become the figures loss is computed from, then stability tracking
 // advances for all nodes. A round in which nothing was sent to this hop
-// (the tracer was paused, or the hop lies beyond the destination) updates the
-// figures but is not a round for the nodes: it adds no probes, sparkline cell
-// or stability slot.
+// (the tracer was paused, no send to it succeeded, or the hop lies beyond the
+// destination) updates the figures but is not a round for the nodes: it adds
+// no probes, sparkline cell or stability slot.
 func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.draining = false
+	h.closedSent = h.probesSent
+	h.closedRecvd = h.probesRecvd
+	h.closedICMPSent = h.icmpSent
+	h.closedICMPRecvd = h.icmpRecvd
 	if h.roundsSent == h.closedRounds {
-		h.closedSent = h.probesSent
-		h.closedRecvd = h.probesRecvd
 		return
 	}
 	h.closedRounds = h.roundsSent
-	// Probes sent to this hop in the round being closed. A round is one ICMP
-	// TTL probe followed by the UDP or TCP flows, so the first is the ICMP
-	// probe and the rest are primary probes.
-	inRound := h.probesSent - h.closedSent
-	icmpSent, primarySent := 0, 0
-	if inRound > 0 {
-		icmpSent, primarySent = 1, inRound-1
-	}
-	h.closedSent = h.probesSent
-	h.closedRecvd = h.probesRecvd
+	// Probes of each type sent to this hop in the round being closed, as the
+	// tracer reported them.
+	icmpSent, primarySent := h.openICMP, h.openPrimary
+	h.openICMP, h.openPrimary = 0, 0
 	h.holdVerdictLocked()
 	verdict := h.rateLimitStateLocked()
 	for _, n := range h.Nodes {
@@ -444,6 +492,56 @@ func (h *Hop) ProbeCounts() (sent, received int) {
 	return h.closedSent, h.closedRecvd
 }
 
+// ProbeCountsByType splits ProbeCounts by probe type: the ICMP TTL probes
+// sent to this TTL and their replies, and the same for the primary (UDP or
+// TCP) probes, as of the last closed round.
+func (h *Hop) ProbeCountsByType() (icmpSent, icmpRecvd, primarySent, primaryRecvd int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.closedICMPSent, h.closedICMPRecvd,
+		h.closedSent - h.closedICMPSent, h.closedRecvd - h.closedICMPRecvd
+}
+
+// EchoCounts returns the direct echoes sent to this hop's nodes and the
+// answers received, and the part of both that counts toward the hop's
+// rate-limit verdict and echo loss: a node that ignores ping is left out of
+// the counted totals (see echoTotalsLocked).
+func (h *Hop) EchoCounts() (sent, received, countedSent, countedReceived int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, n := range h.Nodes {
+		s := n.EchoStats()
+		sent += s.Sent
+		received += s.Received
+	}
+	countedSent, countedReceived = h.echoTotalsLocked()
+	return sent, received, countedSent, countedReceived
+}
+
+// String names the kind as the JSON export does (loss_kind).
+func (k LossKind) String() string {
+	switch k {
+	case LossRateLimited:
+		return "rate_limited"
+	case LossProvisional:
+		return "provisional"
+	default:
+		return "measured"
+	}
+}
+
+// String names the verdict as the JSON export does (rate_limited).
+func (s RateLimitState) String() string {
+	switch s {
+	case RateLimitYes:
+		return "yes"
+	case RateLimitNo:
+		return "no"
+	default:
+		return "undetermined"
+	}
+}
+
 // GetMinRTT returns the primary node's minimum RTT.
 func (h *Hop) GetMinRTT() time.Duration {
 	h.mu.RLock()
@@ -501,6 +599,10 @@ func (h *Hop) Reset() {
 	h.probesRecvd = 0
 	h.closedSent = 0
 	h.closedRecvd = 0
+	h.icmpSent, h.icmpRecvd = 0, 0
+	h.closedICMPSent, h.closedICMPRecvd = 0, 0
+	h.openICMP = 0
+	h.openPrimary = 0
 	h.heldVerdict = RateLimitUndetermined
 	h.heldEchoLoss = 0
 }
@@ -545,6 +647,16 @@ func (t *Table) GetOrCreate(ttl int) *Hop {
 // the given TTL. Implements probe.RoundMarker.
 func (t *Table) MarkRoundSent(ttl int, probes int) {
 	t.GetOrCreate(ttl).MarkRoundSentProbes(probes)
+}
+
+// MarkRoundSentByType records the TTL-limited probes of each type the tracer
+// wrote for the given TTL this round. Implements probe.RoundTypeMarker. A TTL
+// for which nothing left gets no hop row: nothing was sent to it.
+func (t *Table) MarkRoundSentByType(ttl int, icmpTTL int, primary int) {
+	if icmpTTL <= 0 && primary <= 0 {
+		return
+	}
+	t.GetOrCreate(ttl).MarkRoundSentByType(icmpTTL, primary)
 }
 
 // Snapshot returns a sorted slice of hops from TTL 1 to MaxTTLSeen.

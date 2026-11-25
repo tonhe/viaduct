@@ -81,6 +81,30 @@ func (e *AlertEngine) Update(destLoss float64, destLatency time.Duration) bool {
 	return e.state != prevState
 }
 
+// ObserveRound feeds a round that has just been closed to the engine: hops
+// are the table's hops, sentTo the TTLs probes were sent to in that round and
+// maxTTL the last TTL to look at. A nil engine (alerting off) does nothing.
+func (e *AlertEngine) ObserveRound(hops []*hop.Hop, sentTo map[int]bool, maxTTL int) {
+	if e == nil {
+		return
+	}
+	hopMap := make(map[int]*hop.Hop, len(hops))
+	for _, h := range hops {
+		hopMap[h.TTL] = h
+	}
+	// A round that sent nothing to the destination's hop (the trace was
+	// paused, or no send to it succeeded) is no evidence about the path:
+	// the alert engine counts consecutive bad rounds, and such a round is
+	// neither bad nor good.
+	if dest := destAlertTTL(hopMap, maxTTL); dest > 0 && !sentTo[dest] {
+		return
+	}
+	destLoss, destLatency := destAlertMetrics(hopMap, maxTTL)
+	if e.Update(destLoss, destLatency) && e.State() == AlertDegraded {
+		e.FindAffectedHop(hopMap, maxTTL, computeDeltas(hopMap, maxTTL))
+	}
+}
+
 // SetAffectedHop records which hop is causing the problem.
 func (e *AlertEngine) SetAffectedHop(ttl int, asn string) {
 	e.affectedHop = ttl
@@ -135,6 +159,21 @@ func destAlertMetrics(hopMap map[int]*hop.Hop, maxTTL int) (loss float64, latenc
 		}
 	}
 	return 0, 0
+}
+
+// destAlertTTL returns the TTL of the hop destAlertMetrics reads: the last
+// responding hop, or 0 when no hop has responded.
+func destAlertTTL(hopMap map[int]*hop.Hop, maxTTL int) int {
+	for i := maxTTL; i >= 1; i-- {
+		h, ok := hopMap[i]
+		if !ok || h == nil {
+			continue
+		}
+		if pn := h.PrimaryNode(); pn != nil && pn.GetReceived() > 0 {
+			return i
+		}
+	}
+	return 0
 }
 
 // FindAffectedHop walks backward from the destination to find the first hop

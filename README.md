@@ -141,11 +141,11 @@ Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` an
 
 The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come from direct echo probes rather than TTL Exceeded replies. No configuration needed — it just works.
 
-**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
+**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. A probe that could not be sent (the socket refused the write, or did not take it within 100 ms) is not counted as sent and not counted as lost; a round in which nothing could be sent to a hop is not a round for that hop and does not count toward alerting. `Rnd` is the number of rounds.
 
 **When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way, because a host throttles the Port Unreachable errors it sends in answer to UDP probes just as a router throttles Time Exceeded.
 
-**Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`.
+**Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`. A hop that answers from an IPv6 link-local address (`fe80::…`) is not echoed, so loss there stays `N%?`.
 
 With several targets in the TUI the verdict takes longer. A trace sends up to 64 echoes a round; the TUI divides that between its targets (64 / targets, never fewer than 4), and a target spreads its share over the nodes of its path. When the share is smaller than the number of nodes, each node gets budget / nodes echoes a round, so 20 samples take about 20 × nodes / budget rounds: about 75 rounds for 16 targets on a 15-node path. Report mode traces targets one after another, so each target gets the full 64.
 
@@ -358,8 +358,27 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
 | `--no-alert` | | | Disable alerting |
 | `--theme` | | (config) | Color theme slug (e.g. 'dracula', 'nord') |
+| `--debug-log` | | | Append diagnostics to this file: send failures, one line per completed round, a per-hop loss snapshot every 10 rounds and at exit, and alerts raised and cleared. See [Debug log](#debug-log) |
 | `--version` | `-v` | | Print `via version <version> (build <build>)` and exit. A release build prints the release number (`0.3.0`). `make build` prints `git describe` without the leading `v` (`0.2.1-21-gc6df19c`: 21 commits after v0.2.1, with `-dirty` for a modified tree). A build that sets no version (`go build`, `go install`) prints the module version the Go toolchain recorded; if there is none, `dev+<revision>` (the first 12 characters of the commit, with `.dirty` for a modified tree); if there is no revision either, `dev` |
 | `--help` | `-h` | | Print usage and the flag list, then exit |
+
+### Debug log
+
+`--debug-log <file>` appends timestamped lines to a file, in the TUI and in report mode. Each line is tagged with the target's address, so one file holds every target of a run. Without the flag nothing is written.
+
+```
+2026-11-25T04:38:44.123Z [192.0.2.9] send failed: icmp-ttl to 192.0.2.9 (ttl 3): no buffer space available; logged once for this address
+2026-11-25T04:38:45.201Z [192.0.2.9] round 12: probes not sent: icmp-ttl 0 timed out, 3 failed, 0 skipped
+2026-11-25T04:38:46.214Z [192.0.2.9] round 12: took 1.214s; sent icmp-ttl=8 udp-ttl=24 icmp-echo=8; replies icmp-ttl=8 udp-ttl=21 icmp-echo=8; no reply from 1 of 8 hops probed
+2026-11-25T04:38:54.302Z [192.0.2.9] snapshot round=20 ttl=3 nodes=198.51.100.1,198.51.100.2 loss=~0%† kind=rate_limited icmp-ttl=20/0 udp-ttl=60/41 echo=38/0 echo-counted=38/0 rate-limited=yes
+2026-11-25T04:38:57.310Z [192.0.2.9] round 23: alert raised: Sustained loss to destination: 33.3% (hop 8 affected)
+2026-11-25T04:39:05.330Z [192.0.2.9] round 31: alert cleared: Sustained loss to destination: 45.0% (hop 8 affected)
+```
+
+- **Send failures**: each address a send failed for (once per address, with the error) and, for each round, the probes that could not be sent.
+- **Round line**, one per completed round: the time since the previous round closed, the probes sent in the round by type, the replies counted in the round by type, and how many of the hops probed answered none of their TTL-limited probes. A round in which every probed hop is silent reads `no reply from 8 of 8 hops probed`. A reply is counted in the round in which it arrives, as it is for loss.
+- **Snapshot**, one line per hop up to the destination, every 10 rounds (`snapshot`) and once at exit (`final`): the hop's addresses, its loss exactly as the views show it (`12.3%`, `85.7%?`, `~0%†`) with its kind, and the counts behind it as `sent/lost` over completed rounds: TTL-limited probes by type, direct echoes (`echo`), the echoes that count toward the verdict (`echo-counted`, which leaves out a node that ignores ping) and the rate-limit verdict.
+- **Alerts**: a line when an alert is raised and a line when it clears, with the alert's text. Report mode shows no alerts; its log records the ones the TUI would have raised with the same `--alert-*` settings.
 
 ---
 
@@ -370,7 +389,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | <kbd>j</kbd> / <kbd>k</kbd> | Scroll down / up one line |
 | <kbd>↓</kbd> / <kbd>↑</kbd> | Scroll down / up one line (single target; with several targets they move focus, see below) |
 | <kbd>g</kbd> / <kbd>G</kbd> | Jump to top/bottom |
-| <kbd>p</kbd> | Pause/resume probing |
+| <kbd>p</kbd> | Pause/resume probing (every probe type, the direct echoes included) |
 | <kbd>r</kbd> | Reset all hop stats |
 | <kbd>d</kbd> | Cycle display modes (Default → Health → Latency → Variability → Probe Detail) |
 | <kbd>e</kbd> | Export the current trace to a file (see [Exporting from the TUI](#exporting-from-the-tui)) |

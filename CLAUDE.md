@@ -77,7 +77,7 @@ Lab assertions are exact counts. A scenario drops exactly every Nth reply, kerne
 
 ## How loss is defined
 
-Loss is per probe: TTL-limited probes that got no reply, divided by TTL-limited probes sent, counted over completed rounds. The round still waiting for replies is excluded, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds.
+Loss is per probe: TTL-limited probes that got no reply, divided by TTL-limited probes sent, counted over completed rounds. The round still waiting for replies is excluded, so a live view never shows probes in flight as lost. `Rnd` is the number of rounds. A probe that was not written (the send failed, timed out or was skipped) is not counted as sent and not counted as lost. A round in which nothing left for a hop is not a round for that hop. The alert engine skips a round that sent nothing to the destination's hop.
 
 A hop is marked rate-limited (`~N%†`) only when its TTL-probe loss is significantly higher than its direct-echo loss (two-proportion z-test, p < 0.01) with at least 20 echo probes sent. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way. A marked hop shows its echo loss.
 
