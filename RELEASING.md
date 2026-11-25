@@ -4,7 +4,7 @@ How viaduct versions are numbered, when a release is cut, and how work gets from
 
 ## Versions
 
-The git tag is the only source of the version. The release build injects it into the binary.
+The git tag is the only source of the version. The release build injects it into the binary, and the release workflow fails if the built binary's `--version` does not contain the tag. `make build` injects `git describe` (the tag on a tagged commit, `tag-N-gHASH` after it, `-dirty` for a modified tree). A build that injects nothing reports what the Go toolchain recorded: the module version or the VCS revision (`cmd/via/version.go`).
 
 While the project is on 0.x:
 
@@ -58,7 +58,6 @@ These are known gaps between the policy above and the files in the repository. E
 
 - `.goreleaser.yml` filters the changelog but defines no groups, so the generated list is flat, in commit order.
 - `.goreleaser.yml` sets `release.draft: false`, and GoReleaser only runs after the `release` environment is approved. There is no draft release to edit before approval. Until that changes, the Breaking section is added to the published release from the draft in the release issue.
-- `cmd/via/main.go` no longer carries a version number: `version` defaults to `dev`, and a build that injects nothing reports what the Go toolchain recorded (the module version or the VCS revision, see `cmd/via/version.go`). Release builds still inject the tag. `Makefile` does not inject `main.version` yet, and the release workflow does not check the built binary's `--version` against the tag. [#27](https://github.com/tonhe/viaduct/issues/27) tracks both.
 
 The agent loop's part of the lifecycle below arrived with [agent-loop v1.2.0](https://github.com/tonhe/agent-loop/pull/7), in use here since 2026-11-25: "Release vX.Y.Z" and "Plan vX.Y" issues, skipping `agent:paired` issues, never assigning a milestone at triage, and selection by type. It is new, so until a Release or Plan issue has actually been opened by a nightly run, treat those steps as untested here. Two things differ from a plain reading of the lifecycle:
 
