@@ -158,24 +158,11 @@ func (m Model) viewProbeDetail() string {
 	var b strings.Builder
 
 	// Header bar.
-	protoLabel := strings.ToUpper(s.protocolName)
-	if s.protocolName == "auto" {
-		protoLabel = "Auto → " + strings.ToUpper(s.probeCfg.Protocol.Name())
-	}
-	if s.protocolName != "icmp" && s.probeCfg.NumPaths > 1 {
-		protoLabel += "/ECMP"
-	}
-	targetIPStr := "(unresolved)"
-	if s.targetIP != nil {
-		targetIPStr = s.targetIP.String()
-	}
-	header := fmt.Sprintf("via %s   Target: %s (%s)    Proto: %s    Probes: %d    View: %s",
-		m.version, s.target, targetIPStr, protoLabel, s.probeCount, ViewProbeDetail.String())
-	b.WriteString(barBg(headerStyle().Render(header), m.width))
+	b.WriteString(barBg(headerStyle().Render(m.headerLine(s, ViewProbeDetail.String())), m.width))
 	b.WriteString("\n")
 
 	// Separator.
-	b.WriteString(barBg(dimStyle().Render(strings.Repeat("─", max(m.width, 60))), m.width))
+	b.WriteString(barBg(dimStyle().Render(separatorLine(m.width)), m.width))
 	b.WriteString("\n")
 
 	// Multi-target summary panel.
@@ -262,8 +249,19 @@ func (m Model) viewProbeDetail() string {
 		multiHint = "    ↑/↓:target space:mark c:columns"
 	}
 	footerNote := "echo cadence: ceil(pairs/budget) rounds"
-	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s    j/k:scroll p:pause r:reset [d] %s q:quit%s    %s%s",
-		traceStatus, elapsed, dnsLabel, m.viewMode.Next().String(), scrollHint, footerNote, multiHint)
+	keys := "j/k:scroll p:pause r:reset [d] " + m.viewMode.Next().String()
+	status := m.statusLine(
+		fmt.Sprintf("%s    Elapsed: %s    DNS: %s    %s q:quit%s    %s%s",
+			traceStatus, elapsed, dnsLabel, keys, scrollHint, footerNote, multiHint),
+		statusParts{
+			trace:   traceStatus,
+			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+			dns:     "DNS: " + dnsLabel,
+			keys:    keys,
+			scroll:  strings.TrimSpace(scrollHint),
+			multi:   strings.TrimSpace(multiHint),
+			footer:  footerNote,
+		})
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
 
 	// Settings overlay — rendered on top of everything else.

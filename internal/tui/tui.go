@@ -355,27 +355,15 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// Header bar
-	protoLabel := strings.ToUpper(s.protocolName)
-	if s.protocolName == "auto" {
-		protoLabel = "Auto → " + strings.ToUpper(s.probeCfg.Protocol.Name())
-	}
-	if s.protocolName != "icmp" && s.probeCfg.NumPaths > 1 {
-		protoLabel += "/ECMP"
-	}
-	targetIPStr := "(unresolved)"
-	if s.targetIP != nil {
-		targetIPStr = s.targetIP.String()
-	}
-	header := fmt.Sprintf("via %s   Target: %s (%s)    Proto: %s    Probes: %d",
-		m.version, s.target, targetIPStr, protoLabel, s.probeCount)
+	viewName := ""
 	if m.viewMode != ViewDefault {
-		header += fmt.Sprintf("    View: %s", m.viewMode.String())
+		viewName = m.viewMode.String()
 	}
-	b.WriteString(barBg(headerStyle().Render(header), m.width))
+	b.WriteString(barBg(headerStyle().Render(m.headerLine(s, viewName)), m.width))
 	b.WriteString("\n")
 
 	// Separator
-	b.WriteString(barBg(dimStyle().Render(strings.Repeat("─", max(m.width, 60))), m.width))
+	b.WriteString(barBg(dimStyle().Render(separatorLine(m.width)), m.width))
 	b.WriteString("\n")
 
 	// Column comparison view: side-by-side layout when more than one session
@@ -407,8 +395,15 @@ func (m Model) View() string {
 		// Column view: surface the focus/mark/select keys on the status bar.
 		// space marks the focused target; when any are marked, only marked panes
 		// show — so mark doubles as pane selection.
-		status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s    tab/↑↓:focus  space:mark  c:summary  e:export  p:pause  r:reset  q:quit",
-			traceStatus, elapsed, dnsLabel)
+		const colKeys = "tab/↑↓:focus  space:mark  c:summary  e:export  p:pause  r:reset"
+		status := m.statusLine(
+			fmt.Sprintf("%s    Elapsed: %s    DNS: %s    %s  q:quit", traceStatus, elapsed, dnsLabel, colKeys),
+			statusParts{
+				trace:   traceStatus,
+				elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+				dns:     "DNS: " + dnsLabel,
+				keys:    colKeys,
+			})
 		b.WriteString(barBg(statusStyle().Render(status), m.width))
 		if m.showSettings && m.settings != nil {
 			return m.settings.View()
@@ -630,8 +625,20 @@ func (m Model) View() string {
 	if len(m.sessions) > 1 {
 		multiHint = "    ↑/↓:target space:mark c:columns"
 	}
-	status := fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    j/k:scroll p:pause r:reset [d] %s q:quit%s%s",
-		traceStatus, elapsed, dnsLabel, flowLabel, switchHint, m.viewMode.Next().String(), scrollHint, multiHint)
+	keys := "j/k:scroll p:pause r:reset [d] " + m.viewMode.Next().String()
+	status := m.statusLine(
+		fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    %s q:quit%s%s",
+			traceStatus, elapsed, dnsLabel, flowLabel, switchHint, keys, scrollHint, multiHint),
+		statusParts{
+			trace:   traceStatus,
+			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+			dns:     "DNS: " + dnsLabel,
+			flows:   strings.TrimSpace(flowLabel),
+			notice:  strings.TrimSpace(switchHint),
+			keys:    keys,
+			scroll:  strings.TrimSpace(scrollHint),
+			multi:   strings.TrimSpace(multiHint),
+		})
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
 
 	// Settings overlay — rendered on top of everything else.
