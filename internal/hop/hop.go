@@ -275,12 +275,27 @@ func (h *Hop) rateLimitStateLocked() RateLimitState {
 	return rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
 }
 
-// echoTotalsLocked sums the echo probes sent to, and answered by, this hop's nodes.
+// echoTotalsLocked sums the echo probes sent to, and answered by, this hop's
+// nodes. When at least one node answers echo, a node that ignores ping is left
+// out (PathNode.echoTotals): the answering nodes measure the path and the
+// silent one only its own filter. When no node has answered an echo there is
+// nothing to set the silence against, and every echo counts as lost.
 func (h *Hop) echoTotalsLocked() (sent, received int) {
+	answered := false
 	for _, n := range h.Nodes {
 		s := n.EchoStats()
 		sent += s.Sent
 		received += s.Received
+		answered = answered || s.Received > 0
+	}
+	if !answered {
+		return sent, received
+	}
+	sent, received = 0, 0
+	for _, n := range h.Nodes {
+		s, r := n.echoTotals()
+		sent += s
+		received += r
 	}
 	return sent, received
 }
