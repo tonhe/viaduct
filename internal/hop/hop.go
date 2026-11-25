@@ -118,7 +118,9 @@ func (h *Hop) MarkRoundEnd() {
 	defer h.mu.Unlock()
 	h.closedSent = h.probesSent
 	h.closedRecvd = h.probesRecvd
+	verdict := h.rateLimitStateLocked()
 	for _, n := range h.Nodes {
+		n.setHopVerdict(verdict)
 		n.RecordRoundAvg()
 		n.AdvanceRound()
 		n.MarkProbeRoundEnd()
@@ -211,17 +213,67 @@ func (h *Hop) MarkTarget(ip net.IP) {
 	}
 }
 
-// HeadlineLoss is the loss figure every view shows for this hop, and whether
-// it is echo-derived. When the hop's primary node is judged rate-limited, the
-// TTL probe loss is an artifact of the router throttling its replies, so the
-// loss of direct echoes to that node is reported instead (shown as "~N%†").
-// Otherwise it is LossPercent.
-func (h *Hop) HeadlineLoss() (loss float64, rateLimited bool) {
-	if pn := h.PrimaryNode(); pn != nil && pn.RateLimitState() == RateLimitYes {
-		echo := pn.EchoStats()
-		return echo.ProbeLossPercent(), true
+// RateLimitState is the hop's rate-limit verdict: whether the loss of
+// TTL-limited probes at this hop is the routers declining to answer them
+// rather than packets being lost.
+//
+// It compares every TTL-limited probe sent to this hop distance, of every
+// type, with every direct echo sent to the hop's nodes. The comparison has to
+// be made for the hop as a whole: a TTL-limited probe is addressed to a
+// distance, not to a node, so one node cannot tell which probes it "lost". A
+// hop that answers echoes but not its TTL probes is rate-limiting or filtering
+// them. A hop that loses both at the same rate has real loss.
+//
+// The destination is never rate-limited: an echo to it is the same packet on
+// the same path as the ICMP probe that reaches it.
+func (h *Hop) RateLimitState() RateLimitState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rateLimitStateLocked()
+}
+
+func (h *Hop) rateLimitStateLocked() RateLimitState {
+	if pn := h.primaryNodeLocked(); pn != nil && pn.IsTarget() {
+		return RateLimitNo
 	}
-	return h.LossPercent(), false
+	echoSent, echoRecvd := h.echoTotalsLocked()
+	return rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
+}
+
+// echoTotalsLocked sums the echo probes sent to, and answered by, this hop's nodes.
+func (h *Hop) echoTotalsLocked() (sent, received int) {
+	for _, n := range h.Nodes {
+		s := n.EchoStats()
+		sent += s.Sent
+		received += s.Received
+	}
+	return sent, received
+}
+
+// HeadlineLoss is the loss figure every view shows for this hop, and whether
+// it is echo-derived. When the hop is judged rate-limited, its TTL probe loss
+// is an artifact of routers not answering, so the loss of direct echoes to
+// the hop's nodes is reported instead (shown as "~N%†"). Otherwise it is
+// LossPercent.
+func (h *Hop) HeadlineLoss() (loss float64, rateLimited bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.rateLimitStateLocked() == RateLimitYes {
+		sent, received := h.echoTotalsLocked()
+		lost := sent - received
+		if lost < 0 {
+			lost = 0
+		}
+		return float64(lost) / float64(sent) * 100, true
+	}
+	if h.closedSent == 0 {
+		return 0, false
+	}
+	lost := h.closedSent - h.closedRecvd
+	if lost < 0 {
+		lost = 0
+	}
+	return float64(lost) / float64(h.closedSent) * 100, false
 }
 
 // ProbeCounts returns the TTL-limited probes sent to this TTL and the replies

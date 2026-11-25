@@ -170,7 +170,13 @@ func BuildReport(version string, target string, targetIP net.IP,
 				Primary: ProbeCount{Sent: primary.Sent, Received: primary.Received},
 				Echo:    ProbeCount{Sent: echo.Sent, Received: echo.Received},
 			}
-			en.RateLimited = rateLimitName(node.RateLimitState())
+			// The verdict is the hop's (see hop.Hop.RateLimitState); the
+			// destination itself is never rate-limited.
+			if node.IsTarget() {
+				en.RateLimited = rateLimitName(hop.RateLimitNo)
+			} else {
+				en.RateLimited = rateLimitName(h.RateLimitState())
+			}
 
 			if en.Hostname == "" && resolver != nil {
 				if name, ok := resolver.Lookup(ip); ok {

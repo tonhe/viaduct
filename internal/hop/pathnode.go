@@ -71,6 +71,9 @@ type PathNode struct {
 	echoSentThisRound bool // an echo probe was dispatched to this node this round
 	isTarget          bool // this node is the trace's destination
 
+	hopVerdict    RateLimitState // the owning hop's verdict as of the last closed round
+	hopVerdictSet bool
+
 	recentAvgs     [trendWindowSize]float64 // per-round avg RTTs in ms
 	recentAvgIdx   int
 	recentAvgCount int
@@ -257,7 +260,7 @@ func (pn *PathNode) RecordRoundAvg() {
 	case pn.icmpEcho.respondedThisRound:
 		pn.writeSparkLocked(SparkSample{RTT: pn.icmpEcho.LastRTT, Kind: SparkEcho})
 
-	case pn.rateLimitStateLocked() == RateLimitYes && !pn.echoSentThisRound:
+	case pn.sparkRateLimitedLocked() && !pn.echoSentThisRound:
 		pn.writeSparkLocked(SparkSample{Kind: SparkHeld})
 
 	default:
@@ -529,18 +532,28 @@ func (pn *PathNode) rateLimitStateLocked() RateLimitState {
 		return RateLimitNo
 	}
 	// ICMP TTL: one probe per round, so Sent (rounds) is probes sent.
-	n1, n2 := float64(pn.icmpTTL.Sent), float64(pn.icmpEcho.Sent)
-	if n1 == 0 {
+	return rateLimitVerdict(pn.icmpTTL.Sent, pn.icmpTTL.Sent-pn.icmpTTL.Received,
+		pn.icmpEcho.Sent, pn.icmpEcho.Sent-pn.icmpEcho.Received)
+}
+
+// rateLimitVerdict compares TTL-probe loss with echo loss: Yes when TTL
+// probes are lost significantly more often than echoes (two-proportion z-test
+// at rateLimitZ), Undetermined below rateLimitMinEchoSamples echoes.
+func rateLimitVerdict(ttlSent, ttlLost, echoSent, echoLost int) RateLimitState {
+	if echoSent < rateLimitMinEchoSamples {
+		return RateLimitUndetermined
+	}
+	if ttlSent == 0 {
 		return RateLimitNo
 	}
-	lost1 := n1 - float64(pn.icmpTTL.Received)
-	lost2 := n2 - float64(pn.icmpEcho.Received)
-	if lost1 < 0 {
-		lost1 = 0
+	if ttlLost < 0 {
+		ttlLost = 0
 	}
-	if lost2 < 0 {
-		lost2 = 0
+	if echoLost < 0 {
+		echoLost = 0
 	}
+	n1, n2 := float64(ttlSent), float64(echoSent)
+	lost1, lost2 := float64(ttlLost), float64(echoLost)
 	p1, p2 := lost1/n1, lost2/n2
 	pooled := (lost1 + lost2) / (n1 + n2)
 	variance := pooled * (1 - pooled) * (1/n1 + 1/n2)
@@ -551,6 +564,36 @@ func (pn *PathNode) rateLimitStateLocked() RateLimitState {
 		return RateLimitYes
 	}
 	return RateLimitNo
+}
+
+// IsTarget reports whether this node has been marked as the destination.
+func (pn *PathNode) IsTarget() bool {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	return pn.isTarget
+}
+
+// setHopVerdict records the owning hop's rate-limit verdict, taken when a
+// round closes. The sparkline uses it to tell "reachable, not read this
+// round" from a drop; the hop verdict is the authoritative one because a
+// node cannot see the TTL probes other nodes at its hop answered.
+func (pn *PathNode) setHopVerdict(v RateLimitState) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.hopVerdict = v
+	pn.hopVerdictSet = true
+}
+
+// sparkRateLimitedLocked reports whether this node should be treated as
+// rate-limited when writing a sparkline cell.
+func (pn *PathNode) sparkRateLimitedLocked() bool {
+	if pn.isTarget {
+		return false
+	}
+	if pn.hopVerdictSet {
+		return pn.hopVerdict == RateLimitYes
+	}
+	return pn.rateLimitStateLocked() == RateLimitYes
 }
 
 // Reset clears all stats but preserves the IP address.
@@ -580,6 +623,8 @@ func (pn *PathNode) Reset() {
 	pn.sparkCount = 0
 	pn.echoSentThisRound = false
 	pn.isTarget = false
+	pn.hopVerdict = RateLimitUndetermined
+	pn.hopVerdictSet = false
 	pn.recentAvgs = [trendWindowSize]float64{}
 	pn.recentAvgIdx = 0
 	pn.recentAvgCount = 0

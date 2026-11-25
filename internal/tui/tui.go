@@ -1203,20 +1203,14 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 		parts = append(parts, m.renderASNCell(ip, m.prevASNForTTL(h.TTL), layout.asnWidth, layout.asnFull))
 	}
 
-	// Loss cell — rate-limited nodes report echo-based ground truth with a "†"
-	// dagger; all other cells use the hop-level TTL-probe loss percent.
 	pn := h.PrimaryNode()
-	state := hop.RateLimitUndetermined
-	if pn != nil {
-		state = pn.RateLimitState()
-	}
-	if state == hop.RateLimitYes {
-		echo := pn.EchoStats()
-		echoLoss := echo.ProbeLossPercent()
-		plain := fmt.Sprintf("~%.0f%%†", echoLoss)
+
+	// Loss cell — a rate-limited hop reports echo-based ground truth with a
+	// "†" dagger; otherwise the hop's TTL-probe loss percent.
+	if loss, limited := h.HeadlineLoss(); limited {
+		plain := fmt.Sprintf("~%.0f%%†", loss)
 		parts = append(parts, rateLimitStyle().Render(padCell(plain, 8)))
 	} else {
-		loss := h.LossPercent()
 		plain := fmt.Sprintf("%.1f%%", loss)
 		if loss == 0 {
 			plain = "0.0%"
@@ -1379,14 +1373,10 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 		// Loss cell (first node only). Rate-limited nodes report echo-based
 		// ground truth with a "†" dagger; other cells show hop-level TTL loss.
 		if i == 0 {
-			state := node.RateLimitState()
-			if state == hop.RateLimitYes {
-				echo := node.EchoStats()
-				echoLoss := echo.ProbeLossPercent()
-				plain := fmt.Sprintf("~%.0f%%†", echoLoss)
+			if loss, limited := h.HeadlineLoss(); limited {
+				plain := fmt.Sprintf("~%.0f%%†", loss)
 				parts = append(parts, rateLimitStyle().Render(padCell(plain, 8)))
 			} else {
-				loss := h.LossPercent()
 				plain := fmt.Sprintf("%.1f%%", loss)
 				if loss == 0 {
 					plain = "0.0%"
@@ -1644,14 +1634,15 @@ func (m Model) FinalSummary() string {
 			continue
 		}
 
-		rateLimited := h.PrimaryNode() != nil && h.PrimaryNode().RateLimitState() == hop.RateLimitYes
+		// One figure for the hop, the same one the live table shows: echo
+		// loss when the hop is rate-limited, TTL-probe loss otherwise.
+		hopLoss, rateLimited := h.HeadlineLoss()
 
 		if multipath && h.IsDivergent() {
 			nodes := h.GetNodes()
 			sort.Slice(nodes, func(i, j int) bool {
 				return nodes[i].GetReceived() > nodes[j].GetReceived()
 			})
-			hopLoss := h.LossPercent()
 			sent := h.Rounds()
 			nodeIdx := 0
 			for _, node := range nodes {
@@ -1685,8 +1676,7 @@ func (m Model) FinalSummary() string {
 				sntStr := "-"
 				if nodeIdx == 0 {
 					if rateLimited {
-						echo := node.EchoStats()
-						lossStr = fmt.Sprintf("~%.0f%%†", echo.ProbeLossPercent())
+						lossStr = fmt.Sprintf("~%.0f%%†", hopLoss)
 					} else {
 						lossStr = fmt.Sprintf("%.1f%%", hopLoss)
 					}
@@ -1747,10 +1737,9 @@ func (m Model) FinalSummary() string {
 
 			var lossStr string
 			if rateLimited {
-				echo := h.PrimaryNode().EchoStats()
-				lossStr = fmt.Sprintf("~%.0f%%†", echo.ProbeLossPercent())
+				lossStr = fmt.Sprintf("~%.0f%%†", hopLoss)
 			} else {
-				lossStr = fmt.Sprintf("%.1f%%", h.LossPercent())
+				lossStr = fmt.Sprintf("%.1f%%", hopLoss)
 			}
 			sent := h.Rounds()
 			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
