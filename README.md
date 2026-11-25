@@ -126,6 +126,7 @@ If `-6` is requested and the target has no AAAA record (or the host has no IPv6 
 - **Route pre-flight:** before probing an IPv6 target, `via` checks that the host has a route to it. If family was auto-selected and there is no IPv6 route, it falls back to IPv4 and shows `no IPv6 route to <address>; using IPv4` in the status bar (on stderr in report mode). With `-6` it exits with an error instead.
 - **IPv4-mapped addresses:** `::ffff:192.0.2.1` is traced as `192.0.2.1` over IPv4. Combining one with `-6` is an error.
 - **Multicast:** multicast targets (`224.0.0.0/4`, `ff00::/8`) are rejected at startup.
+- **Link-local:** IPv6 link-local targets (`fe80::/10`), with or without a zone (`fe80::1%eth0`), are not supported and are rejected at startup.
 - **Narrow terminals:** a 39-character address is shown in full where it fits. Where it does not, it is shortened in the middle (`2001:db8…55:6661`) so hops that share a prefix stay distinguishable.
 
 ---
@@ -143,6 +144,8 @@ The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come 
 **When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way, because a host throttles the Port Unreachable errors it sends in answer to UDP probes just as a router throttles Time Exceeded.
 
 **Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`.
+
+With several targets in the TUI the verdict takes longer. A trace sends up to 64 echoes a round; the TUI divides that between its targets (64 / targets, never fewer than 4), and a target spreads its share over the nodes of its path. When the share is smaller than the number of nodes, each node gets budget / nodes echoes a round, so 20 samples take about 20 × nodes / budget rounds: about 75 rounds for 16 targets on a 15-node path. Report mode traces targets one after another, so each target gets the full 64.
 
 TUI, report mode and alerting all use the same figure, and the JSON carries it. In the JSON:
 

@@ -71,6 +71,80 @@ func TestResolveTargetSpecs_RejectsMulticast(t *testing.T) {
 	})
 }
 
+// IPv6 link-local targets, with or without a zone, are refused at startup,
+// before the route pre-flight and before any probe (viaduct#88). A zoned
+// literal used to lose its zone and fail with "no IPv6 route".
+func TestResolveTargetSpecs_RejectsLinkLocal(t *testing.T) {
+	names := map[string][]string{
+		"ll.example":    {"fe80::1"},
+		"mixed.example": {"fe80::1", "2001:db8:100::7"},
+	}
+	// Like net.LookupIP: a zoned literal comes back without its zone.
+	lookup := func(host string) ([]net.IP, error) {
+		if addr, _, zoned := strings.Cut(host, "%"); zoned {
+			host = addr
+		}
+		return literalLookup(names)(host)
+	}
+
+	for _, target := range []string{"fe80::1%eth0", "fe80::1", "FE80::1%eth0", "febf::1", "ll.example"} {
+		t.Run(target, func(t *testing.T) {
+			routeChecked := false
+			withRouteCheck(t, func(net.IP) error { routeChecked = true; return fmt.Errorf("invalid argument") })
+			specs := resolveTargetSpecs([]string{target}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+			err := specs[0].Err
+			if err == nil {
+				t.Fatalf("link-local target %s accepted (IP %v)", target, specs[0].IP)
+			}
+			if !strings.Contains(err.Error(), "link-local") || !strings.Contains(err.Error(), "not supported") {
+				t.Errorf("error does not say link-local targets are not supported: %v", err)
+			}
+			if !strings.Contains(err.Error(), target) {
+				t.Errorf("error does not name the target %s: %v", target, err)
+			}
+			if specs[0].IP != nil {
+				t.Errorf("refused target has an IP to trace: %v", specs[0].IP)
+			}
+			if routeChecked {
+				t.Error("route pre-flight ran for a refused link-local target")
+			}
+		})
+	}
+
+	t.Run("a zoned literal is refused without a lookup", func(t *testing.T) {
+		looked := false
+		specs := resolveTargetSpecs([]string{"fe80::1%eth0"}, false, false, true, true, baseProbeConfig(), "udp",
+			func(string) ([]net.IP, error) { looked = true; return nil, fmt.Errorf("no such host") })
+		if specs[0].Err == nil || !strings.Contains(specs[0].Err.Error(), "link-local") {
+			t.Errorf("error = %v, want a link-local refusal", specs[0].Err)
+		}
+		if looked {
+			t.Error("lookup ran for a zoned link-local literal")
+		}
+	})
+
+	t.Run("a name with a routable address too uses that one", func(t *testing.T) {
+		withRouteCheck(t, func(net.IP) error { return nil })
+		specs := resolveTargetSpecs([]string{"mixed.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		if specs[0].Err != nil {
+			t.Fatalf("unexpected error: %v", specs[0].Err)
+		}
+		if got := specs[0].IP.String(); got != "2001:db8:100::7" {
+			t.Errorf("IP = %s, want 2001:db8:100::7", got)
+		}
+	})
+
+	t.Run("ordinary targets are unaffected", func(t *testing.T) {
+		withRouteCheck(t, func(net.IP) error { return nil })
+		for _, target := range []string{"2001:db8:100::7", "198.51.100.7"} {
+			specs := resolveTargetSpecs([]string{target}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+			if specs[0].Err != nil || specs[0].IP.String() != target {
+				t.Errorf("%s: err %v, IP %v; want it accepted", target, specs[0].Err, specs[0].IP)
+			}
+		}
+	})
+}
+
 // --no-paths means one flow, whatever the config file says (viaduct#51). It
 // used to be overwritten by the config's paths value unless --paths was also
 // given.
