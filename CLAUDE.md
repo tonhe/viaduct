@@ -83,6 +83,12 @@ A hop is marked rate-limited (`~N%†`) only when its TTL-probe loss is signific
 
 Until a hop has 20 echo samples, loss there may be rate limiting or real. It is shown as `N%?` and does not count toward alerting.
 
+Which echoes count toward a hop's totals, and what happens when they change:
+
+- A node that has answered none of its first 20 echoes is left out of the hop's echo totals, but only when another node of the same hop answers echo. A hop where no node answers echo, a single-node destination that ignores ping included, has nothing left out: its loss is measured and it can alert.
+- A node that was left out and starts answering joins the totals from its first answer; its earlier unanswered echoes stay out. When a node on a hop where nobody answered starts answering, nothing leaves the totals for that node, and the nodes still ignoring echo are left out from then on.
+- Once a hop has had a verdict (measured or rate-limited) it never returns to `N%?`. If its echo totals fall below 20 samples, it keeps its last verdict, and the loss alert keeps its state, until the new totals reach 20. A held measured figure is the current TTL-probe loss; a held rate-limited figure is the echo loss from when the totals fell.
+
 The TUI, report mode and alerting use the same loss figure for a hop (`hop.Hop.Loss`, rendered by `hop.FormatLoss`). JSON exports carry it as `headline_loss_pct` with `loss_kind` (`measured`, `rate_limited`, `provisional`), next to the raw per-probe `loss_pct`, the probe counts, per-node counts for each probe type and the `rate_limited` verdict. A change that makes these outputs disagree with each other is a bug.
 
 ## Commits and pull requests
