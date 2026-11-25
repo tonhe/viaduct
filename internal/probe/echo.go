@@ -2,6 +2,7 @@ package probe
 
 import (
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,6 +83,12 @@ func unzonedLinkLocal(ip net.IP) bool {
 // round are not attempted.
 func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 	if atomic.LoadInt32(&t.Paused) == 1 {
+		return
+	}
+	// EXPERIMENT ONLY, not for merge: a file named via-exp-no-echo in the
+	// working directory switches the echo tier off, to test whether the echo
+	// tier is what makes macOS drop IPv6 UDP probes (viaduct#115).
+	if _, err := os.Stat("via-exp-no-echo"); err == nil {
 		return
 	}
 	budget := t.cfg.EchoBudget
