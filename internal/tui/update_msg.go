@@ -60,7 +60,10 @@ func (m Model) onHopUpdate(msg HopUpdateMsg) (Model, tea.Cmd) {
 	case probe.ProbeICMPEcho:
 		kind = hop.KindEcho
 	}
-	h.AddSample(r.IP, r.RTT, r.FlowID, kind)
+	if !h.AddSample(r.IP, r.RTT, r.FlowID, kind) {
+		// A reply to a probe sent before a reset: not counted.
+		return m, nil
+	}
 	s.probeCount++
 	if r.IsTarget {
 		h.MarkTarget(r.IP)
