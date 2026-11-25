@@ -228,7 +228,6 @@ func TestSend_RealSocketDeadlineFailsTheSend(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.IPVersion = 4
-	cfg.SendTimeout = time.Nanosecond // passed by the time the write starts
 	tr := NewTracer(net.ParseIP("192.0.2.1"), cfg)
 	snd := &rawSender{conn: conn, ipVersion: 4}
 
@@ -251,8 +250,12 @@ func TestSend_RealSocketDeadlineFailsTheSend(t *testing.T) {
 	}
 
 	// rawSender writes to whatever address it is given; the UDP stand-in needs
-	// a UDP address, so the write goes through a sender that supplies one.
-	udp := udpAddrSender{rawSender: snd, to: dst}
+	// a UDP address, so the write goes through a sender that supplies one. It
+	// also moves the deadline send sets into the past, so the write is certain
+	// to find it passed. A very short timeout is not enough for that: where the
+	// clock is coarse (Windows), "now plus a nanosecond" is still now when the
+	// write starts, and the write succeeds.
+	udp := udpAddrSender{rawSender: snd, to: dst, shift: -time.Hour}
 	if tr.send(udp, sockPrimary, ProbeUDPTTL, 5, []byte("probe"), &net.IPAddr{IP: dst.IP}) {
 		t.Fatal("send reported success on a socket whose write deadline had passed")
 	}
@@ -264,10 +267,16 @@ func TestSend_RealSocketDeadlineFailsTheSend(t *testing.T) {
 	}
 }
 
-// udpAddrSender is a rawSender whose writes go to a UDP address.
+// udpAddrSender is a rawSender whose writes go to a UDP address. shift is
+// added to every write deadline it is given.
 type udpAddrSender struct {
 	*rawSender
-	to *net.UDPAddr
+	to    *net.UDPAddr
+	shift time.Duration
+}
+
+func (u udpAddrSender) SetWriteDeadline(t time.Time) error {
+	return u.rawSender.SetWriteDeadline(t.Add(u.shift))
 }
 
 func (u udpAddrSender) WriteTo(b []byte, _ net.Addr) (int, error) {
