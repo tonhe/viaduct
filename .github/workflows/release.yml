@@ -33,6 +33,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The tag is the only source of the version. If the binary GoReleaser
+      # built does not report it, fail here: the installer and Homebrew jobs
+      # need this job and will not run.
+      - name: Check the released binary reports the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          want="${TAG#v}"
+          bin=$(find dist -type f -name via -path '*linux_amd64*' | head -n 1)
+          if [ -z "$bin" ]; then
+            echo "::error::no linux/amd64 binary found under dist/"
+            exit 1
+          fi
+          got=$("$bin" --version)
+          echo "$bin reports: $got"
+          case "$got" in
+            *"$want"*) ;;
+            *)
+              echo "::error::the released binary reports '$got', which does not contain the tag's version '$want'"
+              exit 1
+              ;;
+          esac
+
   windows-installer:
     needs: release
     runs-on: windows-latest

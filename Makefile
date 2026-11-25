@@ -1,7 +1,13 @@
 BINARY   := via
 PKG      := ./cmd/via
 BUILD_TS := $(shell date -u '+%Y%m%d.%H%M')
-LDFLAGS  := -ldflags "-X main.buildVersion=$(BUILD_TS)"
+# The git tag is the only source of the version. `git describe` gives the tag
+# on a tagged commit and tag-N-gHASH after it, with -dirty for a modified
+# tree; the leading "v" is dropped, as GoReleaser does for release builds.
+# Outside a git checkout this is empty, and via falls back to the build info
+# Go recorded (see cmd/via/version.go).
+VERSION  := $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null))
+LDFLAGS  := -ldflags "-X main.version=$(VERSION) -X main.buildVersion=$(BUILD_TS)"
 
 LAB_TEST := lab.test
 
