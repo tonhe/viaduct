@@ -32,13 +32,14 @@ var (
 )
 
 // sendSocket names the socket a probe is written to. A stall is a property of
-// a socket, not of a probe type: the ICMP TTL probes and the echo tier share
-// one socket, and the UDP or TCP flows have their own.
+// a socket, not of a probe type: the ICMP TTL probes, the UDP or TCP flows and
+// the echo tier each have their own.
 type sendSocket int
 
 const (
-	sockICMP    sendSocket = iota // ICMP TTL probes and the echo tier
+	sockICMP    sendSocket = iota // ICMP TTL probes (and the echo tier, if its own socket could not be opened)
 	sockPrimary                   // UDP or TCP flow probes
+	sockEcho                      // the echo tier's own socket
 	numSendSockets
 )
 
@@ -57,8 +58,9 @@ type sendCounts struct {
 // sendState is the send loop's record of failed sends. Only the send-loop
 // goroutine touches it.
 type sendState struct {
-	// oneSocket is set when both sockets are the same one, as in tests that
-	// route every tier through a single fake sender.
+	// oneSocket is set when the ICMP and primary sockets are the same one, as
+	// in tests that route the TTL probes and the flows through a single fake
+	// sender. The echo socket is never part of it.
 	oneSocket bool
 	// stalled marks a socket on which a write timed out this round. The rest
 	// of the round's writes to it are skipped: each would wait out its own
@@ -71,7 +73,7 @@ type sendState struct {
 }
 
 func (s *sendState) isStalled(sock sendSocket) bool {
-	if s.oneSocket {
+	if s.oneSocket && sock != sockEcho {
 		return s.stalled[sockICMP] || s.stalled[sockPrimary]
 	}
 	return s.stalled[sock]

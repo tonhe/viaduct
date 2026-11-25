@@ -56,6 +56,14 @@ scripts/
 
 A `probe.Tracer` owns one target. `Run` opens a raw ICMP socket for the target's family, starts the listener goroutine, and enters the send loop.
 
+### Sockets
+
+A tracer holds two raw ICMP sockets, and a third raw socket in UDP or TCP mode:
+
+- **The listener's ICMP socket.** Every reply is read from it, and the ICMP TTL probes are written to it. It only ever sends to the target.
+- **The echo tier's ICMP socket.** The echo tier writes to every node on the path, and does so on a socket of its own, in both families. With both on one socket, macOS was seen to refuse writes on it for seconds at a time. The echo socket is never read. Echo replies arrive on the listener's socket, as all inbound ICMP does whichever socket the request left on. On IPv6 an ICMPv6 filter that blocks every type keeps the kernel from delivering anything to the echo socket. On IPv4 Linux has the same filter; other systems have none for a raw IPv4 socket, so there the socket's receive buffer is set to the kernel's minimum and the kernel drops that socket's copies once it is full. If the echo socket cannot be opened, the echo tier sends on the listener's socket and the debug log has a line starting `echo socket:`.
+- **The UDP or TCP send socket.** The primary flows are written to it. In TCP mode a second listener reads it.
+
 ### Three tiers per round
 
 A round walks TTL from `--first-ttl` to the highest TTL worth probing (the destination's TTL once it is known, `--max-hops` before that). For each TTL:
@@ -73,7 +81,7 @@ While the trace is paused nothing is sent, in any tier. The echo tier does not e
 
 ### Sends that fail
 
-Every probe goes out through `Tracer.send` (`send.go`), which sets the hop limit, then a write deadline of 100 ms, then writes. A write that fails or does not complete by the deadline is a probe that was not sent: its `probeMap` record is removed, it is not reported as sent, and the loop moves on. After a write times out, the remaining sends to that socket in the round are skipped and counted as not sent, so a socket that has stopped accepting writes costs a round one deadline and not one per probe. The next round tries the socket again. The ICMP TTL probes and the echo tier share the ICMP socket; the UDP or TCP flows have their own.
+Every probe goes out through `Tracer.send` (`send.go`), which sets the hop limit, then a write deadline of 100 ms, then writes. A write that fails or does not complete by the deadline is a probe that was not sent: its `probeMap` record is removed, it is not reported as sent, and the loop moves on. After a write times out, the remaining sends to that socket in the round are skipped and counted as not sent, so a socket that has stopped accepting writes costs a round one deadline and not one per probe. The next round tries the socket again. A stall belongs to one socket: the ICMP TTL probes, the UDP or TCP flows and the echo tier each have their own (see "Sockets"), so a stalled echo socket costs a round its echoes and not its TTL probes.
 
 With `--debug-log <file>` the tracer writes one line for each address a send failed for (once per address, with the error) and one line for each round in which probes were not sent, with the counts per probe type.
 
@@ -187,7 +195,7 @@ shared
 
 ## Testing
 
-- **Unit tests** in every package. The tracer has seams for its sockets (`listenICMP`, `newSender`) and `cmd/via` has one for the tracer (`newTracer`), so the send loop, the listener and report mode are tested without raw sockets.
+- **Unit tests** in every package. The tracer has seams for its sockets (`listenICMP`, `newSender`, `newEchoSender`) and `cmd/via` has one for the tracer (`newTracer`), so the send loop, the listener and report mode are tested without raw sockets.
 - **Golden files** under `internal/tui/testdata/` pin rendered views and end-to-end TUI runs. Regenerate with `make golden-update`.
 - **Coverage floors** per package in `scripts/check-coverage.sh`, enforced by `make coverage-gate` and CI.
 - **Fuzzing.** A weekly workflow fuzzes the inner-header parser, transport offset, TCP checksum, TCP response parser, both Team Cymru response parsers and config loading.
@@ -197,7 +205,7 @@ shared
 
 ## Gotchas
 
-**Raw sockets.** Every mode needs a raw ICMP socket, and UDP and TCP modes need a second raw socket for sending. That means root, or `CAP_NET_RAW` on Linux. `sysprobe` deliberately does not test socket permissions. It answers "does this host have this address family", and the permission failure is left to the capability check so the `sudo` re-exec still happens.
+**Raw sockets.** Every mode needs a raw ICMP socket and opens a second one for the echo tier, and UDP and TCP modes need another raw socket for sending. That means root, or `CAP_NET_RAW` on Linux. `sysprobe` deliberately does not test socket permissions. It answers "does this host have this address family", and the permission failure is left to the capability check so the `sudo` re-exec still happens.
 
 **A raw-socket write can block.** When the kernel answers a write with `EAGAIN`, Go parks the goroutine until the socket is writable, which on macOS over IPv6 was seen never to happen. No probe is written without a write deadline (see "Sends that fail"). A write the kernel accepts and then never transmits cannot be told from a lost probe, and is counted as one.
 
