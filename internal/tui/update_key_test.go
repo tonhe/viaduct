@@ -553,6 +553,140 @@ func TestKeys_MarkAndToggleColumns(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestKeys_ColumnViewIgnoresScrollKeys (#102)
+// ---------------------------------------------------------------------------
+
+// scrollableMultiModel returns a multi-target model at height 16 whose focused
+// target has 20 hops, so the hop table has a positive maxScrollOffset.
+func scrollableMultiModel(t *testing.T) Model {
+	t.Helper()
+	opts := make([]hopSampleFixture, 20)
+	for i := range opts {
+		opts[i] = hopSample(i+1, "192.0.2.1", 10*time.Millisecond)
+	}
+	m := multiTestModel(t, withSize(120, 16), withHops(opts...))
+	if m.maxScrollOffset() == 0 {
+		t.Fatal("precondition: focused target must be scrollable")
+	}
+	return m
+}
+
+func TestKeys_ColumnViewIgnoresScrollKeys(t *testing.T) {
+	starts := []struct {
+		name   string
+		offset func(Model) int
+	}{
+		{"at bottom", func(Model) int { return 0 }},
+		{"scrolled", func(m Model) int { return 1 }},
+		{"at top", func(m Model) int { return m.maxScrollOffset() }},
+	}
+	for _, st := range starts {
+		for _, key := range []string{"j", "k", "g", "G"} {
+			t.Run(st.name+"/"+key, func(t *testing.T) {
+				m := scrollableMultiModel(t)
+				m.scrollOffset = st.offset(m)
+				m.autoScroll = m.scrollOffset == 0
+				m.columnView = true
+				wantOff, wantAuto := m.scrollOffset, m.autoScroll
+
+				next := m
+				for i := 0; i < 3; i++ {
+					next, _ = next.onMainKey(keyPress(key))
+				}
+				if next.scrollOffset != wantOff {
+					t.Errorf("scrollOffset = %d, want %d", next.scrollOffset, wantOff)
+				}
+				if next.autoScroll != wantAuto {
+					t.Errorf("autoScroll = %v, want %v", next.autoScroll, wantAuto)
+				}
+				if !next.columnView {
+					t.Error("column view should still be showing")
+				}
+			})
+		}
+	}
+}
+
+func TestKeys_ColumnViewRoundTripKeepsHopTableScroll(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset int
+	}{
+		{"following", 0},
+		{"scrolled", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := scrollableMultiModel(t)
+			m.scrollOffset = tc.offset
+			m.autoScroll = tc.offset == 0
+
+			m, _ = m.onMainKey(keyPress("c"))
+			if !m.columnView {
+				t.Fatal("'c' should enter column view")
+			}
+			for _, k := range []string{"j", "j", "k", "k", "k", "g", "G", "j", "g"} {
+				m, _ = m.onMainKey(keyPress(k))
+			}
+			m, _ = m.onMainKey(keyPress("c"))
+			if m.columnView {
+				t.Fatal("second 'c' should leave column view")
+			}
+			if m.scrollOffset != tc.offset {
+				t.Errorf("scrollOffset = %d, want %d", m.scrollOffset, tc.offset)
+			}
+			if m.autoScroll != (tc.offset == 0) {
+				t.Errorf("autoScroll = %v, want %v", m.autoScroll, tc.offset == 0)
+			}
+		})
+	}
+}
+
+func TestKeys_ColumnViewFocusAndMarkStillWork(t *testing.T) {
+	m := scrollableMultiModel(t)
+	m.columnView = true
+
+	m, _ = m.onMainKey(keyPress("down"))
+	if m.focusedIdx != 1 {
+		t.Fatalf("down: focusedIdx = %d, want 1", m.focusedIdx)
+	}
+	m, _ = m.onMainKey(keyPress("up"))
+	if m.focusedIdx != 0 {
+		t.Fatalf("up: focusedIdx = %d, want 0", m.focusedIdx)
+	}
+	m, _ = m.onMainKey(keyPress("tab"))
+	if m.focusedIdx != 1 {
+		t.Fatalf("tab: focusedIdx = %d, want 1", m.focusedIdx)
+	}
+	m, _ = m.onMainKey(keyPress(" "))
+	if !m.sessions[1].marked {
+		t.Fatal("space should mark the focused target in column view")
+	}
+	m, _ = m.onMainKey(keyPress(" "))
+	if m.sessions[1].marked {
+		t.Fatal("second space should unmark the focused target in column view")
+	}
+	if !m.columnView {
+		t.Error("column view should still be showing")
+	}
+}
+
+func TestColumnView_StatusBarOmitsScrollKeys(t *testing.T) {
+	m := scrollableMultiModel(t)
+	m.width = 200
+	m.columnView = true
+	lines := strings.Split(m.View(), "\n")
+	status := lines[len(lines)-1]
+	if !strings.Contains(status, "tab/↑↓:focus") {
+		t.Fatalf("status bar should list the focus keys, got %q", status)
+	}
+	for _, k := range []string{"j/k", "g/G", "scroll"} {
+		if strings.Contains(status, k) {
+			t.Errorf("column view status bar advertises %q: %q", k, status)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestKeys_SingleTargetUnaffected (Task 8)
 // ---------------------------------------------------------------------------
 

@@ -21,6 +21,14 @@ func (m Model) onKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 // onMainKey handles key events when the main view is active (settings closed).
 func (m Model) onMainKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	// Column view does not scroll. The scroll keys must not move the hidden
+	// hop table, or it comes back scrolled when column view is left.
+	if len(m.sessions) > 1 && m.columnView {
+		switch msg.String() {
+		case "j", "k", "g", "G":
+			return m, nil
+		}
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
