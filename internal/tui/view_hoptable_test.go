@@ -24,8 +24,8 @@ func hopsSingle() testOpt {
 	)
 }
 
-// withTargetHit sets targetHit = true and maxTTLHit = ttl so the status
-// bar renders the "Tracing... N/M hops" form used when the destination is reached.
+// withTargetHit sets targetHit = true and maxTTLHit = ttl, as when the
+// destination has answered: the status bar's hop count is then its distance.
 func withTargetHit(ttl int) testOpt {
 	return func(m *Model) {
 		m.sessions[0].targetHit = true

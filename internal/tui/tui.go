@@ -414,10 +414,6 @@ func (m Model) renderView() string {
 		}
 		// Status bar consistent with summary branch
 		elapsed := m.now().Sub(m.startTime).Truncate(time.Second)
-		traceStatus := fmt.Sprintf("Tracing... %d hops", summaryHops(m.focused()))
-		if m.paused {
-			traceStatus = "PAUSED"
-		}
 		dnsLabel := "on"
 		if !m.dnsEnabled {
 			dnsLabel = "off"
@@ -425,15 +421,13 @@ func (m Model) renderView() string {
 		// Column view: surface the focus/mark/select keys on the status bar.
 		// space marks the focused target; when any are marked, only marked panes
 		// show — so mark doubles as pane selection.
-		const colKeys = "tab/↑↓:focus  space:mark  c:summary  e:export  p:pause  r:reset"
-		status := m.statusLine(
-			fmt.Sprintf("%s    Elapsed: %s    DNS: %s    %s  q:quit", traceStatus, elapsed, dnsLabel, colKeys),
-			statusParts{
-				trace:   traceStatus,
-				elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
-				dns:     "DNS: " + dnsLabel,
-				keys:    colKeys,
-			})
+		status := m.statusLine(statusParts{
+			trace:   m.traceStatus(m.focused()),
+			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+			dns:     "DNS: " + dnsLabel,
+			keys:    columnKeyHints(),
+			keyGlue: "  ",
+		})
 		b.WriteString(barBg(statusStyle().Render(status), m.width))
 		if m.showSettings && m.settings != nil {
 			return m.settings.View()
@@ -617,16 +611,7 @@ func (m Model) renderView() string {
 	}
 
 	// Status bar
-	maxTTL := s.table.MaxTTLSeen()
 	elapsed := m.now().Sub(m.startTime).Truncate(time.Second)
-	var traceStatus string
-	if m.paused {
-		traceStatus = "PAUSED"
-	} else if s.targetHit {
-		traceStatus = fmt.Sprintf("Tracing... %d/%d hops", maxTTL, s.maxTTLHit)
-	} else {
-		traceStatus = fmt.Sprintf("Tracing... %d hops", maxTTL)
-	}
 
 	dnsLabel := "on"
 	if !m.dnsEnabled {
@@ -634,41 +619,30 @@ func (m Model) renderView() string {
 	}
 	flowLabel := ""
 	if s.probeCfg.NumPaths > 1 {
-		flowLabel = fmt.Sprintf("    %d flows", s.probeCfg.NumPaths)
+		flowLabel = fmt.Sprintf("%d flows", s.probeCfg.NumPaths)
 	}
-	switchHint := ""
-	if s.notice != "" {
-		// Setup notice (e.g. an IPv4 fallback): stays for the whole trace.
-		switchHint = "    " + s.notice
-	}
+	// Setup notice (e.g. an IPv4 fallback): stays for the whole trace.
+	notice := s.notice
 	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
-		switchHint = "    " + s.switchStatusMsg
+		notice = s.switchStatusMsg
 	}
 	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
-		switchHint = "    " + m.exportStatusMsg
+		notice = m.exportStatusMsg
 	}
 	scrollHint := ""
 	if !m.autoScroll && len(hopLines) > availableRows {
-		scrollHint = " [scrolled] G:bottom g:top"
+		scrollHint = "[scrolled] G:bottom g:top"
 	}
-	multiHint := ""
-	if len(m.sessions) > 1 {
-		multiHint = "    ↑/↓:target space:mark c:columns"
-	}
-	keys := "j/k:scroll p:pause r:reset [d] " + m.viewMode.Next().String()
-	status := m.statusLine(
-		fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s%s    %s q:quit%s%s",
-			traceStatus, elapsed, dnsLabel, flowLabel, switchHint, keys, scrollHint, multiHint),
-		statusParts{
-			trace:   traceStatus,
-			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
-			dns:     "DNS: " + dnsLabel,
-			flows:   strings.TrimSpace(flowLabel),
-			notice:  strings.TrimSpace(switchHint),
-			keys:    keys,
-			scroll:  strings.TrimSpace(scrollHint),
-			multi:   strings.TrimSpace(multiHint),
-		})
+	status := m.statusLine(statusParts{
+		trace:   m.traceStatus(s),
+		elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
+		dns:     "DNS: " + dnsLabel,
+		flows:   flowLabel,
+		notice:  notice,
+		keys:    m.viewKeyHints(),
+		scroll:  scrollHint,
+		targets: m.targetKeyHints(),
+	})
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
 
 	// Settings overlay — rendered on top of everything else.
