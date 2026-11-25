@@ -127,14 +127,14 @@ func loopbackBurst(t *testing.T, w *icmp.PacketConn, ipVersion int, lo net.IP, n
 			t.Fatal(err)
 		}
 		if _, err := w.WriteTo(pkt, &net.IPAddr{IP: lo}); err != nil {
-			t.Skipf("echo %d to %s could not be sent on this host: %v", i+1, lo, err)
+			skipUnlessRequired(t, "echo %d to %s could not be sent on this host: %v", i+1, lo, err)
 		}
 	}
 	// Something did come back.
 	buf := make([]byte, 2000)
 	_ = w.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, _, err := w.ReadFrom(buf); err != nil {
-		t.Skipf("no ICMP came back from %s: %v", lo, err)
+		skipUnlessRequired(t, "no ICMP came back from %s: %v", lo, err)
 	}
 	// Let the last of the burst be delivered.
 	time.Sleep(100 * time.Millisecond)
@@ -164,7 +164,7 @@ func TestOpenEchoConn_TakesAsLittleAsThePlatformAllows(t *testing.T) {
 			lo := net.ParseIP(fam.loopback)
 			witness, err := icmp.ListenPacket(ListenerNet(fam.v), RawListenAddr(fam.v))
 			if err != nil {
-				t.Skipf("no raw ICMP socket here: %v", err)
+				skipUnlessRequired(t, "no raw ICMP socket here: %v", err)
 			}
 			defer witness.Close()
 
@@ -194,7 +194,7 @@ func TestOpenEchoConn_TakesAsLittleAsThePlatformAllows(t *testing.T) {
 			}
 			snd := &icmpSender{conn: conn, ipVersion: fam.v}
 			if !tr.send(snd, sockEcho, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: lo}) {
-				t.Skipf("the echo to %s could not be sent on this host", lo)
+				skipUnlessRequired(t, "the echo to %s could not be sent on this host", lo)
 			}
 
 			loopbackBurst(t, witness, fam.v, lo, burst)
@@ -225,7 +225,7 @@ func TestEchoConn_SmallReceiveBufferHoldsNextToNothing(t *testing.T) {
 			lo := net.ParseIP(fam.loopback)
 			witness, err := icmp.ListenPacket(ListenerNet(fam.v), RawListenAddr(fam.v))
 			if err != nil {
-				t.Skipf("no raw ICMP socket here: %v", err)
+				skipUnlessRequired(t, "no raw ICMP socket here: %v", err)
 			}
 			defer witness.Close()
 			pc, err := net.ListenPacket(ListenerNet(fam.v), RawListenAddr(fam.v))
