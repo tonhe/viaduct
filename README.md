@@ -11,6 +11,8 @@
 
 </div>
 
+> This README describes the development version on `main`. For the latest release, see the [README at v0.2.1](https://github.com/tonhe/viaduct/blob/v0.2.1/README.md).
+
 Traditional `traceroute` shows one path. Real networks aren't single paths — they're forests of parallel ECMP links, rate-limiting routers, and load balancers that return different answers every probe. `via` sees all of it.
 
 `via` replaces `traceroute`, `mtr`, and `paris-traceroute` with a live-updating TUI that shows packet loss, latency stats, reverse DNS, ASN enrichment, and all parallel paths through load-balanced networks. Trace up to 16 targets simultaneously — each gets its own session with independent port blocks and family selection.
@@ -170,7 +172,7 @@ Press <kbd>d</kbd> to cycle through five view presets:
 | **Health** | Loss%, Avg, Delta, Sparkline, Trend | Quick health assessment |
 | **Latency** | Avg, Best, Wrst, GMean, Delta, Sparkline | Detailed latency analysis |
 | **Variability** | StDev, Jitter, Jitter Mean, Sparkline, Trend | Stability analysis |
-| **Probe Detail** | ICMP-TTL, UDP/TCP-TTL, Echo (recvd + loss%), Rnd | Per-probe-type diagnostics, rate-limit verification |
+| **Probe Detail** | Loss%, % of replies, ICMP-TTL, UDP/TCP-TTL, Echo (received/sent), Rnd | Per-probe-type diagnostics, rate-limit verification |
 
 **Additional metrics:**
 
@@ -252,6 +254,8 @@ Per-target IP family is auto-selected independently. If a target fails to resolv
 In report mode (`-r`, or `-o`) with several targets, a target that fails does not stop the others: the rest are traced and reported, each failure is written to stderr, and `via` exits non-zero. In JSON a failed target stays in `targets` with an `error` field and no hops; in CSV it is one row with the message in the `error` column.
 
 Exports in multi-target mode group all targets: JSON uses a `targets` array, CSV adds a leading `target` column, and DOT produces a single digraph with shared-IP node merging. Report mode (`-r`) prints each target's table in sequence.
+
+Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`.
 
 ---
 
@@ -354,7 +358,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
 | `--no-alert` | | | Disable alerting |
 | `--theme` | | (config) | Color theme slug (e.g. 'dracula', 'nord') |
-| `--version` | `-v` | | Print version and exit |
+| `--version` | `-v` | | Print `via version <version> (build <build>)` and exit. A release build prints the release number (`0.3.0`). `make build` prints `git describe` without the leading `v` (`0.2.1-21-gc6df19c`: 21 commits after v0.2.1, with `-dirty` for a modified tree). A build that sets no version (`go build`, `go install`) prints the module version the Go toolchain recorded; if there is none, `dev+<revision>` (the first 12 characters of the commit, with `.dirty` for a modified tree); if there is no revision either, `dev` |
 | `--help` | `-h` | | Print usage and the flag list, then exit |
 
 ---
@@ -389,6 +393,14 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | Linux/macOS (default) | `~/.config/via/config.toml` |
 | Linux/macOS with `XDG_CONFIG_HOME` set | `$XDG_CONFIG_HOME/via/config.toml` |
 | Windows | `%APPDATA%\via\config.toml` (falls back to `%USERPROFILE%\AppData\Roaming\via\config.toml` if `APPDATA` is empty) |
+
+A key from an older release that `via` no longer uses does not stop the file from loading. The key is ignored, and `via` prints one warning line for it on stderr at startup:
+
+```
+warning: config: PingSupplement was removed in v0.3.0 and is ignored
+```
+
+Saving settings from the menu writes only current keys, so the removed key is gone from the file after the next save. `ping_supplement` (also accepted as `PingSupplement`) is the only such key today.
 
 ### Exporting from the TUI
 

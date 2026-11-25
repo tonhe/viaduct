@@ -38,6 +38,8 @@ The backlog agent opens one when either of these is true:
 
 The issue lists the commits since the last tag and drafts the release notes, including a Breaking section.
 
+One step is done by hand before tagging and is not in the generated issue. The line at the top of `README.md` links to the latest release's README. Change that link to the version about to be tagged (`https://github.com/tonhe/viaduct/blob/vX.Y.Z/README.md`) in a `docs:` commit on `main`, wait for `Tests` to pass on it, and tag that commit. The README at the new tag then links to itself. The link returns 404 until the tag is pushed.
+
 ## Release notes
 
 GoReleaser generates the changelog from commit subjects, grouped by commit prefix. `docs:`, `test:` and `ci:` commits and merge commits are left out.
