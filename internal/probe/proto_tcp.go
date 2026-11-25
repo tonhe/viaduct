@@ -44,8 +44,13 @@ func (p *TCPProtocol) BuildProbe(flowID, ttl, seq int, cfg Config) ([]byte, prob
 	hdr[13] = 0x02                                    // SYN flag
 	binary.BigEndian.PutUint16(hdr[14:16], 65535)     // window size
 
-	checksum := TCPChecksum(cfg.IPVersion, cfg.SourceIP, cfg.TargetIP, hdr)
-	binary.BigEndian.PutUint16(hdr[16:18], checksum)
+	// On an IPv6 send socket with IPV6_CHECKSUM the kernel fills the checksum,
+	// over the source address it really sends from, and the field is left
+	// zero here (checksum6.go).
+	if cfg.IPVersion != 6 || !cfg.kernelChecksum {
+		checksum := TCPChecksum(cfg.IPVersion, cfg.SourceIP, cfg.TargetIP, hdr)
+		binary.BigEndian.PutUint16(hdr[tcpChecksumOffset:], checksum)
+	}
 
 	key := probeKey{SrcPort: srcPort, DstPort: p.DstPort, Seq: tcpKeySeq(uint32(seq))}
 	return hdr, key, nil

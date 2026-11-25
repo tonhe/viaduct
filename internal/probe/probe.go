@@ -56,6 +56,11 @@ type Config struct {
 	// leave. It is called from the send loop and must be safe to call from
 	// several tracers at once.
 	Debugf func(format string, args ...any)
+
+	// kernelChecksum is set by the tracer, on its own copy of the config, once
+	// the raw IPv6 send socket has IPV6_CHECKSUM: the kernel fills the UDP or
+	// TCP checksum and the probe is built with the field zero (checksum6.go).
+	kernelChecksum bool
 }
 
 // DefaultConfig returns sensible defaults.
@@ -407,6 +412,9 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 	t.sends.stalled = [numSendSockets]bool{}
 	t.sends.counts = [numProbeTypes]sendCounts{}
 
+	// buildCfg is the config the primary probes are built with.
+	buildCfg := t.cfg
+
 	// newSender is nil in production; tests inject a fake to avoid raw sockets.
 	var snd probeSender
 	if t.newSender != nil {
@@ -441,6 +449,8 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			if err != nil {
 				return fmt.Errorf("raw %s socket: %w", proto.Name(), err)
 			}
+			// IPv6: the kernel fills the probe checksum (checksum6.go).
+			rawConn, buildCfg.kernelChecksum = t.prepareSendSocket(realSendSocketOps, rawProto, rawConn)
 			defer rawConn.Close()
 			// For TCP, also start a listener for SYN-ACK/RST responses
 			if proto.Name() == "tcp" {
@@ -513,7 +523,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 					}
 
 					seq++
-					pkt, key, err := proto.BuildProbe(flow, ttl, seq, t.cfg)
+					pkt, key, err := proto.BuildProbe(flow, ttl, seq, buildCfg)
 					if err != nil {
 						continue
 					}

@@ -21,6 +21,7 @@ internal/
     proto_udp.go    UDP probes, IPv4 and IPv6 UDP checksums
     proto_tcp.go    TCP SYN probes, SYN-ACK/RST listener
     proto_auto.go   AutoSelector: UDP with one-way fallback to ICMP
+    checksum6.go    IPV6_CHECKSUM on the raw IPv6 send sockets
     family.go       everything that differs between IPv4 and IPv6
   hop/              per-TTL and per-responder state: Table, Hop, PathNode,
                     ProbeStats. Loss, rate-limit verdict, sparkline samples
@@ -207,7 +208,9 @@ shared
 
 **Routers rate-limit Time Exceeded.** Many routers answer only a fraction of TTL-expired packets while forwarding normally. Without the echo tier this reads as loss at a transit hop. The verdict needs 20 echo samples and a significant difference, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not flagged.
 
-**IPv6 UDP needs a checksum.** A receiver discards an IPv6 UDP datagram with a zero checksum and never sends Port Unreachable. UDP probes carry a computed checksum in both families.
+**IPv6 UDP needs a checksum.** A receiver discards an IPv6 UDP datagram with a zero checksum and never sends Port Unreachable. UDP probes carry a checksum in both families.
+
+**The kernel fills the IPv6 probe checksum.** A UDP or TCP checksum covers the packet's source address, and the raw send socket is not bound: the kernel picks the source address of every packet, and on a host with several global IPv6 addresses it does not always pick the one found at startup. A checksum computed in `via` over that address is then wrong and the probe is dropped on the path. The IPv6 send sockets therefore set `IPV6_CHECKSUM` (offset 6 for UDP, 16 for TCP) and the probes are built with the field zero. If a platform rejects the option, that send socket is bound to the startup source address instead and its probes carry their own checksum; the debug log says which happened. IPv4 has no such option: IPv4 probes carry a checksum computed over the startup source address.
 
 **Raw TCP reads.** The TCP listener parses its input as a bare TCP segment with no IP header.
 
