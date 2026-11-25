@@ -275,12 +275,14 @@ func (h *Hop) rateLimitStateLocked() RateLimitState {
 	return rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
 }
 
-// echoTotalsLocked sums the echo probes sent to, and answered by, this hop's nodes.
+// echoTotalsLocked sums the echo probes sent to, and answered by, this hop's
+// nodes. A node that ignores ping is left out (PathNode.echoTotals); if every
+// node is, the hop has no echo samples and its verdict stays Undetermined.
 func (h *Hop) echoTotalsLocked() (sent, received int) {
 	for _, n := range h.Nodes {
-		s := n.EchoStats()
-		sent += s.Sent
-		received += s.Received
+		s, r := n.echoTotals()
+		sent += s
+		received += r
 	}
 	return sent, received
 }

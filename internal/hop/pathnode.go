@@ -86,6 +86,10 @@ type PathNode struct {
 	primary  ProbeStats
 	icmpEcho ProbeStats
 
+	// echoIgnored is the number of echoes this node ignored before its first
+	// answer, when it ignored echoSilentAfter or more. See echoTotals.
+	echoIgnored int
+
 	flowIDs   map[int]struct{}
 	stability [stabilityWindowSize]bool
 	stabIdx   int
@@ -122,6 +126,11 @@ func (pn *PathNode) AddSample(rtt time.Duration, flowID int, kind ProbeKind) {
 	case KindPrimary:
 		pn.primary.addReply(rtt)
 	case KindEcho:
+		if pn.icmpEcho.Received == 0 && pn.icmpEcho.Sent > echoSilentAfter {
+			// First answer after ignoring echoSilentAfter echoes or more:
+			// the echoes before the one answered stay out of the hop's totals.
+			pn.echoIgnored = pn.icmpEcho.Sent - 1
+		}
 		pn.icmpEcho.addReply(rtt)
 		return // echo is ground truth, not a latency sample: no aggregates
 	}
@@ -462,6 +471,31 @@ func (pn *PathNode) EchoStats() ProbeStats {
 	return pn.icmpEcho
 }
 
+// echoSilentAfter is the number of echoes a node may leave unanswered from
+// the start before it is taken to ignore ping.
+const echoSilentAfter = 20
+
+// echoTotals returns the echoes sent to and answered by this node that count
+// toward its hop's echo totals (Hop.RateLimitState, Hop.Loss). A node that
+// has answered none of its first echoSilentAfter echoes ignores ping: its
+// unanswered echoes are its own filter and say nothing about the path, so it
+// contributes nothing. If it answers later, it counts from that answer on.
+// EchoStats keeps the raw counters.
+func (pn *PathNode) echoTotals() (sent, received int) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	if pn.icmpEcho.Received == 0 && pn.icmpEcho.Sent >= echoSilentAfter {
+		return 0, 0
+	}
+	sent, received = pn.icmpEcho.Sent-pn.echoIgnored, pn.icmpEcho.Received
+	if sent < received {
+		// More answers than echoes counted: some of the echoes taken as
+		// ignored were answered late. Every answer counts with its echo.
+		sent = received
+	}
+	return sent, received
+}
+
 // GetReceived returns the received count.
 func (pn *PathNode) GetReceived() int {
 	pn.mu.Lock()
@@ -613,6 +647,7 @@ func (pn *PathNode) Reset() {
 	pn.icmpTTL = ProbeStats{}
 	pn.primary = ProbeStats{}
 	pn.icmpEcho = ProbeStats{}
+	pn.echoIgnored = 0
 	pn.flowIDs = make(map[int]struct{})
 	pn.stability = [stabilityWindowSize]bool{}
 	pn.stabIdx = 0
