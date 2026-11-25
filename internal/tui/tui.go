@@ -372,8 +372,10 @@ func (m Model) renderView() string {
 		return m.errorView()
 	}
 
-	// Probe Detail view uses a custom full-page renderer.
-	if m.viewMode == ViewProbeDetail {
+	// Probe Detail view uses a custom full-page renderer. In column view the
+	// panes are the view: they are not replaced by one target's probe table.
+	inColumnView := len(m.sessions) > 1 && m.columnView
+	if m.viewMode == ViewProbeDetail && !inColumnView {
 		return m.viewProbeDetail()
 	}
 
@@ -381,8 +383,10 @@ func (m Model) renderView() string {
 	var b strings.Builder
 
 	// Header bar
+	// The panes of column view do not change with the view mode, so the
+	// header names a view only outside it.
 	viewName := ""
-	if m.viewMode != ViewDefault {
+	if m.viewMode != ViewDefault && !inColumnView {
 		viewName = m.viewMode.String()
 	}
 	b.WriteString(barBg(headerStyle().Render(m.headerLine(s, viewName)), m.width))

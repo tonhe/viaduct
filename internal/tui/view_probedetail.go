@@ -8,42 +8,126 @@ import (
 	"github.com/tonhe/viaduct/internal/hop"
 )
 
+// Probe Detail shows, for each hop, what each kind of probe got back.
+//
+// Loss belongs to the hop, not to each node: an unanswered probe does not say
+// which node it went to, so a per-node "loss" would mostly measure how
+// traffic is split. So:
+//
+//   - the hop's first line carries the hop's loss, the same figure as the
+//     main table (including ~N%† and N%?)
+//   - every node line carries its share of the hop's replies, labelled
+//     "% of replies"
+//   - the per-type cells are counts, received/sent, as in the JSON
+//
+// Nothing labelled "Loss" shows a per-node figure.
+
 // Column widths for the probe detail view.
 const (
 	pdWidthTTL   = 3
 	pdWidthIP    = 17 // v4 default; widens for v6 via computeIPColWidth
-	pdWidthProbe = 11 // ICMP-TTL, primary, Echo columns
+	pdWidthLoss  = 8  // same cell as the main table's Loss% column
+	pdWidthShare = 12 // "% of replies"
+	pdWidthCount = 9  // "received/sent" for one probe type
 	pdWidthRnd   = 5
+
+	pdShareHeader = "% of replies"
 )
 
-// probeCell formats "recvd (loss%)" for one ProbeStats. The plain text is
-// width-padded first, then styled by loss severity (reuse ok/loss styles).
-// This is the correct pad-then-style order; never fmt %-Ns a styled string.
-func probeCell(recvd int, lossPct float64, width int) string {
-	plain := fmt.Sprintf("%d (%.0f%%)", recvd, lossPct)
-	return lossStyleFor(lossPct).Render(padCell(plain, width))
+// pdLayout says which Probe Detail columns are shown and how wide the address
+// column is. The hop number, address, loss and share are always shown; the
+// count columns and Rnd are dropped, least important first, on a terminal too
+// narrow for them, and then the address is shortened.
+type pdLayout struct {
+	ipw         int
+	showICMP    bool
+	showPrimary bool
+	showEcho    bool
+	showRnd     bool
 }
 
-// echoCell renders the Echo probe column. When sent < 5 (below the min-sample
-// guard), it shows the running count as "N/5" in dim style to indicate the
-// measurement is still accumulating — undetermined != not-rate-limited.
-func echoCell(s hop.ProbeStats, width int) string {
-	if s.Sent < 5 {
-		plain := fmt.Sprintf("%d/5", s.Sent)
-		return dimStyle().Render(padCell(plain, width))
+func (l pdLayout) width() int {
+	w := pdWidthTTL + 1 + l.ipw + 1 + pdWidthLoss + 1 + pdWidthShare
+	for _, c := range []struct {
+		show bool
+		w    int
+	}{{l.showICMP, pdWidthCount}, {l.showPrimary, pdWidthCount}, {l.showEcho, pdWidthCount}, {l.showRnd, pdWidthRnd}} {
+		if c.show {
+			w += 1 + c.w
+		}
 	}
-	return probeCell(s.Received, s.ProbeLossPercent(), width)
+	return w
+}
+
+// computePDLayout fits the Probe Detail columns into width. ipNeeded is the
+// widest address to show. A width of zero or less means the terminal size is
+// not known yet: everything is shown.
+func computePDLayout(width, ipNeeded int) pdLayout {
+	if ipNeeded < pdWidthIP {
+		ipNeeded = pdWidthIP
+	}
+	l := pdLayout{ipw: ipNeeded, showICMP: true, showPrimary: true, showEcho: true, showRnd: true}
+	if width <= 0 {
+		return l
+	}
+	for _, drop := range []*bool{&l.showRnd, &l.showEcho, &l.showPrimary, &l.showICMP} {
+		if l.width() <= width {
+			return l
+		}
+		*drop = false
+	}
+	if over := l.width() - width; over > 0 {
+		l.ipw -= over
+		if l.ipw < minIPColWidth {
+			l.ipw = minIPColWidth
+		}
+	}
+	return l
+}
+
+// countCell renders "received/sent" for one probe type, or a dash when none
+// of that type were sent. dim marks a figure that is still accumulating.
+func countCell(received, sent int, dim bool) string {
+	if sent == 0 {
+		return dimStyle().Render(padCell("—", pdWidthCount))
+	}
+	plain := padCell(fmt.Sprintf("%d/%d", received, sent), pdWidthCount)
+	if dim {
+		return dimStyle().Render(plain)
+	}
+	return plain
+}
+
+// shareCell renders a node's share of its hop's replies to TTL-limited
+// probes. It is a share, not a loss figure: at an ECMP hop it says how the
+// replies are split between the nodes.
+func shareCell(nodeReplies, hopReplies int) string {
+	if hopReplies == 0 {
+		return dimStyle().Render(padCell("-", pdWidthShare))
+	}
+	return padCell(fmt.Sprintf("%.0f%%", float64(nodeReplies)/float64(hopReplies)*100), pdWidthShare)
 }
 
 // renderProbeDetailHeader returns the column-header line for the probe detail view.
-func (m Model) renderProbeDetailHeader(ipWidth int, primaryColName string) string {
-	var parts []string
-	parts = append(parts, fmt.Sprintf("%-*s", pdWidthTTL, "#"))
-	parts = append(parts, fmt.Sprintf("%-*s", ipWidth, "IP"))
-	parts = append(parts, fmt.Sprintf("%-*s", pdWidthProbe, "ICMP-TTL"))
-	parts = append(parts, fmt.Sprintf("%-*s", pdWidthProbe, primaryColName))
-	parts = append(parts, fmt.Sprintf("%-*s", pdWidthProbe, "Echo"))
-	parts = append(parts, fmt.Sprintf("%-*s", pdWidthRnd, "Rnd"))
+func (m Model) renderProbeDetailHeader(l pdLayout, primaryColName string) string {
+	parts := []string{
+		fmt.Sprintf("%-*s", pdWidthTTL, "#"),
+		fmt.Sprintf("%-*s", l.ipw, "IP"),
+		fmt.Sprintf("%-*s", pdWidthLoss, "Loss%"),
+		fmt.Sprintf("%-*s", pdWidthShare, pdShareHeader),
+	}
+	if l.showICMP {
+		parts = append(parts, fmt.Sprintf("%-*s", pdWidthCount, "ICMP-TTL"))
+	}
+	if l.showPrimary {
+		parts = append(parts, fmt.Sprintf("%-*s", pdWidthCount, primaryColName))
+	}
+	if l.showEcho {
+		parts = append(parts, fmt.Sprintf("%-*s", pdWidthCount, "Echo"))
+	}
+	if l.showRnd {
+		parts = append(parts, fmt.Sprintf("%-*s", pdWidthRnd, "Rnd"))
+	}
 	return strings.Join(parts, " ")
 }
 
@@ -58,37 +142,46 @@ func primaryColHeader(protocolName string) string {
 	}
 }
 
-// renderProbeDetailHopRow renders a single node row for the probe detail view.
-// ttl is the hop TTL, pn is the path node. isICMPProto indicates that the
-// session uses ICMP as its primary protocol (so the primary column is N/A).
-func (m Model) renderProbeDetailHopRow(ttl int, pn *hop.PathNode, ipWidth int, isICMPProto bool) string {
-	ttlStr := dimStyle().Render(fmt.Sprintf("%-*d", pdWidthTTL, ttl))
-
-	ip := pn.GetIP()
+// renderProbeDetailHopRow renders one node's row. first marks the hop's first
+// line, which carries the hop's loss; the other node lines of an ECMP hop
+// show a dash there. hopReplies is the hop's total of TTL-probe replies, for
+// the share. isICMPProto means the session probes with ICMP only, so there
+// are no primary probes.
+func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout, first bool, hopReplies int, isICMPProto bool) string {
 	ipStr := ""
-	if ip != nil {
-		ipStr = ip.String()
+	if ip := pn.GetIP(); ip != nil {
+		ipStr = truncateAddr(ip.String(), l.ipw)
 	}
-	ipC := ipStyle().Render(padCell(ipStr, ipWidth))
+	icmpStats, primaryStats, echoStats := pn.ICMPTTLStats(), pn.PrimaryStats(), pn.EchoStats()
 
-	icmpStats := pn.ICMPTTLStats()
-	primaryStats := pn.PrimaryStats()
-	echoStats := pn.EchoStats()
-
-	icmpC := probeCell(icmpStats.RecvRounds, icmpStats.RoundLossPercent(), pdWidthProbe)
-
-	var primaryC string
-	if isICMPProto {
-		// When probing via ICMP, the "primary" slot maps to the same ICMP-TTL
-		// kind; render a dash to avoid double-counting.
-		primaryC = dimStyle().Render(padCell("—", pdWidthProbe))
-	} else {
-		primaryC = probeCell(primaryStats.RecvRounds, primaryStats.RoundLossPercent(), pdWidthProbe)
+	lossC := dimStyle().Render(padCell("-", pdWidthLoss))
+	if first {
+		lossC = lossCell(h)
 	}
-
-	echoC := echoCell(echoStats, pdWidthProbe)
-
-	return strings.Join([]string{ttlStr, ipC, icmpC, primaryC, echoC}, " ")
+	parts := []string{
+		dimStyle().Render(fmt.Sprintf("%-*d", pdWidthTTL, h.TTL)),
+		ipStyle().Render(padCell(ipStr, l.ipw)),
+		lossC,
+		shareCell(icmpStats.Received+primaryStats.Received, hopReplies),
+	}
+	if l.showICMP {
+		parts = append(parts, countCell(icmpStats.Received, icmpStats.ProbesSent, false))
+	}
+	if l.showPrimary {
+		if isICMPProto {
+			parts = append(parts, dimStyle().Render(padCell("—", pdWidthCount)))
+		} else {
+			parts = append(parts, countCell(primaryStats.Received, primaryStats.ProbesSent, false))
+		}
+	}
+	if l.showEcho {
+		// Dimmed until the hop has enough echo samples for a verdict.
+		parts = append(parts, countCell(echoStats.Received, echoStats.Sent, h.RateLimitState() == hop.RateLimitUndetermined))
+	}
+	if l.showRnd {
+		parts = append(parts, fmt.Sprintf("%-*d", pdWidthRnd, h.Rounds()))
+	}
+	return strings.Join(parts, " ")
 }
 
 // renderProbeDetailView returns all lines for the probe detail body (col-header
@@ -97,28 +190,19 @@ func (m Model) renderProbeDetailHopRow(ttl int, pn *hop.PathNode, ipWidth int, i
 func (m Model) renderProbeDetailView() []string {
 	s := m.focused()
 	isICMPProto := s.protocolName == "icmp"
-	primaryName := primaryColHeader(s.protocolName)
 
-	hops := s.table.Snapshot()
-	ipWidth := computeIPColWidth(hops)
-	if ipWidth < pdWidthIP {
-		ipWidth = pdWidthIP
-	}
+	hops := pathHops(s)
+	l := computePDLayout(m.width, computeIPColWidth(hops))
 
-	var lines []string
+	lines := []string{dimStyle().Render(m.renderProbeDetailHeader(l, primaryColHeader(s.protocolName)))}
 
-	// Col-header line (index 0).
-	header := m.renderProbeDetailHeader(ipWidth, primaryName)
-	lines = append(lines, dimStyle().Render(header))
-
-	// Hop rows.
 	hopMap := make(map[int]*hop.Hop, len(hops))
+	hopMaxTTL := 0
 	for _, h := range hops {
 		hopMap[h.TTL] = h
-	}
-	hopMaxTTL := s.table.MaxTTLSeen()
-	if s.maxTTLHit > 0 && s.maxTTLHit < hopMaxTTL {
-		hopMaxTTL = s.maxTTLHit
+		if h.TTL > hopMaxTTL {
+			hopMaxTTL = h.TTL
+		}
 	}
 
 	for ttl := 1; ttl <= hopMaxTTL; ttl++ {
@@ -131,20 +215,19 @@ func (m Model) renderProbeDetailView() []string {
 			continue
 		}
 
-		rndStr := fmt.Sprintf("%-*d", pdWidthRnd, h.Rounds())
-
+		nodes := []*hop.PathNode{h.PrimaryNode()}
 		if h.IsDivergent() {
-			for _, pn := range h.GetNodes() {
-				partial := m.renderProbeDetailHopRow(ttl, pn, ipWidth, isICMPProto)
-				lines = append(lines, partial+" "+rndStr)
-			}
-		} else {
-			pn := h.PrimaryNode()
+			nodes = h.GetNodes()
+		}
+		hopReplies := 0
+		for _, pn := range h.GetNodes() {
+			hopReplies += pn.ICMPTTLStats().Received + pn.PrimaryStats().Received
+		}
+		for i, pn := range nodes {
 			if pn == nil {
 				continue
 			}
-			partial := m.renderProbeDetailHopRow(ttl, pn, ipWidth, isICMPProto)
-			lines = append(lines, partial+" "+rndStr)
+			lines = append(lines, m.renderProbeDetailHopRow(h, pn, l, i == 0, hopReplies, isICMPProto))
 		}
 	}
 
@@ -171,15 +254,8 @@ func (m Model) viewProbeDetail() string {
 		b.WriteString(m.renderSummary())
 	}
 
-	// fixedLines: 2 (header + sep) + 1 (col-header) + 1 (status bar).
-	fixedLines := 4
-	if multiTarget {
-		fixedLines += m.summaryLineCount()
-	}
-	availableRows := 0
-	if m.height > fixedLines {
-		availableRows = m.height - fixedLines
-	}
+	fixedLines := m.fixedLineCount()
+	availableRows := m.hopRowsAvailable()
 
 	// Render probe detail rows; [0] is the col-header.
 	allLines := m.renderProbeDetailView()
@@ -188,43 +264,68 @@ func (m Model) viewProbeDetail() string {
 	b.WriteString(lineBg(allLines[0], m.width))
 	b.WriteString("\n")
 
-	// Hop content rows with scroll handling.
 	hopLines := allLines[1:]
-	displayLines := hopLines
-	if availableRows > 0 && len(hopLines) > availableRows {
-		if m.autoScroll {
-			displayLines = hopLines[len(hopLines)-availableRows:]
-		} else {
-			offset := m.scrollOffset
-			maxOffset := len(hopLines) - availableRows
-			if maxOffset < 0 {
-				maxOffset = 0
+	var displayLines []string
+	displayCount := 0
+	if s.startErr != nil {
+		// A target that failed to start shows its error, as in the default view.
+		b.WriteString(m.renderFocusedError(s, availableRows))
+		displayCount = availableRows
+		hopLines = nil
+	} else {
+		// Hop content rows with scroll handling.
+		displayLines = hopLines
+		if availableRows > 0 && len(hopLines) > availableRows {
+			if m.autoScroll {
+				displayLines = hopLines[len(hopLines)-availableRows:]
+			} else {
+				offset := m.scrollOffset
+				maxOffset := len(hopLines) - availableRows
+				if maxOffset < 0 {
+					maxOffset = 0
+				}
+				if offset > maxOffset {
+					offset = maxOffset
+				}
+				end := len(hopLines) - offset
+				start := end - availableRows
+				if start < 0 {
+					start = 0
+				}
+				displayLines = hopLines[start:end]
 			}
-			if offset > maxOffset {
-				offset = maxOffset
-			}
-			end := len(hopLines) - offset
-			start := end - availableRows
-			if start < 0 {
-				start = 0
-			}
-			displayLines = hopLines[start:end]
 		}
+		for _, line := range displayLines {
+			b.WriteString(lineBg(line, m.width))
+			b.WriteString("\n")
+		}
+		displayCount = len(displayLines)
 	}
 
-	for _, line := range displayLines {
-		b.WriteString(lineBg(line, m.width))
-		b.WriteString("\n")
+	// Alert line, as in the default view.
+	alertLine := ""
+	if s.alertEngine != nil {
+		alertLine = s.alertEngine.Message()
+		if alertLine != "" && multiTarget {
+			alertLine = s.target + ": " + alertLine
+		}
 	}
 
 	// Fill remaining vertical space with themed background.
 	emptyLine := lineBg("", m.width)
-	usedLines := fixedLines + len(displayLines)
+	usedLines := fixedLines + displayCount
+	if alertLine != "" {
+		usedLines++
+	}
 	if m.height > 0 && usedLines < m.height {
 		for i := 0; i < m.height-usedLines; i++ {
 			b.WriteString(emptyLine)
 			b.WriteString("\n")
 		}
+	}
+	if alertLine != "" {
+		b.WriteString(lineBg(alertStyle().Render(m.fitLine(alertLine)), m.width))
+		b.WriteString("\n")
 	}
 
 	// Status bar.
@@ -240,6 +341,19 @@ func (m Model) viewProbeDetail() string {
 	if !m.dnsEnabled {
 		dnsLabel = "off"
 	}
+	// A setup notice, a protocol switch or an export result, as in the
+	// default view.
+	notice := s.notice
+	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
+		notice = s.switchStatusMsg
+	}
+	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
+		notice = m.exportStatusMsg
+	}
+	noticeFull := ""
+	if notice != "" {
+		noticeFull = "    " + notice
+	}
 	scrollHint := ""
 	if !m.autoScroll && len(hopLines) > availableRows {
 		scrollHint = " [scrolled] G:bottom g:top"
@@ -251,12 +365,13 @@ func (m Model) viewProbeDetail() string {
 	footerNote := "echo cadence: ceil(pairs/budget) rounds"
 	keys := "j/k:scroll p:pause r:reset [d] " + m.viewMode.Next().String()
 	status := m.statusLine(
-		fmt.Sprintf("%s    Elapsed: %s    DNS: %s    %s q:quit%s    %s%s",
-			traceStatus, elapsed, dnsLabel, keys, scrollHint, footerNote, multiHint),
+		fmt.Sprintf("%s    Elapsed: %s    DNS: %s%s    %s q:quit%s    %s%s",
+			traceStatus, elapsed, dnsLabel, noticeFull, keys, scrollHint, footerNote, multiHint),
 		statusParts{
 			trace:   traceStatus,
 			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
 			dns:     "DNS: " + dnsLabel,
+			notice:  notice,
 			keys:    keys,
 			scroll:  strings.TrimSpace(scrollHint),
 			multi:   strings.TrimSpace(multiHint),
