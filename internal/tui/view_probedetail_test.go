@@ -36,84 +36,51 @@ func TestViewModeCycleIncludesProbeDetail(t *testing.T) {
 // Probe detail fixture helpers
 // ---------------------------------------------------------------------------
 
-// withProbeDetailHops seeds a 2-hop model for probe detail testing.
+// withProbeDetailHops seeds a 2-hop model for probe detail testing. Replies
+// are recorded through the hop, as the collector does, so the hop's loss and
+// the node's counts come from the same events. Each round sends two probes:
+// the ICMP TTL probe and one UDP probe.
 //
-// Hop 1 (192.0.2.1):
-//   - ICMP-TTL: 10 rounds, 1 lost (RecvRounds=9) → 10% round loss
-//   - Primary (UDP): 10 rounds, 2 lost (RecvRounds=8) → 20% round loss
-//   - Echo: 6 sent, 6 received (0%) — above guard of 5
+// Hop 1 (192.0.2.1), 10 rounds:
+//   - rounds 1 to 8: both answered; round 9: ICMP only; round 10: neither
+//   - ICMP-TTL 9 of 10, UDP 8 of 10, hop loss 3 of 20 = 15%
+//   - Echo: 6 sent, 6 answered (fewer than 20, so the loss is provisional)
 //
-// Hop 2 (192.0.2.2):
-//   - Echo: 3 sent only (below guard of 5)
+// Hop 2 (192.0.2.2), 1 round: UDP answered, ICMP not; 3 echoes sent, none
+// answered yet.
 func withProbeDetailHops() testOpt {
 	return func(m *Model) {
 		ip1 := net.ParseIP("192.0.2.1")
 		ip2 := net.ParseIP("192.0.2.2")
-
 		h1 := m.sessions[0].table.GetOrCreate(1)
 		h2 := m.sessions[0].table.GetOrCreate(2)
 
-		// Seed hop1 with initial RTT samples to create the PathNode.
-		h1.AddSample(ip1, 5*time.Millisecond, 0, hop.KindICMPTTL)
-		h1.AddSample(ip1, 5*time.Millisecond, 0, hop.KindPrimary)
-		// Seed hop2 with a Primary sample to create its PathNode.
-		h2.AddSample(ip2, 10*time.Millisecond, 0, hop.KindPrimary)
-
-		pn1 := h1.PrimaryNode()
-		pn2 := h2.PrimaryNode()
-
-		// --- Hop1: drive 10 rounds of per-probe-type stats ---
-		//
-		// MarkRoundEnd calls MarkProbeRoundEnd on nodes which:
-		//   - icmpTTL.markRoundEnd(true)  → icmpTTL.Sent++, plus RecvRounds++ if responded
-		//   - primary.markRoundEnd(true)  → primary.Sent++, plus RecvRounds++ if responded
-		//   - icmpEcho.markRoundEnd(false) → no Sent++, just RecvRounds++ if responded
-		//
-		// To get icmpTTL=10% loss (1/10) and primary=20% loss (2/10):
-		//   Rounds 1-9: both ICMP-TTL and Primary respond.
-		//   Round 9: Primary does NOT respond.
-		//   Round 10: neither responds.
-
-		// Rounds 1-8: both respond.
-		for i := 0; i < 8; i++ {
-			h1.MarkRoundSent()
-			if pn1 != nil {
-				pn1.AddSample(5*time.Millisecond, 0, hop.KindICMPTTL)
-				pn1.AddSample(5*time.Millisecond, 0, hop.KindPrimary)
+		for round := 1; round <= 10; round++ {
+			h1.MarkRoundSentProbes(2)
+			if round <= 9 {
+				h1.AddSample(ip1, 5*time.Millisecond, 0, hop.KindICMPTTL)
+			}
+			if round <= 8 {
+				h1.AddSample(ip1, 5*time.Millisecond, 1, hop.KindPrimary)
 			}
 			h1.MarkRoundEnd()
 		}
-
-		// Round 9: ICMP-TTL responds, Primary does NOT respond.
-		h1.MarkRoundSent()
-		if pn1 != nil {
-			pn1.AddSample(5*time.Millisecond, 0, hop.KindICMPTTL)
-		}
-		h1.MarkRoundEnd()
-
-		// Round 10: neither responds.
-		h1.MarkRoundSent()
-		h1.MarkRoundEnd()
-
-		// Drive echo: 6 sent, 6 received (ProbeLossPercent = 0%).
-		// Must call MarkEchoSent before AddSample(KindEcho) to ensure Sent==Received.
-		if pn1 != nil {
-			for i := 0; i < 6; i++ {
-				pn1.MarkEchoSent()
-				pn1.AddSample(3*time.Millisecond, 0, hop.KindEcho)
-			}
+		pn1 := h1.PrimaryNode()
+		for i := 0; i < 6; i++ {
+			pn1.MarkEchoSent()
+			h1.AddSample(ip1, 3*time.Millisecond, 0, hop.KindEcho)
 		}
 
-		// --- Hop2: 1 round, 3 echo sends only (below guard of 5) ---
-		h2.MarkRoundSent()
+		h2.MarkRoundSentProbes(2)
+		h2.AddSample(ip2, 10*time.Millisecond, 1, hop.KindPrimary)
 		h2.MarkRoundEnd()
-		if pn2 != nil {
-			for i := 0; i < 3; i++ {
-				pn2.MarkEchoSent()
-			}
+		pn2 := h2.PrimaryNode()
+		for i := 0; i < 3; i++ {
+			pn2.MarkEchoSent()
 		}
 	}
 }
+
 
 // ---------------------------------------------------------------------------
 // TestProbeDetailRender
@@ -144,17 +111,28 @@ func TestProbeDetailRender(t *testing.T) {
 		t.Errorf("probe detail header missing Rnd column; got:\n%s", stripped)
 	}
 
-	// Hop 1 probe cells must render "recvd (loss%)" for each probe type:
-	// ICMP-TTL 9 recv rounds of 10 (10%), primary 8 of 10 (20%), echo 6/6 (0%).
-	for _, cell := range []string{"9 (10%)", "8 (20%)", "6 (0%)"} {
+	// The hop's loss and each node's share have their own columns.
+	for _, col := range []string{"Loss%", "% of replies"} {
+		if !strings.Contains(stripped, col) {
+			t.Errorf("probe detail header missing %q column; got:\n%s", col, stripped)
+		}
+	}
+
+	// Hop 1 probe cells are counts, received/sent, per probe type: ICMP-TTL
+	// 9 of 10, UDP 9 of 10 (8 in rounds plus the fixture's first reply), echo
+	// 6 of 6. No cell carries a per-node loss percentage.
+	for _, cell := range []string{"9/10", "6/6"} {
 		if !strings.Contains(stripped, cell) {
 			t.Errorf("probe detail missing hop 1 cell %q; got:\n%s", cell, stripped)
 		}
 	}
+	if strings.Contains(stripped, "%)") {
+		t.Errorf("probe detail still shows a per-node loss percentage; got:\n%s", stripped)
+	}
 
-	// Hop 2 echo column must show running count "3/5" (below guard).
-	if !strings.Contains(stripped, "3/5") {
-		t.Errorf("hop 2 Echo cell missing '3/5' guard display; got:\n%s", stripped)
+	// Hop 2 echo column shows its running count: 3 sent, none answered yet.
+	if !strings.Contains(stripped, "0/3") {
+		t.Errorf("hop 2 Echo cell missing its 0/3 count; got:\n%s", stripped)
 	}
 
 	// Rnd column: hop1 must show h.Rounds() = 10. Space-delimited so the
@@ -276,43 +254,3 @@ func TestE2E_DKeyCycleProbeDetail(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// probeCell / echoCell unit tests
-// ---------------------------------------------------------------------------
-
-// TestProbeCell verifies the probeCell helper formats and pads correctly.
-func TestProbeCell(t *testing.T) {
-	cases := []struct {
-		recvd   int
-		lossPct float64
-		width   int
-		wantStr string
-	}{
-		{8, 20.0, 11, "8 (20%)    "},
-		{10, 0.0, 11, "10 (0%)    "},
-		{5, 50.0, 11, "5 (50%)    "},
-	}
-	for _, tc := range cases {
-		stripped := stripANSI(probeCell(tc.recvd, tc.lossPct, tc.width))
-		if stripped != tc.wantStr {
-			t.Errorf("probeCell(%d, %.1f, %d) = %q, want %q", tc.recvd, tc.lossPct, tc.width, stripped, tc.wantStr)
-		}
-	}
-}
-
-// TestEchoCell verifies the echoCell helper shows the running count when below guard.
-func TestEchoCell(t *testing.T) {
-	// Below guard: sent < 5.
-	below := hop.ProbeStats{Sent: 3, Received: 0}
-	stripped := stripANSI(echoCell(below, 11))
-	if !strings.Contains(stripped, "3/5") {
-		t.Errorf("echoCell below guard = %q, want '3/5'", stripped)
-	}
-
-	// At guard: sent == 5, received all (0% loss).
-	atGuard := hop.ProbeStats{Sent: 5, Received: 5}
-	stripped2 := stripANSI(echoCell(atGuard, 11))
-	if !strings.Contains(stripped2, "5 (0%)") {
-		t.Errorf("echoCell at guard = %q, want '5 (0%%)'", stripped2)
-	}
-}
