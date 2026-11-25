@@ -314,6 +314,13 @@ via -r -c 3 google.com one.one.one.one
 
 # Multi-target report, JSON export
 via -r -c 3 -o json google.com one.one.one.one
+
+# Export to a file: -o implies report mode and writes to stdout
+via -c 5 -o json example.com > trace.json
+via -c 5 -o csv example.com > trace.csv
+
+# Render the path as a graph (needs Graphviz)
+via -c 5 -o dot example.com | dot -Tsvg > path.svg
 ```
 
 ---
@@ -327,7 +334,7 @@ via -r -c 3 -o json google.com one.one.one.one
 | `--max-hops` | | 30 | Maximum number of hops to probe |
 | `--timeout` | | 1s | Per-probe response timeout |
 | `--interval` | `-i` | 1s | Probe round interval |
-| `--count` | `-c` | 0 | Number of probe rounds (0 = infinite) |
+| `--count` | `-c` | 0 | Number of probe rounds (0 = infinite; report mode runs 10 when this is not set) |
 | `--first-ttl` | `-f` | 1 | Starting TTL |
 | `--psize` | `-s` | 64 | Payload size in bytes |
 | `--paths` | | 6 | Number of ECMP flows to probe |
@@ -335,7 +342,8 @@ via -r -c 3 -o json google.com one.one.one.one
 | `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
 | `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
 | `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
-| `--report` | `-r` | | Report mode: non-interactive, print table and exit |
+| `--report` | `-r` | | Report mode: non-interactive, run `--count` rounds (10 if not set), print table and exit |
+| `--output` | `-o` | | Export format: `json`, `csv`, or `dot`, written to stdout (implies `--report`; see [Exporting from the command line](#exporting-from-the-command-line)) |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
 | `--no-asn` | | | Skip ASN lookups |
 | `--alert-loss` | | 5.0 | Loss% threshold for destination alert (0 = disabled) |
@@ -343,7 +351,8 @@ via -r -c 3 -o json google.com one.one.one.one
 | `--alert-rounds` | | 3 | Consecutive bad rounds before alert fires |
 | `--no-alert` | | | Disable alerting |
 | `--theme` | | (config) | Color theme slug (e.g. 'dracula', 'nord') |
-| `--version` | | | Print version and exit |
+| `--version` | `-v` | | Print version and exit |
+| `--help` | `-h` | | Print usage and the flag list, then exit |
 
 ---
 
@@ -394,6 +403,25 @@ Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table t
 - **Location** — the file is written to the current working directory (the directory you ran `via` from).
 - **File name** — `via-<target>-<timestamp>.<format>`, where `<target>` is the target as given on the command line and `<timestamp>` is local time as `YYYYMMDD-HHMM` (e.g. `via-google.com-20261124-1530.json`). Exporting again within the same minute overwrites the earlier file. With more than one target the file is `via-multi-<timestamp>.<format>` and holds every target that did not fail at startup.
 - **Result** — the status line shows `Exported to <path>` or `Export failed: <error>` for a few seconds.
+
+### Exporting from the command line
+
+`--output` / `-o` exports a trace without the TUI. It takes `json`, `csv` or `dot` (case-insensitive; `graphviz` is accepted for `dot`); any other value is an error.
+
+- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits.
+- **Where it goes** — standard output. There is no file argument; redirect or pipe it. Warnings and errors go to stderr, so they stay out of the export.
+
+```bash
+via -c 5 -o json example.com > trace.json
+via -c 5 -o csv example.com > trace.csv
+via -c 5 -o dot example.com | dot -Tsvg > path.svg
+```
+
+- **JSON** — the full report: version, timestamp, target, protocol, and every hop with its nodes, loss figures, probe counts and RTT stats (see [Rate-Limit Detection](#rate-limit-detection) for the loss fields).
+- **CSV** — a header row, then one row per node: `ttl`, `ip`, `hostname`, `asn`, `as_org`, `loss_pct`, `sent`, `received`, `avg_ms`, `best_ms`, `worst_ms`, `last_ms`, `stdev_ms`, `jitter_ms`, `flow_ids` (joined with `;`), `stability_pct`, `trend`. A hop that never answered is one row with `*` as its `ip`.
+- **DOT** — a Graphviz digraph of the path: one box per node labelled with IP, hostname, average RTT and loss, nodes grouped into a dashed cluster per AS, and silent hops drawn as dashed ellipses.
+
+With more than one target, the targets are traced one after another and written as a single export: JSON is one object with a `targets` array, CSV has a leading `target` column, and DOT is one graph in which a router seen by several targets is a single node.
 
 ---
 
