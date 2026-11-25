@@ -399,7 +399,7 @@ func (m Model) View() string {
 		}
 		// Status bar consistent with summary branch
 		elapsed := m.now().Sub(m.startTime).Truncate(time.Second)
-		traceStatus := fmt.Sprintf("Tracing... %d hops", m.focused().table.MaxTTLSeen())
+		traceStatus := fmt.Sprintf("Tracing... %d hops", summaryHops(m.focused()))
 		if m.paused {
 			traceStatus = "PAUSED"
 		}

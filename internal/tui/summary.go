@@ -52,7 +52,7 @@ func (m Model) renderSummaryRow(i int, s *TargetSession) string {
 		return m.styleSummaryRow(i, row) + "\n"
 	}
 
-	hops := s.table.MaxTTLSeen()
+	hops := summaryHops(s)
 	loss, lossKind, avg := destStats(s)
 	alertMsg := summaryAlert(s)
 	row := fmt.Sprintf("%s%-24s %5d %7s %8.1fms  %-16s %s",
@@ -79,9 +79,23 @@ func (m Model) styleSummaryRow(i int, row string) string {
 // Uses computeDeltas + largestDeltaTTL so that gap handling (carrying prevAvg
 // across non-responding hops) matches the detail pane exactly.
 func worstHop(s *TargetSession) string {
-	snap := s.table.Snapshot()
-	if len(snap) == 0 {
+	ttl := worstHopTTL(s)
+	if ttl == 0 {
 		return "—"
+	}
+	if h := s.table.Get(ttl); h != nil {
+		if ip := h.GetIP(); ip != nil {
+			return ip.String()
+		}
+	}
+	return "—"
+}
+
+// worstHopTTL returns the TTL worstHop reports, or 0 before any data.
+func worstHopTTL(s *TargetSession) int {
+	snap := pathHops(s)
+	if len(snap) == 0 {
+		return 0
 	}
 	hopMap := make(map[int]*hop.Hop, len(snap))
 	maxTTL := 0
@@ -91,19 +105,42 @@ func worstHop(s *TargetSession) string {
 			maxTTL = h.TTL
 		}
 	}
-	deltas := computeDeltas(hopMap, maxTTL)
-	ttl := largestDeltaTTL(deltas)
-	if ttl == 0 {
-		return "—"
+	return largestDeltaTTL(computeDeltas(hopMap, maxTTL))
+}
+
+// pathHops returns the session's hops up to and including the destination's.
+// The table also holds entries beyond it: round one probes every TTL before
+// the destination's distance is known, the destination answers each probe
+// that reaches it, and those entries never update again. Nothing shown for
+// the path may be read from them.
+func pathHops(s *TargetSession) []*hop.Hop {
+	snap := s.table.Snapshot()
+	limit := s.maxTTLHit
+	if limit == 0 {
+		limit = s.table.TargetTTL()
 	}
-	h, ok := hopMap[ttl]
-	if !ok {
-		return "—"
+	if limit == 0 {
+		return snap
 	}
-	if ip := h.GetIP(); ip != nil {
-		return ip.String()
+	out := snap[:0:0]
+	for _, h := range snap {
+		if h.TTL <= limit {
+			out = append(out, h)
+		}
 	}
-	return "—"
+	return out
+}
+
+// summaryHops is the HOPS figure for a session: the destination's distance
+// once it has answered, the highest TTL seen until then.
+func summaryHops(s *TargetSession) int {
+	n := 0
+	for _, h := range pathHops(s) {
+		if h.TTL > n {
+			n = h.TTL
+		}
+	}
+	return n
 }
 
 // truncateSummary returns s truncated to at most n display cells (one cell per
@@ -130,7 +167,7 @@ func truncateSummary(s string, n int) string {
 // Walking in reverse avoids reporting zeros for a trailing non-responding gap
 // hop as the destination.
 func destStats(s *TargetSession) (float64, hop.LossKind, time.Duration) {
-	snap := s.table.Snapshot()
+	snap := pathHops(s)
 	for i := len(snap) - 1; i >= 0; i-- {
 		h := snap[i]
 		pn := h.PrimaryNode()
