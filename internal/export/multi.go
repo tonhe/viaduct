@@ -27,7 +27,8 @@ func WriteJSONMulti(w io.Writer, m MultiReport) error {
 // WriteCSVMulti writes all targets as a single CSV table. The column layout is
 // identical to WriteCSV but with a leading "target" column. All targets share
 // one header row; rows from each target follow in order. A target that could
-// not be traced (Error set, no hops) contributes no rows.
+// not be traced (Error set, no hops) contributes one row: its target name, the
+// hop and node columns empty and the message in the trailing error column.
 func WriteCSVMulti(w io.Writer, m MultiReport) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()

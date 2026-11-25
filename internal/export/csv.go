@@ -19,6 +19,9 @@ var csvHeader = []string{
 	"icmp_ttl_sent", "icmp_ttl_received",
 	"primary_sent", "primary_received",
 	"echo_sent", "echo_received",
+	// error is the last column: the message for a target that could not be
+	// traced, empty on every row of a target that was.
+	"error",
 }
 
 // Positions in csvHeader of the hop-level columns a row without a node fills.
@@ -29,6 +32,9 @@ const (
 	csvColHeadline = 17
 	csvColLossKind = 18
 )
+
+// csvColError is the position in csvHeader of the error column.
+var csvColError = len(csvHeader) - 1
 
 // csvLossKind is the hop's loss kind; a report built without one reads as
 // measured, as in formatHeadline.
@@ -42,8 +48,20 @@ func csvLossKind(h Hop) string {
 // writeCSVRows writes one CSV row per node for r, and one row for each hop
 // with no node: "*" as its ip, the node columns empty and, if probes were sent
 // to it, the hop's own loss figures and probe counts.
+// A report with Error set (a target that could not be traced) gets one row
+// with every hop and node column empty and the message in the error column.
 // If withTarget is true, r.Target is prepended as the first column.
 func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
+	if r.Error != "" {
+		row := make([]string, len(csvHeader))
+		row[csvColError] = r.Error
+		if withTarget {
+			row = append([]string{r.Target}, row...)
+		}
+		if err := cw.Write(row); err != nil {
+			return err
+		}
+	}
 	for _, h := range r.Hops {
 		if len(h.Nodes) == 0 {
 			row := make([]string, len(csvHeader))
@@ -98,6 +116,7 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 				fmt.Sprintf("%d", n.Probes.Primary.Received),
 				fmt.Sprintf("%d", n.Probes.Echo.Sent),
 				fmt.Sprintf("%d", n.Probes.Echo.Received),
+				"", // error
 			}
 			if withTarget {
 				row = append([]string{r.Target}, row...)
