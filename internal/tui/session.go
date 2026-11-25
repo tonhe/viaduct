@@ -31,7 +31,8 @@ type TargetSession struct {
 	switchStatusMsg  string
 	switchStatusTime time.Time
 	alertEngine      *AlertEngine
-	startErr         error // resolution/family/socket failure; session never traces
+	debug            *RoundDebug // --debug-log round records; nil when off
+	startErr        error // resolution/family/socket failure; session never traces
 	marked           bool  // comparison mark for column view
 	notice           string // setup notice shown in the status bar (TargetSpec.Notice)
 }

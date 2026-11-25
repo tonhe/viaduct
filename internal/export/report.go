@@ -98,27 +98,9 @@ type ProbeCount struct {
 	Received int `json:"received"`
 }
 
-func lossKindName(k hop.LossKind) string {
-	switch k {
-	case hop.LossRateLimited:
-		return "rate_limited"
-	case hop.LossProvisional:
-		return "provisional"
-	default:
-		return "measured"
-	}
-}
+func lossKindName(k hop.LossKind) string { return k.String() }
 
-func rateLimitName(s hop.RateLimitState) string {
-	switch s {
-	case hop.RateLimitYes:
-		return "yes"
-	case hop.RateLimitNo:
-		return "no"
-	default:
-		return "undetermined"
-	}
-}
+func rateLimitName(s hop.RateLimitState) string { return s.String() }
 
 // RTTStats holds round-trip time statistics in milliseconds.
 type RTTStats struct {

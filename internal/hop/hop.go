@@ -25,6 +25,14 @@ type Hop struct {
 	closedRecvd  int // probesRecvd as of the last closed round
 	closedRounds int // roundsSent as of the last closed round
 
+	// The ICMP TTL probes' share of the counters above, kept so the debug log
+	// can give a hop's probes by type (ProbeCountsByType). The rest are
+	// primary (UDP or TCP) probes.
+	icmpSent        int
+	icmpRecvd       int
+	closedICMPSent  int
+	closedICMPRecvd int
+
 	// TTL-limited probes of each type sent in the open round, as the tracer
 	// reported them. Moved to the nodes when the round closes.
 	openICMP    int
@@ -75,6 +83,9 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind
 	}
 	if kind != KindEcho {
 		h.probesRecvd++
+		if kind == KindICMPTTL {
+			h.icmpRecvd++
+		}
 	} else {
 		h.beforeEchoAnswerLocked(node)
 	}
@@ -163,6 +174,7 @@ func (h *Hop) MarkRoundSentByType(icmpTTL, primary int) {
 	h.draining = false
 	h.roundsSent++
 	h.probesSent += icmpTTL + primary
+	h.icmpSent += icmpTTL
 	h.openICMP += icmpTTL
 	h.openPrimary += primary
 }
@@ -185,9 +197,11 @@ func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.draining = false
+	h.closedSent = h.probesSent
+	h.closedRecvd = h.probesRecvd
+	h.closedICMPSent = h.icmpSent
+	h.closedICMPRecvd = h.icmpRecvd
 	if h.roundsSent == h.closedRounds {
-		h.closedSent = h.probesSent
-		h.closedRecvd = h.probesRecvd
 		return
 	}
 	h.closedRounds = h.roundsSent
@@ -195,8 +209,6 @@ func (h *Hop) MarkRoundEnd() {
 	// tracer reported them.
 	icmpSent, primarySent := h.openICMP, h.openPrimary
 	h.openICMP, h.openPrimary = 0, 0
-	h.closedSent = h.probesSent
-	h.closedRecvd = h.probesRecvd
 	h.holdVerdictLocked()
 	verdict := h.rateLimitStateLocked()
 	for _, n := range h.Nodes {
@@ -480,6 +492,56 @@ func (h *Hop) ProbeCounts() (sent, received int) {
 	return h.closedSent, h.closedRecvd
 }
 
+// ProbeCountsByType splits ProbeCounts by probe type: the ICMP TTL probes
+// sent to this TTL and their replies, and the same for the primary (UDP or
+// TCP) probes, as of the last closed round.
+func (h *Hop) ProbeCountsByType() (icmpSent, icmpRecvd, primarySent, primaryRecvd int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.closedICMPSent, h.closedICMPRecvd,
+		h.closedSent - h.closedICMPSent, h.closedRecvd - h.closedICMPRecvd
+}
+
+// EchoCounts returns the direct echoes sent to this hop's nodes and the
+// answers received, and the part of both that counts toward the hop's
+// rate-limit verdict and echo loss: a node that ignores ping is left out of
+// the counted totals (see echoTotalsLocked).
+func (h *Hop) EchoCounts() (sent, received, countedSent, countedReceived int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, n := range h.Nodes {
+		s := n.EchoStats()
+		sent += s.Sent
+		received += s.Received
+	}
+	countedSent, countedReceived = h.echoTotalsLocked()
+	return sent, received, countedSent, countedReceived
+}
+
+// String names the kind as the JSON export does (loss_kind).
+func (k LossKind) String() string {
+	switch k {
+	case LossRateLimited:
+		return "rate_limited"
+	case LossProvisional:
+		return "provisional"
+	default:
+		return "measured"
+	}
+}
+
+// String names the verdict as the JSON export does (rate_limited).
+func (s RateLimitState) String() string {
+	switch s {
+	case RateLimitYes:
+		return "yes"
+	case RateLimitNo:
+		return "no"
+	default:
+		return "undetermined"
+	}
+}
+
 // GetMinRTT returns the primary node's minimum RTT.
 func (h *Hop) GetMinRTT() time.Duration {
 	h.mu.RLock()
@@ -537,6 +599,8 @@ func (h *Hop) Reset() {
 	h.probesRecvd = 0
 	h.closedSent = 0
 	h.closedRecvd = 0
+	h.icmpSent, h.icmpRecvd = 0, 0
+	h.closedICMPSent, h.closedICMPRecvd = 0, 0
 	h.openICMP = 0
 	h.openPrimary = 0
 	h.heldVerdict = RateLimitUndetermined
