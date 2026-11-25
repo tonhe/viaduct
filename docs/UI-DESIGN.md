@@ -42,7 +42,7 @@ A loss cell is colored by what kind of figure it holds:
 | echo loss on a rate-limited hop | `~0%†` | `Base03` |
 | loss whose cause is not yet known | `85.7%?` | `Base04` |
 
-Loss is shown as `N%?` while the hop has loss and fewer than 20 echo samples, the number a rate-limit verdict needs. It is dim so it is not read as a measurement of the path. Once the samples are in, the cell becomes a measured figure or `~N%†`.
+Loss is shown as `N%?` while the hop has loss and fewer than 20 echo samples, the number a rate-limit verdict needs. It is dim so it is not read as a measurement of the path. Once the samples are in, the cell becomes a measured figure or `~N%†`. A hop that has had a verdict never shows `N%?` again: if its echo samples later fall below 20 (a node that ignores ping leaves the totals), the cell keeps the last verdict until 20 new samples are in.
 
 ### Sparkline gradient
 
@@ -201,7 +201,7 @@ Loss belongs to the hop, not to a node: an unanswered TTL-limited probe does not
 | `Rnd` | 5 | the hop's rounds |
 
 - A count cell is a dim `—` when no probe of that type was sent.
-- The Echo count is dim until the hop has the 20 echo samples a rate-limit verdict needs, counted over all of the hop's nodes. Until then the count is still accumulating and must not look like a settled figure.
+- The Echo count is dim while the hop has no verdict: until it first has the 20 echo samples a rate-limit verdict needs, counted over the hop's nodes. Until then the count is still accumulating and must not look like a settled figure. Once the hop has had a verdict the count stays undimmed, also while a held verdict covers fewer than 20 samples.
 - A TTL with no reply is the hop number and `*`.
 - `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column, ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle.
 - In column view `d` does not replace the panes. The panes stay as they are and the header bar names no view.
