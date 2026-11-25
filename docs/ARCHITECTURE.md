@@ -202,7 +202,14 @@ shared
 
 ## Build and release
 
-`make build` builds `./via` and stamps a build timestamp into `main.buildVersion`. Release builds are made by GoReleaser from a `v*` tag, which sets `main.version` from the tag: archives for macOS, Linux and Windows on amd64 and arm64, `.deb` and `.rpm` packages, Windows installers, and a Homebrew tap update. See [RELEASING.md](../RELEASING.md).
+`make build` builds `./via` and sets two values with `-ldflags -X`:
+
+- `main.version` is `git describe --tags --always --dirty` without the leading `v`: the tag on a tagged commit, `<tag>-<N>-g<hash>` after it, with `-dirty` for a modified tree.
+- `main.buildVersion` is the build time in UTC, as `YYYYMMDD.HHMM`.
+
+A build that sets no version (`go build`, `go install`, or `make build` outside a git checkout, where `git describe` prints nothing) takes it from the build info the Go toolchain recorded. `resolveVersion` in `cmd/via/version.go` returns the module version without its leading `v`, or `dev+<revision>` when only a VCS revision is recorded, or `dev`. `buildVersion` stays `dev` unless it is injected.
+
+Release builds are made by GoReleaser from a `v*` tag, which sets `main.version` from the tag and `main.buildVersion` to the short commit hash: archives for macOS, Linux and Windows on amd64 and arm64, `.deb` and `.rpm` packages, Windows installers, and a Homebrew tap update. See [RELEASING.md](../RELEASING.md).
 
 ## Dependencies
 
