@@ -23,7 +23,7 @@ Themes are Base16 palettes (`internal/theme`). The TUI never hard-codes a color.
 | `Base01` | background of the header bar, separator, summary header, status bar and the settings box |
 | `Base02` | selection background: focused summary row, highlighted settings item |
 | `Base03` | lowest-emphasis marks: `*` for a silent hop, tree connectors, `... +N more paths`, a rate-limited loss cell, an ASN that did not change, dim sparkline cells |
-| `Base04` | dim text: hop numbers, column headers, bar text, `— stable` |
+| `Base04` | dim text: hop numbers, column headers, bar text, `— stable`, loss whose cause is not yet known (`N%?`) |
 | `Base05` | body text: hostnames, header text, plain numbers |
 | `Base06` | text on a selection background, settings titles |
 | `Base08` | bad: non-zero loss, `▲ degrading`, the alert bar (bold), error messages |
@@ -34,7 +34,15 @@ Themes are Base16 palettes (`internal/theme`). The TUI never hard-codes a color.
 
 The settings box border is `Base04` on dark themes and `Base03` on light themes.
 
-Loss cells are two-tier: `Base0B` at exactly 0%, `Base08` above it. There is no intermediate tier.
+A loss cell is colored by what kind of figure it holds:
+
+| Figure | Shown as | Color |
+|---|---|---|
+| measured TTL-probe loss | `0.0%`, `12.5%` | `Base0B` at exactly 0%, `Base08` above it. There is no intermediate tier. |
+| echo loss on a rate-limited hop | `~0%†` | `Base03` |
+| loss whose cause is not yet known | `85.7%?` | `Base04` |
+
+Loss is shown as `N%?` while the hop has loss and fewer than 20 echo samples, the number a rate-limit verdict needs. It is dim so it is not read as a measurement of the path. Once the samples are in, the cell becomes a measured figure or `~N%†`.
 
 ### Sparkline gradient
 
@@ -58,6 +66,7 @@ A cell's color is its RTT's deviation above the median of the latency-bearing ce
 | `...` | Hostname, ASN | lookup still pending |
 | `-` | any stat cell | no value (no samples, or not shown for a secondary ECMP node) |
 | `~N%†` | Loss% | hop is rate-limited. The figure is the loss of direct echoes to the hop. |
+| `N%?` | Loss% | the hop has loss and its cause is not yet known: it may be rate limiting or real. Dimmed. |
 | `├──` `└──` | tree column | ECMP nodes at one TTL. `└──` is the last. |
 | `... +N more paths` | under a divergent hop | N nodes not shown for lack of rows |
 | `▲ degrading` | Trend | latency rising over the last 10 rounds |
@@ -89,7 +98,7 @@ A drop is written only when no tier reached the hop, so the sparkline's dots agr
 
 - **Durations** are milliseconds with one decimal and no unit (`12.4`). Under one millisecond they are whole microseconds with the unit (`850µs`). Zero is `-`.
 - **Delta** is signed (`+3.2`, `-0.4`). The first responding hop shows its own average.
-- **Loss%** has one decimal (`0.0%`, `12.5%`). In column panes it is a whole number (`0%`, `13%`).
+- **Loss%** has one decimal (`0.0%`, `12.5%`, `85.7%?`). Echo loss on a rate-limited hop is a whole number (`~0%†`). In column panes every loss figure is a whole number (`0%`, `13%`), with `~` in front for a rate-limited hop and `?` after it while the cause is not yet known (`~0%`, `13%?`).
 - **StDev** has one decimal. `-` when zero.
 - **Rnd** is a count of rounds.
 - **ASN** is `AS13335`, or `AS13335 (ORG)` when there is room.
@@ -170,18 +179,32 @@ If the result is still too wide (a 39-character IPv6 address is the usual cause)
 
 ### Probe Detail view
 
-The fifth view replaces the hop table with per-probe-type counts, one row per node:
+The fifth view replaces the hop table with what each kind of probe got back, one row per node:
 
 ```
-#   IP                ICMP-TTL    UDP-TTL     Echo        Rnd
-1   192.0.2.1         10 (0%)     10 (0%)     9 (0%)      10
-2   198.51.100.5      3 (70%)     2 (80%)     3/5         10
+#   IP                Loss%    % of replies ICMP-TTL  UDP-TTL   Echo      Rnd
+1   192.0.2.1         15.0%?   100%         9/10      8/10      6/6       10
+2   192.0.2.2         50.0%?   100%         0/1       1/1       0/3       1
 ```
 
-- Each probe cell is `received (loss%)`, 11 wide, green at 0% and red above.
-- The middle column is `UDP-TTL` or `TCP-TTL`. In ICMP mode it shows `—`, because the ICMP TTL probe is the primary probe.
-- The Echo cell shows `N/5` in dim text until 5 echoes have been sent to the node. "Not enough samples yet" must not look like "0% loss".
-- The IP column is at least 17 wide.
+Loss belongs to the hop, not to a node: an unanswered TTL-limited probe does not say which node it went to. No column shows a per-node loss figure.
+
+| Column | Width | Shows |
+|---|---|---|
+| `#` | 3 | hop number |
+| `IP` | longest address shown, at least 17 | node address |
+| `Loss%` | 8 | the hop's loss, on the hop's first line only. It is the same cell as the main table's, including `~N%†` and `N%?`. The other node lines of a divergent hop show a dim `-`. |
+| `% of replies` | 12 | the node's share of the hop's replies to TTL-limited probes, as a whole percent. A dim `-` when the hop has no replies. |
+| `ICMP-TTL` | 9 | ICMP TTL-limited probes, `received/sent` |
+| `UDP-TTL` | 9 | primary-protocol TTL-limited probes, `received/sent`. The header is `TCP-TTL` with TCP probes. In ICMP mode the cells are a dim `—`, because there are no primary probes. |
+| `Echo` | 9 | direct echoes to the node, `received/sent` |
+| `Rnd` | 5 | the hop's rounds |
+
+- A count cell is a dim `—` when no probe of that type was sent.
+- The Echo count is dim until the hop has the 20 echo samples a rate-limit verdict needs, counted over all of the hop's nodes. Until then the count is still accumulating and must not look like a settled figure.
+- A TTL with no reply is the hop number and `*`.
+- `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column, ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle.
+- In column view `d` does not replace the panes. The panes stay as they are and the header bar names no view.
 
 ## Multi-target
 
