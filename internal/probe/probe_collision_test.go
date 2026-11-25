@@ -848,9 +848,10 @@ func (m *mockPacketConn) SetWriteDeadline(t time.Time) error            { return
 func TestListenTCP_ViaFakeConn_MatchesSYNACK(t *testing.T) {
 	// Build a fake SYN-ACK response: server port=443 (src), our port=44000 (dst).
 	synack := buildFakeTCPPacket(443, 44000, 0x12) // SYN+ACK
+	binary.BigEndian.PutUint32(synack[8:12], 102)  // acknowledges our sequence 101
 
 	pm := newProbeMap()
-	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 0}
+	key := probeKey{SrcPort: 44000, DstPort: 443, Seq: 101}
 	pm.add(key, 7, 2, time.Now(), ProbeTCPTTL)
 
 	results := make(chan Result, 10)
