@@ -241,7 +241,7 @@ The TUI switches to a **summary+detail layout**: a header row per target shows t
 |-----|--------|
 | <kbd>↑</kbd> / <kbd>↓</kbd> | Move focus to the previous / next target (stops at the first and last) |
 | <kbd>Tab</kbd> | Move focus to the next target, wrapping from the last to the first |
-| <kbd>j</kbd> / <kbd>k</kbd> | Scroll the focused target's hop table down / up (they do not move focus) |
+| <kbd>j</kbd> / <kbd>k</kbd> | Scroll the focused target's hop table down / up (they do not move focus). Column view does not scroll, so there <kbd>j</kbd>, <kbd>k</kbd>, <kbd>g</kbd> and <kbd>G</kbd> do nothing and the hop table keeps its scroll position |
 | <kbd>Space</kbd> | Mark/unmark target — also selects which panes show in column view |
 | <kbd>c</kbd> | Toggle column view — bordered panes side by side (`# IP Host Avg Loss`), one per target, dividing the terminal width equally; every pane has the same light border, and the focused pane is shown by an accent-colored border and a bold label |
 
