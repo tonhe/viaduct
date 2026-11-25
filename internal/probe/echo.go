@@ -104,7 +104,7 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		}
 		// The socket stopped accepting writes this round: leave the rest of
 		// the budget for the next round, cursor in place.
-		if t.sends.isStalled(sockICMP) {
+		if t.sends.isStalled(t.echoSock) {
 			t.sends.counts[ProbeICMPEcho].skipped += budget - i
 			break
 		}
@@ -125,7 +125,7 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		key := probeKey{SrcPort: t.cfg.EchoID, DstPort: wire, Seq: 0}
 		// The reply must come from the address this echo is sent to.
 		t.pm.addTo(key, tgt.TTL, 0, time.Now(), ProbeICMPEcho, tgt.IP)
-		if !t.send(snd, sockICMP, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: tgt.IP}) {
+		if !t.send(snd, t.echoSock, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: tgt.IP}) {
 			t.pm.remove(key)
 			continue
 		}

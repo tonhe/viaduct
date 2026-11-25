@@ -37,8 +37,9 @@ var (
 type sendSocket int
 
 const (
-	sockICMP    sendSocket = iota // ICMP TTL probes and the echo tier
+	sockICMP    sendSocket = iota // ICMP TTL probes (and the echo tier when it has no socket of its own)
 	sockPrimary                   // UDP or TCP flow probes
+	sockEcho                      // the echo tier's own socket
 	numSendSockets
 )
 

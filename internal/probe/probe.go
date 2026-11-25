@@ -313,6 +313,9 @@ type Tracer struct {
 
 	// sends is the send loop's record of probes that did not leave (send.go).
 	sends sendState
+	// echoSock is the socket the echo tier writes to: sockICMP when it shares
+	// the TTL probes' socket (tests), sockEcho when it has its own.
+	echoSock sendSocket
 }
 
 // defaultListenICMP wraps icmp.ListenPacket so its return type satisfies
@@ -450,6 +453,31 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		}
 	}
 
+	// The echo tier writes to every node on the path. On macOS a raw ICMPv6
+	// socket that sends to many addresses is throttled as a whole: writes
+	// stall and replies stop arriving (viaduct#115, #152). So the echo tier
+	// gets a socket of its own, and the socket that carries the TTL probes and
+	// receives every reply only ever sends to the target. Nothing is read from
+	// the echo socket; echo replies reach the listener's socket like all ICMP.
+	// If the second socket cannot be opened the echo tier shares the first.
+	echoSnd := icmpSnd
+	t.echoSock = sockICMP
+	if t.newSender == nil && conn != nil {
+		if echoConn, err := icmp.ListenPacket(ListenerNet(t.cfg.IPVersion), RawListenAddr(t.cfg.IPVersion)); err == nil {
+			defer echoConn.Close()
+			if p6 := echoConn.IPv6PacketConn(); p6 != nil {
+				// Deliver nothing to this socket: it is never read.
+				var f ipv6.ICMPFilter
+				f.SetAll(true)
+				_ = p6.SetICMPFilter(&f)
+			}
+			echoSnd = &icmpSender{conn: echoConn, ipVersion: t.cfg.IPVersion}
+			t.echoSock = sockEcho
+		} else {
+			t.debugf("echo socket: %v; the echo tier shares the probe socket", err)
+		}
+	}
+
 	dst := &net.IPAddr{IP: t.target}
 	seq := 0
 	round := 0
@@ -547,7 +575,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		// reachability. Skipped on round 0; starts round 2 (index >= 1) so
 		// the first round establishes hop reachability before echoes begin.
 		if round >= 1 && icmpSnd != nil {
-			t.sendEchoes(icmpSnd, &seq)
+			t.sendEchoes(echoSnd, &seq)
 		}
 
 		// The round's sends are done: log what did not leave, and let the
