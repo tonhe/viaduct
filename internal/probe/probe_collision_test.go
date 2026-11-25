@@ -835,7 +835,7 @@ func (m *mockPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		return 0, nil, r.err
 	}
 	n := copy(p, r.data)
-	return n, mockAddr{"192.0.2.100:443"}, nil
+	return n, mockAddr{"192.0.2.1"}, nil
 }
 
 func (m *mockPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) { return len(p), nil }
@@ -986,7 +986,7 @@ func (c *cancellingPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		// Cancel the context immediately after delivering data, before the
 		// inner select in listenTCP can send to the results channel.
 		c.cancel()
-		return n, mockAddr{"192.0.2.100:443"}, nil
+		return n, mockAddr{"192.0.2.1"}, nil
 	}
 	// Subsequent calls block until the deadline fires.
 	time.Sleep(300 * time.Millisecond)

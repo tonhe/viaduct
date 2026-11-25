@@ -329,6 +329,15 @@ type Tracer struct {
 	// when it has its own, sockICMP when it shares the TTL probes' socket.
 	// Only the send-loop goroutine touches it.
 	echoSock sendSocket
+
+	// newTCPSource opens what the TCP listener reads replies from (see
+	// tcpSegmentSource). Tests may replace it; rawConn is then nil when the
+	// sockets come from newSender. When nil, the platform's own is used: the
+	// raw TCP send socket, or on macOS a BPF device. A run through newSender
+	// starts a TCP listener only if this is set.
+	newTCPSource func(rawConn net.PacketConn) (tcpSegmentSource, func(), error)
+	// tcpRecv counts what the TCP listener read, for the debug log.
+	tcpRecv tcpRecvStats
 }
 
 // defaultListenICMP wraps icmp.ListenPacket so its return type satisfies
@@ -442,6 +451,15 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			icmpSnd = snd
 			t.sends.oneSocket = true
 		}
+		// A test that also supplies a TCP reply source gets the TCP listener.
+		if proto.Name() == "tcp" && t.newTCPSource != nil {
+			src, closeSrc, err := t.tcpSource(nil)
+			if err != nil {
+				return err
+			}
+			defer closeSrc()
+			go t.listenTCP(ctx, src, t.pm, results)
+		}
 	} else {
 		// Determine send socket based on protocol.
 		// For ICMP: tier 1 already sends via the ICMP listener socket;
@@ -463,9 +481,18 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			// IPv6: the kernel fills the probe checksum (checksum6.go).
 			rawConn, buildCfg.kernelChecksum = t.prepareSendSocket(realSendSocketOps, rawProto, rawConn)
 			defer rawConn.Close()
-			// For TCP, also start a listener for SYN-ACK/RST responses
+			// For TCP, also start a listener for SYN-ACK/RST responses. It
+			// reads the send socket, or on macOS a packet capture; if that
+			// cannot be set up the trace stops here and says why, because
+			// without it the destination would show as 100% lost.
 			if proto.Name() == "tcp" {
-				go t.listenTCP(ctx, rawConn, t.pm, results)
+				src, closeSrc, err := t.tcpSource(rawConn)
+				if err != nil {
+					return err
+				}
+				defer closeSrc()
+				defer t.logTCPReceive("at exit")
+				go t.listenTCP(ctx, src, t.pm, results)
 			}
 			snd = &rawSender{conn: rawConn, ipVersion: t.cfg.IPVersion}
 		}
@@ -578,6 +605,9 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		// The round's sends are done: log what did not leave, and let the
 		// next round try a stalled socket again.
 		t.endSendRound(round + 1)
+		if primaryType == ProbeTCPTTL {
+			t.logTCPReceive(fmt.Sprintf("round %d", round+1))
+		}
 
 		// Sweep stale probe entries that never received a response
 		t.pm.sweep(2 * t.cfg.Timeout)
