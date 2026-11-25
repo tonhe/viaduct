@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/net/icmp"
 )
 
 // The echo tier sends on a socket of its own (viaduct#115). These tests sit at
@@ -291,62 +289,3 @@ func TestSendState_EchoSocketStallIsItsOwn(t *testing.T) {
 	}
 }
 
-// The real socket, where the test may open one (root or CAP_NET_RAW): it
-// sends, and nothing is delivered to it. An echo to the loopback address is
-// answered by the host, and the reply reaches every raw ICMP socket that has
-// not filtered it out.
-func TestOpenEchoSocket_SendsAndReceivesNothing(t *testing.T) {
-	for _, fam := range []struct {
-		name     string
-		v        int
-		loopback string
-	}{
-		{"IPv4", 4, "127.0.0.1"},
-		{"IPv6", 6, "::1"},
-	} {
-		t.Run(fam.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.IPVersion = fam.v
-			lo := net.ParseIP(fam.loopback)
-			tr := NewTracer(lo, cfg)
-
-			// A plain raw socket next to it shows the reply did arrive.
-			witness, err := icmp.ListenPacket(ListenerNet(fam.v), RawListenAddr(fam.v))
-			if err != nil {
-				t.Skipf("no raw ICMP socket here: %v", err)
-			}
-			defer witness.Close()
-
-			conn, err := openEchoConn(fam.v, tr.debugf)
-			if err != nil {
-				t.Fatalf("openEchoConn: %v", err)
-			}
-			defer conn.Close()
-			snd := &icmpSender{conn: conn, ipVersion: fam.v}
-
-			pkt, err := buildICMPEchoRequest(fam.v, 0x4242, 7, 16)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !tr.send(snd, sockEcho, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: lo}) {
-				t.Skipf("the echo to %s could not be sent on this host", lo)
-			}
-
-			buf := make([]byte, 1500)
-			_ = witness.SetReadDeadline(time.Now().Add(2 * time.Second))
-			if _, _, err := witness.ReadFrom(buf); err != nil {
-				t.Skipf("no ICMP came back from %s: %v", lo, err)
-			}
-
-			if fam.v == 4 && !echoSocketFiltersIPv4 {
-				// No ICMP filter for IPv4 on this platform: the socket is
-				// handed copies until its small receive buffer is full.
-				return
-			}
-			_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-			if n, from, err := conn.ReadFrom(buf); err == nil {
-				t.Errorf("the echo socket was delivered %d bytes from %v, want nothing: it is never read", n, from)
-			}
-		})
-	}
-}

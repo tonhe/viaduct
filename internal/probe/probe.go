@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"runtime"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -721,31 +721,13 @@ func (t *Tracer) openEchoSocket() (probeSender, func(), error) {
 	return &icmpSender{conn: conn, ipVersion: t.cfg.IPVersion}, func() { conn.Close() }, nil
 }
 
-// echoSocketFiltersIPv4 reports whether this platform can filter the ICMP
-// delivered to a raw IPv4 socket. Only Linux can (ICMP_FILTER).
-var echoSocketFiltersIPv4 = runtime.GOOS == "linux"
-
 // openEchoConn opens the echo tier's socket: a raw ICMP socket that is written
 // to and never read.
 //
 // A raw ICMP socket is handed a copy of every inbound ICMP packet of its
 // family, whichever socket the request left on. The listener's socket gets its
 // copy regardless, so this one is told to take as little as the platform
-// allows:
-//
-//   - IPv6: an ICMPv6 filter that blocks every type. Nothing is delivered.
-//   - IPv4 on Linux: the same, with ICMP_FILTER.
-//   - IPv4 elsewhere (macOS, the BSDs): there is no ICMP type filter for a raw
-//     IPv4 socket. The receive buffer is shrunk to the smallest the kernel
-//     allows, so it fills after a packet or two and from then on the kernel
-//     drops this socket's copy on arrival. A full receive buffer on a socket
-//     nobody reads costs nothing else: the drop is per socket, it does not
-//     touch the listener's copy and it does not affect sending. A reader would
-//     only spend a goroutine and a wake-up per inbound ICMP packet to throw
-//     the same bytes away.
-//
-// These are economies, not conditions: a filter or buffer size that cannot be
-// set is logged and the socket is used as it is.
+// allows (see quiet).
 func openEchoConn(ipVersion int, debugf func(format string, args ...any)) (*echoConn, error) {
 	// The same socket icmp.ListenPacket opens for the listener, held as the
 	// net.PacketConn it is so the receive buffer can be set.
@@ -753,29 +735,13 @@ func openEchoConn(ipVersion int, debugf func(format string, args ...any)) (*echo
 	if err != nil {
 		return nil, err
 	}
+	conn := &echoConn{PacketConn: pc}
 	if ipVersion == 6 {
-		conn := &echoConn{PacketConn: pc, p6: ipv6.NewPacketConn(pc)}
-		var f ipv6.ICMPFilter
-		f.SetAll(true)
-		if err := conn.p6.SetICMPFilter(&f); err != nil {
-			debugf("echo socket: ICMPv6 filter not set: %v; the socket is used unfiltered", err)
-		}
-		return conn, nil
+		conn.p6 = ipv6.NewPacketConn(pc)
+	} else {
+		conn.p4 = ipv4.NewPacketConn(pc)
 	}
-	conn := &echoConn{PacketConn: pc, p4: ipv4.NewPacketConn(pc)}
-	if echoSocketFiltersIPv4 {
-		var f ipv4.ICMPFilter
-		f.SetAll(true)
-		if err := conn.p4.SetICMPFilter(&f); err != nil {
-			debugf("echo socket: ICMP filter not set: %v; the socket is used unfiltered", err)
-		}
-	}
-	// Asked for one byte; the kernel rounds up to its minimum.
-	if rb, ok := pc.(interface{ SetReadBuffer(bytes int) error }); ok {
-		if err := rb.SetReadBuffer(1); err != nil {
-			debugf("echo socket: receive buffer not shrunk: %v", err)
-		}
-	}
+	conn.quiet(conn.blockAllICMP, debugf)
 	return conn, nil
 }
 
@@ -784,6 +750,62 @@ type echoConn struct {
 	net.PacketConn
 	p4 *ipv4.PacketConn
 	p6 *ipv6.PacketConn
+
+	// How the socket is kept from collecting inbound ICMP (see quiet). At
+	// most one is set.
+	filtered     bool // an ICMP filter that blocks every type is in place
+	smallRecvBuf bool // no filter: the receive buffer is the kernel's minimum
+}
+
+// blockAllICMP sets an ICMP filter that blocks every type. It fails where the
+// platform has no such filter for the socket's family.
+func (c *echoConn) blockAllICMP() error {
+	if c.p6 != nil {
+		var f ipv6.ICMPFilter
+		f.SetAll(true)
+		return c.p6.SetICMPFilter(&f)
+	}
+	var f ipv4.ICMPFilter
+	f.SetAll(true)
+	return c.p4.SetICMPFilter(&f)
+}
+
+// quiet keeps the unread socket from collecting inbound ICMP, by the best
+// means the platform has for the socket's family:
+//
+//   - A filter that blocks every ICMP type, where setFilter can set one:
+//     ICMPv6 on Linux, macOS and the BSDs, ICMPv4 on Linux only. Nothing is
+//     delivered to the socket.
+//   - Otherwise (ICMPv4 on macOS and the BSDs, both families on Windows,
+//     where setFilter reports that no filter is implemented) the receive
+//     buffer is shrunk to the smallest the kernel allows. It fills after a
+//     packet or two and from then on the kernel drops this socket's copy on
+//     arrival.
+//
+// A full receive buffer on a socket nobody reads costs nothing else: the drop
+// is per socket, it does not touch the listener's copy and it does not affect
+// sending. A reader would only spend a goroutine and a wake-up per inbound
+// ICMP packet to throw the same bytes away.
+//
+// These are economies, not conditions. If neither can be done the debug log
+// says so and the socket is used as it is: it then holds one default receive
+// buffer of packets and drops the rest.
+func (c *echoConn) quiet(setFilter func() error, debugf func(format string, args ...any)) {
+	filterErr := setFilter()
+	if filterErr == nil {
+		c.filtered = true
+		return
+	}
+	bufErr := errors.New("the socket has no receive-buffer control")
+	if rb, ok := c.PacketConn.(interface{ SetReadBuffer(bytes int) error }); ok {
+		// Asked for one byte; the kernel rounds up to its minimum.
+		bufErr = rb.SetReadBuffer(1)
+	}
+	if bufErr == nil {
+		c.smallRecvBuf = true
+		return
+	}
+	debugf("echo socket: no ICMP filter (%v) and the receive buffer was not shrunk (%v); the socket is used as it is", filterErr, bufErr)
 }
 
 func (c *echoConn) IPv4PacketConn() *ipv4.PacketConn { return c.p4 }
