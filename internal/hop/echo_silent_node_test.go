@@ -81,23 +81,108 @@ func TestHopLoss_NodeThatStartsAnsweringEchoIsCountedAgain(t *testing.T) {
 	}
 }
 
-func TestHopLoss_AllNodesIgnoringEchoIsProvisional(t *testing.T) {
+// A silent node is left out only when another node of its hop answers echo.
+// A hop where no node answers echo keeps every echo in its totals: its loss
+// is measured, as it was before viaduct#124, and it can alert. The commonest
+// such hop is a destination that ignores ping.
+func TestHopLoss_HopWhereNoNodeAnswersEchoIsMeasured(t *testing.T) {
+	const want = 6.0 / 7.0 * 100
+	for _, tc := range []struct {
+		name  string
+		round func(h *Hop, round int)
+		nodes int
+	}{
+		{"single node", func(h *Hop, _ int) {
+			runRound(h, 7, []hopReply{{"198.51.100.9", KindICMPTTL}}, false)
+		}, 1},
+		{"two nodes", func(h *Hop, round int) {
+			runECMPRound(h, round, func(string) bool { return false })
+		}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHop(6)
+			for round := 0; round < 40; round++ {
+				tc.round(h, round)
+			}
+			if got := len(h.GetNodes()); got != tc.nodes {
+				t.Fatalf("fixture: %d nodes, want %d", got, tc.nodes)
+			}
+			for _, n := range h.GetNodes() {
+				if s := n.EchoStats(); s.Sent < echoSilentAfter || s.Received != 0 {
+					t.Fatalf("fixture: node %s echo %d/%d, want at least %d sent and none answered",
+						n.GetIP(), s.Received, s.Sent, echoSilentAfter)
+				}
+			}
+			if got := h.RateLimitState(); got != RateLimitNo {
+				t.Errorf("RateLimitState = %v, want No: every echo is lost too", got)
+			}
+			loss, kind := h.Loss()
+			if kind != LossMeasured || !approx(loss, want) {
+				t.Errorf("Loss = %.2f, %v; want %.2f, LossMeasured", loss, kind, want)
+			}
+			if got := FormatLoss(loss, kind); got != "85.7%" {
+				t.Errorf("FormatLoss = %q, want %q", got, "85.7%")
+			}
+			// SettledLoss is the figure alerting reads.
+			if got := h.SettledLoss(); !approx(got, want) {
+				t.Errorf("SettledLoss = %.2f, want %.2f: measured loss alerts", got, want)
+			}
+		})
+	}
+}
+
+// A hop where no node answered echo, and one then starts to: the echoes
+// ignored until then leave the totals, so the hop has too few echo samples
+// for a verdict and its loss is provisional until 20 more have been sent.
+func TestHopLoss_FirstEchoAnswerOnASilentHopRestartsTheVerdict(t *testing.T) {
 	h := NewHop(6)
-	for round := 0; round < 40; round++ {
+	for round := 0; round < 30; round++ {
 		runECMPRound(h, round, func(string) bool { return false })
 	}
-	if got := h.RateLimitState(); got != RateLimitUndetermined {
-		t.Errorf("RateLimitState = %v, want Undetermined: the hop has no echo samples", got)
+	if _, kind := h.Loss(); kind != LossMeasured {
+		t.Fatalf("fixture: kind = %v, want LossMeasured while no node answers echo", kind)
 	}
-	loss, kind := h.Loss()
-	if kind != LossProvisional || !approx(loss, 6.0/7.0*100) {
-		t.Errorf("Loss = %.2f, %v; want 85.71, LossProvisional", loss, kind)
+	answersA := func(ip string) bool { return ip == silentNodeA }
+	runECMPRound(h, 30, answersA)
+	if loss, kind := h.Loss(); kind != LossProvisional || !approx(loss, 6.0/7.0*100) {
+		t.Errorf("after A's first answer Loss = %.2f, %v; want 85.71, LossProvisional", loss, kind)
 	}
-	if got := FormatLoss(loss, kind); got != "85.7%?" {
-		t.Errorf("FormatLoss = %q, want %q", got, "85.7%?")
+	for round := 31; round < 50; round++ {
+		runECMPRound(h, round, answersA)
 	}
-	if got := h.SettledLoss(); got != 0 {
-		t.Errorf("SettledLoss = %.2f, want 0: provisional loss does not alert", got)
+	if loss, kind := h.Loss(); kind != LossRateLimited || loss != 0 {
+		t.Errorf("after 20 answered echoes Loss = %.2f, %v; want 0, LossRateLimited", loss, kind)
+	}
+}
+
+// When the only node that answered echo goes silent, it stays in the totals
+// with every echo it now loses, and the node that never answered stays out.
+// The hop's echo loss climbs until it no longer differs from its TTL-probe
+// loss; the verdict is then No and the loss is the measured TTL-probe figure.
+func TestHopLoss_AnsweringNodeThatGoesSilentKeepsCounting(t *testing.T) {
+	h := NewHop(6)
+	for round := 0; round < 40; round++ {
+		runECMPRound(h, round, func(ip string) bool { return ip == silentNodeA })
+	}
+	if loss, kind := h.Loss(); kind != LossRateLimited || loss != 0 {
+		t.Fatalf("fixture: Loss = %.2f, %v; want 0, LossRateLimited", loss, kind)
+	}
+	// A stops answering. Ten rounds on its echo loss is 10 of 50.
+	for round := 40; round < 50; round++ {
+		runECMPRound(h, round, func(string) bool { return false })
+	}
+	if loss, kind := h.Loss(); kind != LossRateLimited || !approx(loss, 20) {
+		t.Errorf("10 rounds after A went silent Loss = %.2f, %v; want 20, LossRateLimited (A's echoes only)", loss, kind)
+	}
+	// 800 rounds on it is 800 of 840, as high as the TTL-probe loss.
+	for round := 50; round < 840; round++ {
+		runECMPRound(h, round, func(string) bool { return false })
+	}
+	if got := h.RateLimitState(); got != RateLimitNo {
+		t.Errorf("RateLimitState = %v, want No: echoes are now lost as often as TTL probes", got)
+	}
+	if loss, kind := h.Loss(); kind != LossMeasured || !approx(loss, 6.0/7.0*100) {
+		t.Errorf("Loss = %.2f, %v; want 85.71, LossMeasured", loss, kind)
 	}
 }
 
