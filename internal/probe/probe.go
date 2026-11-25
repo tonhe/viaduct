@@ -47,6 +47,15 @@ type Config struct {
 	TargetIP         net.IP        // destination IP (needed for TCP checksum)
 	OnProtocolSwitch func(string)  // called when auto mode switches protocol
 	IPVersion        int           // 4 or 6 — required, no default
+
+	// SendTimeout is the write deadline set before every probe send. A write
+	// that has not completed by then is a failed send. 0 = defaultSendTimeout.
+	SendTimeout time.Duration
+	// Debugf, when set, receives the probe engine's debug-log lines: send
+	// failures (once per address) and, per round, the probes that did not
+	// leave. It is called from the send loop and must be safe to call from
+	// several tracers at once.
+	Debugf func(format string, args ...any)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -65,12 +74,25 @@ func DefaultConfig() Config {
 	}
 }
 
+// defaultSendTimeout is how long one probe write may block before it is given
+// up as a failed send (Config.SendTimeout overrides it).
+const defaultSendTimeout = 100 * time.Millisecond
+
 // RoundMarker is notified once per hop per round when probes are dispatched.
 // probes is the number of TTL-limited probes actually written for that TTL
 // this round (the ICMP TTL probe plus every primary flow); echo-tier probes
 // are reported separately through the echo-sent callback.
 type RoundMarker interface {
 	MarkRoundSent(ttl int, probes int)
+}
+
+// RoundTypeMarker is a RoundMarker that is also told how the probes written
+// for a TTL divide by type. When the round marker implements it, the tracer
+// calls MarkRoundSentByType in place of MarkRoundSent. The split cannot be
+// derived from the total: when the ICMP socket stops accepting writes while
+// the UDP socket still does, a round's probes are all primary ones.
+type RoundTypeMarker interface {
+	MarkRoundSentByType(ttl int, icmpTTL int, primary int)
 }
 
 // Result is emitted for each probe response.
@@ -288,6 +310,9 @@ type Tracer struct {
 	// dispatched from round 2 onward. Nothing here is shared across sessions.
 	echo       echoState
 	onEchoSent func(ip net.IP, ttl int)
+
+	// sends is the send loop's record of probes that did not leave (send.go).
+	sends sendState
 }
 
 // defaultListenICMP wraps icmp.ListenPacket so its return type satisfies
@@ -376,6 +401,12 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		icmpSnd = &icmpSender{conn: conn, ipVersion: t.cfg.IPVersion}
 	}
 
+	// Fresh sockets (first entry, or re-entry after auto-fallback): nothing is
+	// stalled yet.
+	t.sends.oneSocket = false
+	t.sends.stalled = [numSendSockets]bool{}
+	t.sends.counts = [numProbeTypes]sendCounts{}
+
 	// newSender is nil in production; tests inject a fake to avoid raw sockets.
 	var snd probeSender
 	if t.newSender != nil {
@@ -390,6 +421,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		}
 		if icmpSnd == nil {
 			icmpSnd = snd
+			t.sends.oneSocket = true
 		}
 	} else {
 		// Determine send socket based on protocol.
@@ -440,9 +472,10 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 				continue
 			}
 
-			// TTL-limited probes actually written for this TTL this round.
-			// Reported to the round marker so loss is computed per probe.
-			probesSent := 0
+			// TTL-limited probes actually written for this TTL this round, by
+			// type. Reported to the round marker so loss is computed per probe
+			// and a probe that did not leave is neither sent nor lost.
+			icmpSent, primarySent := 0, 0
 
 			// Tier 1: one ICMP TTL probe per hop per round.
 			if icmpSnd != nil {
@@ -450,15 +483,10 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 				if pkt, key, err := icmpProto.BuildProbe(0, ttl, seq, t.cfg); err == nil {
 					// The only Echo Reply that answers this probe comes from the target.
 					t.pm.addTo(key, ttl, 0, time.Now(), ProbeICMPTTL, t.target)
-					sent := false
-					if icmpSnd.SetTTL(ttl) == nil {
-						if _, err := icmpSnd.WriteTo(pkt, dst); err == nil {
-							probesSent++
-							sent = true
-						}
-					}
-					// A probe that never left has no reply to wait for.
-					if !sent {
+					if t.send(icmpSnd, sockICMP, ProbeICMPTTL, ttl, pkt, dst) {
+						icmpSent++
+					} else {
+						// A probe that never left has no reply to wait for.
 						t.pm.remove(key)
 					}
 				}
@@ -494,16 +522,11 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 
 					// A probe that never left has no reply to wait for: a
 					// failed send removes its record.
-					if err := snd.SetTTL(ttl); err != nil {
+					if !t.send(snd, sockPrimary, primaryType, ttl, pkt, dst) {
 						t.pm.remove(key)
 						continue
 					}
-
-					if _, err := snd.WriteTo(pkt, dst); err != nil {
-						t.pm.remove(key)
-						continue
-					}
-					probesSent++
+					primarySent++
 
 					time.Sleep(t.cfg.ProbeDelay)
 				}
@@ -512,7 +535,11 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			// One round-sent notification per TTL per round, carrying the
 			// number of probes that went out.
 			if t.OnRound != nil {
-				t.OnRound.MarkRoundSent(ttl, probesSent)
+				if m, ok := t.OnRound.(RoundTypeMarker); ok {
+					m.MarkRoundSentByType(ttl, icmpSent, primarySent)
+				} else {
+					t.OnRound.MarkRoundSent(ttl, icmpSent+primarySent)
+				}
 			}
 		}
 
@@ -522,6 +549,10 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		if round >= 1 && icmpSnd != nil {
 			t.sendEchoes(icmpSnd, &seq)
 		}
+
+		// The round's sends are done: log what did not leave, and let the
+		// next round try a stalled socket again.
+		t.endSendRound(round + 1)
 
 		// Sweep stale probe entries that never received a response
 		t.pm.sweep(2 * t.cfg.Timeout)
@@ -600,9 +631,18 @@ func (t *Tracer) awaitFinalReplies(ctx context.Context) {
 	}
 }
 
+// icmpSendConn is what icmpSender needs of *icmp.PacketConn. An interface so a
+// test can stand in for the socket.
+type icmpSendConn interface {
+	IPv4PacketConn() *ipv4.PacketConn
+	IPv6PacketConn() *ipv6.PacketConn
+	WriteTo(b []byte, dst net.Addr) (int, error)
+	SetWriteDeadline(t time.Time) error
+}
+
 // icmpSender wraps an ICMP PacketConn for the sender interface.
 type icmpSender struct {
-	conn      *icmp.PacketConn
+	conn      icmpSendConn
 	ipVersion int
 }
 
@@ -613,6 +653,9 @@ func (s *icmpSender) SetTTL(ttl int) error {
 	return s.conn.IPv4PacketConn().SetTTL(ttl)
 }
 func (s *icmpSender) WriteTo(b []byte, dst net.Addr) (int, error) { return s.conn.WriteTo(b, dst) }
+
+// SetWriteDeadline bounds the next write on the ICMP socket (see send.go).
+func (s *icmpSender) SetWriteDeadline(t time.Time) error { return s.conn.SetWriteDeadline(t) }
 
 // rawSender wraps a raw IP PacketConn for the sender interface.
 type rawSender struct {
@@ -627,6 +670,9 @@ func (s *rawSender) SetTTL(ttl int) error {
 	return ipv4.NewPacketConn(s.conn).SetTTL(ttl)
 }
 func (s *rawSender) WriteTo(b []byte, dst net.Addr) (int, error) { return s.conn.WriteTo(b, dst) }
+
+// SetWriteDeadline bounds the next write on the raw UDP or TCP socket.
+func (s *rawSender) SetWriteDeadline(t time.Time) error { return s.conn.SetWriteDeadline(t) }
 
 // checkAutoFallback switches from UDP to ICMP if no responses have been received.
 func (t *Tracer) checkAutoFallback() {
