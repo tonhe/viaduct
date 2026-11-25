@@ -93,6 +93,23 @@ Mark a breaking change with `!` after the prefix (`feat!: ...`) or a `BREAKING C
 
 No AI attribution in commits or pull requests: no co-author trailers, no "generated with" footers.
 
+## Filing issues
+
+Every step applies to every issue an agent files. An issue missing one of them is not filed correctly; fix it before moving on.
+
+1. **Check for duplicates first**, open and closed: `gh issue list -R tonhe/viaduct --state all --search "<words>"`. If one exists, comment there instead of filing.
+2. **Labels.** One `type:` label, the area labels that apply (`ipv6`, `multi-target`, `ecmp`, `testing`, `ci`, `documentation`, `tech-debt`), one `risk:` label, and exactly one of `agent:ready`, `needs:human` or `agent:paired`. `agent:ready` only with `risk:low`.
+3. **Blockers, both ways.** If the issue cannot be worked until #N is done, write `Blocked by #N` on its own line in the body **and** add the native dependency, then read it back:
+   ```
+   gh api -X POST repos/tonhe/viaduct/issues/<new>/dependencies/blocked_by -F issue_id=<id of #N>
+   gh api repos/tonhe/viaduct/issues/<new>/dependencies/blocked_by --jq '[.[].number]'
+   ```
+   `<id of #N>` is the issue's `id` field (`gh api repos/tonhe/viaduct/issues/N --jq .id`), not its number. The read-back must list N.
+   If the new issue blocks an existing one (#M must not merge or close without it), do the same in the other direction: the native dependency on #M, and a `Blocked by #<new>` line added to #M's body.
+4. **Milestone.** If the new issue blocks something that is in a milestone, put it in the same milestone. Otherwise leave the milestone empty; triage never assigns one.
+5. **Review findings.** An issue that comes from reviewing a pull request carries a `Refs #<PR>` line.
+6. **Owner decisions.** If the fix touches IPv6-protected code or reverses an earlier owner decision, the acceptance criteria say an Owner decision is needed, and the issue stays open until the owner has posted it. Do not close such an issue with your own fix report, and never write a comment that begins "Owner decision".
+
 ## Other rules
 
 - Never print or log passwords, tokens or other secrets.
