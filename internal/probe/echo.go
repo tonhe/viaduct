@@ -82,11 +82,13 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		tgt := targets[cursor]
 		cursor = (cursor + 1) % len(targets)
 		*seq++
-		pkt, err := buildICMPEchoRequest(t.cfg.IPVersion, t.cfg.EchoID, *seq, t.cfg.PayloadSize)
+		// Keyed on the 16-bit sequence the echo carries (see icmpWireSeq).
+		wire := icmpWireSeq(*seq)
+		pkt, err := buildICMPEchoRequest(t.cfg.IPVersion, t.cfg.EchoID, wire, t.cfg.PayloadSize)
 		if err != nil {
 			continue
 		}
-		key := probeKey{SrcPort: t.cfg.EchoID, DstPort: *seq, Seq: 0}
+		key := probeKey{SrcPort: t.cfg.EchoID, DstPort: wire, Seq: 0}
 		// The reply must come from the address this echo is sent to.
 		t.pm.addTo(key, tgt.TTL, 0, time.Now(), ProbeICMPEcho, tgt.IP)
 		if snd.SetTTL(echoFullTTL) != nil {
