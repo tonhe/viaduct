@@ -12,7 +12,8 @@ import (
 
 // The --debug-log round records: one line per completed round, a per-hop
 // snapshot every 10 rounds and at exit, and a line when an alert is raised or
-// cleared.
+// cleared. A periodic snapshot is written when the round after it closes
+// (debuglog_final_test.go has the end-of-run cases).
 
 // debugSink collects debug-log lines as the file would hold them, without the
 // timestamp.
@@ -133,6 +134,9 @@ func TestDebugLog_SnapshotEveryTenRounds(t *testing.T) {
 			for i := 0; i < tc.rounds; i++ {
 				tc.round(s, i)
 			}
+			// The last snapshot is written when the next round closes. That
+			// round sends nothing, so the hop's figures stay as they were.
+			s.stalledRound()
 			snaps := sink.containing(" snapshot ")
 			if want := tc.rounds / 10 * stallTTLs; len(snaps) != want {
 				t.Fatalf("got %d snapshot lines, want %d (one per hop every 10 rounds):\n%s", len(snaps), want, strings.Join(snaps, "\n"))
@@ -158,6 +162,7 @@ func TestDebugLog_SnapshotSilentHop(t *testing.T) {
 		m.sessions[0].table.MarkRoundSentByType(1, 1, 2)
 		m, _ = m.onRoundEnd(RoundEndMsg{})
 	}
+	m, _ = m.onRoundEnd(RoundEndMsg{}) // round 11 closes: round 10's snapshot is written
 	snaps := sink.containing(" snapshot ")
 	want := "[192.0.2.1] snapshot round=10 ttl=1 nodes=- loss=100.0% kind=measured icmp-ttl=10/10 udp-ttl=20/20 echo=0/0 echo-counted=0/0 rate-limited=undetermined"
 	if len(snaps) != 1 || snaps[0] != want {

@@ -18,6 +18,11 @@ const snapshotEvery = 10
 // cleared. Everything it writes is read from the hop table after the round
 // has been closed, so the figures are the ones the views show.
 //
+// A periodic snapshot is taken when its round closes and written when the
+// next round closes. If the run ends first, the final snapshot is written in
+// its place, so a run that ends on a snapshot round has one set of hop lines
+// for that round, labeled final.
+//
 // A nil *RoundDebug records nothing: that is the state without --debug-log.
 type RoundDebug struct {
 	logf    func(format string, args ...any)
@@ -33,6 +38,9 @@ type RoundDebug struct {
 	rounds int
 	alert  string // the text of the alert that is raised, "" when none is
 	prev   map[int]roundCounts
+	// held is the periodic snapshot of the last round closed, not yet
+	// written: the next round's close writes it, Final drops it.
+	held []string
 }
 
 // roundCounts are a hop's cumulative counters when a round closed.
@@ -119,6 +127,11 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 	if d == nil {
 		return
 	}
+	// The run went on past the last snapshot round: its snapshot is not the
+	// final one, so it is written now.
+	d.write(d.held)
+	d.held = nil
+
 	d.rounds++
 	now := d.now()
 	took := now.Sub(d.last)
@@ -170,7 +183,7 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 	d.logAlert()
 
 	if d.rounds%snapshotEvery == 0 {
-		d.snapshot("snapshot", table)
+		d.held = d.snapshot("snapshot", table)
 	}
 }
 
@@ -190,17 +203,28 @@ func (d *RoundDebug) logAlert() {
 	d.alert = msg
 }
 
-// Final writes the snapshot taken when the run ends.
+// Final writes the snapshot taken when the run ends. It replaces a periodic
+// snapshot of the last round that has not been written yet: the final set has
+// that round's figures with any reply that arrived since.
 func (d *RoundDebug) Final(table *hop.Table) {
 	if d == nil {
 		return
 	}
-	d.snapshot("final", table)
+	d.held = nil
+	d.write(d.snapshot("final", table))
 }
 
-// snapshot writes one line per hop, up to the destination's. Counts are
+// write writes hop lines to the log.
+func (d *RoundDebug) write(lines []string) {
+	for _, l := range lines {
+		d.printf("%s", l)
+	}
+}
+
+// snapshot returns one line per hop, up to the destination's. Counts are
 // sent/lost over completed rounds.
-func (d *RoundDebug) snapshot(label string, table *hop.Table) {
+func (d *RoundDebug) snapshot(label string, table *hop.Table) []string {
+	var lines []string
 	target := table.TargetTTL()
 	for _, h := range table.Snapshot() {
 		if target > 0 && h.TTL > target {
@@ -222,10 +246,11 @@ func (d *RoundDebug) snapshot(label string, table *hop.Table) {
 		if d.primary != "" {
 			ttlProbes += fmt.Sprintf(" %s=%d/%d", d.primary, primarySent, lost(primarySent, primaryRecvd))
 		}
-		d.printf("%s round=%d ttl=%d nodes=%s loss=%s kind=%s %s echo=%d/%d echo-counted=%d/%d rate-limited=%s",
+		lines = append(lines, fmt.Sprintf("%s round=%d ttl=%d nodes=%s loss=%s kind=%s %s echo=%d/%d echo-counted=%d/%d rate-limited=%s",
 			label, d.rounds, h.TTL, strings.Join(nodes, ","), hop.FormatLoss(pct, kind), kind, ttlProbes,
-			echoSent, lost(echoSent, echoRecvd), countedSent, lost(countedSent, countedRecvd), h.RateLimitState())
+			echoSent, lost(echoSent, echoRecvd), countedSent, lost(countedSent, countedRecvd), h.RateLimitState()))
 	}
+	return lines
 }
 
 // lost is sent minus received, never negative: a duplicated reply can make
