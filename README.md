@@ -151,7 +151,7 @@ TUI, report mode and alerting all use the same figure, and the JSON carries it. 
 - A node has `sent` (probes sent to its hop) and `received` (its own replies), a `probes` breakdown by probe type with `sent` and `received` for each, and the `rate_limited` verdict.
 - The top-level `probes` is the total sent to the hops in the report, and equals the sum of the hops' `probes_sent`.
 
-CSV and DOT exports carry the raw loss figure only.
+CSV carries the same figures as columns (`loss_pct` raw, plus `headline_loss_pct`, `loss_kind`, `rate_limited` and the per-probe-type counts), and a DOT node label shows the hop's headline figure as the views render it (`~N%†`, `N%?` or a plain `N%`).
 
 Echoes go to the nodes of the path only, one per node per round, up to and including the destination.
 
@@ -418,7 +418,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 ```
 
 - **JSON** — the full report: version, timestamp, target, protocol, and every hop with its nodes, loss figures, probe counts and RTT stats (see [Rate-Limit Detection](#rate-limit-detection) for the loss fields).
-- **CSV** — a header row, then one row per node: `ttl`, `ip`, `hostname`, `asn`, `as_org`, `loss_pct`, `sent`, `received`, `avg_ms`, `best_ms`, `worst_ms`, `last_ms`, `stdev_ms`, `jitter_ms`, `flow_ids` (joined with `;`), `stability_pct`, `trend`. A hop that never answered is one row with `*` as its `ip`.
+- **CSV** — a header row, then one row per node: `ttl`, `ip`, `hostname`, `asn`, `as_org`, `loss_pct`, `sent`, `received`, `avg_ms`, `best_ms`, `worst_ms`, `last_ms`, `stdev_ms`, `jitter_ms`, `flow_ids` (joined with `;`), `stability_pct`, `trend`, `headline_loss_pct`, `loss_kind`, `rate_limited`, `icmp_ttl_sent`, `icmp_ttl_received`, `primary_sent`, `primary_received`, `echo_sent`, `echo_received`. `loss_pct` is the raw TTL-probe loss; `headline_loss_pct` and `loss_kind` are the hop's, repeated on each of its nodes. A hop that never answered is one row with `*` as its `ip`, the node columns empty, and the hop's `loss_pct`, `sent`, `received`, `headline_loss_pct` and `loss_kind`. With several targets, a target that could not be traced has no rows.
 - **DOT** — a Graphviz digraph of the path: one box per node labelled with IP, hostname, average RTT and loss, nodes grouped into a dashed cluster per AS, and silent hops drawn as dashed ellipses.
 
 With more than one target, the targets are traced one after another and written as a single export: JSON is one object with a `targets` array, CSV has a leading `target` column, and DOT is one graph in which a router seen by several targets is a single node.
