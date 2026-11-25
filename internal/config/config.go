@@ -75,7 +75,9 @@ func configPath() string {
 
 // Load reads the TOML config file and returns a merged Config. If the file
 // does not exist, Default() is returned with no error. Malformed TOML returns
-// an error. Missing fields in the file keep their default values.
+// an error. Missing fields in the file keep their default values. A key that
+// was removed in an earlier release (see removedKeys) is ignored and reported
+// on stderr once per run.
 func Load() (*Config, error) {
 	path := configPath()
 	data, err := os.ReadFile(path)
@@ -104,6 +106,10 @@ func Load() (*Config, error) {
 	if unmarshalErr != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, unmarshalErr)
 	}
+
+	// Keys removed in an earlier release are ignored, not rejected. Tell the
+	// user once; Save writes only current keys, so the next save drops them.
+	warnRemovedKeys(data)
 	return cfg, nil
 }
 
