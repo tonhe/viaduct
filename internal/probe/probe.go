@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -318,6 +319,16 @@ type Tracer struct {
 
 	// sends is the send loop's record of probes that did not leave (send.go).
 	sends sendState
+
+	// newEchoSender opens the echo tier's own socket (see echoSender). Tests
+	// may replace it. When nil, the production path opens a raw ICMP socket
+	// and a run through newSender has no echo socket: the echo tier then
+	// shares the TTL probes' sender.
+	newEchoSender func() (probeSender, func(), error)
+	// echoSock is the socket the echo tier's sends are accounted to: sockEcho
+	// when it has its own, sockICMP when it shares the TTL probes' socket.
+	// Only the send-loop goroutine touches it.
+	echoSock sendSocket
 }
 
 // defaultListenICMP wraps icmp.ListenPacket so its return type satisfies
@@ -460,6 +471,10 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		}
 	}
 
+	// The echo tier sends on a socket of its own (see echoSender).
+	echoSnd, closeEcho := t.echoSender(icmpSnd, t.newSender == nil && conn != nil)
+	defer closeEcho()
+
 	dst := &net.IPAddr{IP: t.target}
 	seq := 0
 	round := 0
@@ -557,7 +572,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		// reachability. Skipped on round 0; starts round 2 (index >= 1) so
 		// the first round establishes hop reachability before echoes begin.
 		if round >= 1 && icmpSnd != nil {
-			t.sendEchoes(icmpSnd, &seq)
+			t.sendEchoes(echoSnd, &seq)
 		}
 
 		// The round's sends are done: log what did not leave, and let the
@@ -666,6 +681,145 @@ func (s *icmpSender) WriteTo(b []byte, dst net.Addr) (int, error) { return s.con
 
 // SetWriteDeadline bounds the next write on the ICMP socket (see send.go).
 func (s *icmpSender) SetWriteDeadline(t time.Time) error { return s.conn.SetWriteDeadline(t) }
+
+// echoSender returns the sender the echo tier writes to, and a function that
+// closes it when the send loop ends.
+//
+// The echo tier writes to every node on the path; the TTL probes all go to
+// the target. On macOS, with both on one raw ICMPv6 socket, the socket layer
+// refused writes for seconds at a time (viaduct#115). So the echo tier gets a
+// second ICMP socket, in both families, and the socket that carries the TTL
+// probes and receives every reply only ever sends to the target. Nothing is
+// read from the echo socket: echo replies reach the listener's socket like
+// all inbound ICMP (see openEchoConn for what the echo socket is spared).
+//
+// shared is the TTL probes' sender. If the second socket cannot be opened the
+// echo tier shares it, as it did before, and the debug log says so.
+// production is true when the tracer runs on real sockets; a test that
+// supplies its sockets through newSender gets an echo socket only if it also
+// sets newEchoSender.
+func (t *Tracer) echoSender(shared probeSender, production bool) (probeSender, func()) {
+	t.echoSock = sockICMP
+	open := t.newEchoSender
+	if open == nil && production {
+		open = t.openEchoSocket
+	}
+	if open == nil || shared == nil {
+		return shared, func() {}
+	}
+	snd, cleanup, err := open()
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		t.debugf("echo socket: %v; the echo tier shares the probe socket", err)
+		return shared, func() {}
+	}
+	if cleanup == nil {
+		cleanup = func() {}
+	}
+	t.echoSock = sockEcho
+	return snd, cleanup
+}
+
+// openEchoSocket is the production newEchoSender.
+func (t *Tracer) openEchoSocket() (probeSender, func(), error) {
+	conn, err := openEchoConn(t.cfg.IPVersion, t.debugf)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &icmpSender{conn: conn, ipVersion: t.cfg.IPVersion}, func() { conn.Close() }, nil
+}
+
+// openEchoConn opens the echo tier's socket: a raw ICMP socket that is written
+// to and never read.
+//
+// A raw ICMP socket is handed a copy of every inbound ICMP packet of its
+// family, whichever socket the request left on. The listener's socket gets its
+// copy regardless, so this one is told to take as little as the platform
+// allows (see quiet).
+func openEchoConn(ipVersion int, debugf func(format string, args ...any)) (*echoConn, error) {
+	// The same socket icmp.ListenPacket opens for the listener, held as the
+	// net.PacketConn it is so the receive buffer can be set.
+	pc, err := net.ListenPacket(ListenerNet(ipVersion), RawListenAddr(ipVersion))
+	if err != nil {
+		return nil, err
+	}
+	conn := &echoConn{PacketConn: pc}
+	if ipVersion == 6 {
+		conn.p6 = ipv6.NewPacketConn(pc)
+	} else {
+		conn.p4 = ipv4.NewPacketConn(pc)
+	}
+	conn.quiet(conn.blockAllICMP, debugf)
+	return conn, nil
+}
+
+// echoConn is the echo tier's raw ICMP socket in the shape icmpSender takes.
+type echoConn struct {
+	net.PacketConn
+	p4 *ipv4.PacketConn
+	p6 *ipv6.PacketConn
+
+	// How the socket is kept from collecting inbound ICMP (see quiet). At
+	// most one is set.
+	filtered     bool // an ICMP filter that blocks every type is in place
+	smallRecvBuf bool // no filter: the receive buffer is the kernel's minimum
+}
+
+// blockAllICMP sets an ICMP filter that blocks every type. It fails where the
+// platform has no such filter for the socket's family.
+func (c *echoConn) blockAllICMP() error {
+	if c.p6 != nil {
+		var f ipv6.ICMPFilter
+		f.SetAll(true)
+		return c.p6.SetICMPFilter(&f)
+	}
+	var f ipv4.ICMPFilter
+	f.SetAll(true)
+	return c.p4.SetICMPFilter(&f)
+}
+
+// quiet keeps the unread socket from collecting inbound ICMP, by the best
+// means the platform has for the socket's family:
+//
+//   - A filter that blocks every ICMP type, where setFilter can set one:
+//     ICMPv6 on Linux, macOS and the BSDs, ICMPv4 on Linux only. Nothing is
+//     delivered to the socket.
+//   - Otherwise (ICMPv4 on macOS and the BSDs, both families on Windows,
+//     where setFilter reports that no filter is implemented) the receive
+//     buffer is shrunk to the smallest the kernel allows. It fills after a
+//     packet or two and from then on the kernel drops this socket's copy on
+//     arrival.
+//
+// A full receive buffer on a socket nobody reads costs nothing else: the drop
+// is per socket, it does not touch the listener's copy and it does not affect
+// sending. A reader would only spend a goroutine and a wake-up per inbound
+// ICMP packet to throw the same bytes away.
+//
+// These are economies, not conditions. If neither can be done the debug log
+// says so and the socket is used as it is: it then holds one default receive
+// buffer of packets and drops the rest.
+func (c *echoConn) quiet(setFilter func() error, debugf func(format string, args ...any)) {
+	filterErr := setFilter()
+	if filterErr == nil {
+		c.filtered = true
+		return
+	}
+	bufErr := errors.New("the socket has no receive-buffer control")
+	if rb, ok := c.PacketConn.(interface{ SetReadBuffer(bytes int) error }); ok {
+		// Asked for one byte; the kernel rounds up to its minimum.
+		bufErr = rb.SetReadBuffer(1)
+	}
+	if bufErr == nil {
+		c.smallRecvBuf = true
+		return
+	}
+	debugf("echo socket: no ICMP filter (%v) and the receive buffer was not shrunk (%v); the socket is used as it is", filterErr, bufErr)
+}
+
+func (c *echoConn) IPv4PacketConn() *ipv4.PacketConn { return c.p4 }
+func (c *echoConn) IPv6PacketConn() *ipv6.PacketConn { return c.p6 }
 
 // rawSender wraps a raw IP PacketConn for the sender interface.
 type rawSender struct {

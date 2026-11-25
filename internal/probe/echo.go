@@ -77,9 +77,10 @@ func unzonedLinkLocal(ip net.IP) bool {
 //
 // Nothing is sent while the trace is paused. A send that fails or times out
 // is not an echo sent: its record is removed and the echo-sent callback is
-// not called. Once a write on the socket has timed out this round (here or
-// in the TTL tier, which shares the socket), the remaining echoes of the
-// round are not attempted.
+// not called. Once a write on the echo tier's socket has timed out this
+// round, the remaining echoes of the round are not attempted. That socket is
+// the echo tier's own (t.echoSock is sockEcho) unless it could not be opened,
+// in which case it is the TTL tier's and a timeout there counts too.
 func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 	if atomic.LoadInt32(&t.Paused) == 1 {
 		return
@@ -104,7 +105,7 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		}
 		// The socket stopped accepting writes this round: leave the rest of
 		// the budget for the next round, cursor in place.
-		if t.sends.isStalled(sockICMP) {
+		if t.sends.isStalled(t.echoSock) {
 			t.sends.counts[ProbeICMPEcho].skipped += budget - i
 			break
 		}
@@ -125,7 +126,7 @@ func (t *Tracer) sendEchoes(snd probeSender, seq *int) {
 		key := probeKey{SrcPort: t.cfg.EchoID, DstPort: wire, Seq: 0}
 		// The reply must come from the address this echo is sent to.
 		t.pm.addTo(key, tgt.TTL, 0, time.Now(), ProbeICMPEcho, tgt.IP)
-		if !t.send(snd, sockICMP, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: tgt.IP}) {
+		if !t.send(snd, t.echoSock, ProbeICMPEcho, echoFullTTL, pkt, &net.IPAddr{IP: tgt.IP}) {
 			t.pm.remove(key)
 			continue
 		}
