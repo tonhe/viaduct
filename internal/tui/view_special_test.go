@@ -72,11 +72,9 @@ func hopsIPv6Full() testOpt {
 
 // --- Rate-limited fixture ---
 
-// withRateLimitedHop drives the new per-node tri-state rate-limit detection
-// (hop.RateLimitYes) for the given TTL. The algorithm requires:
-//   - pn.icmpTTL.RoundLossPercent() > 0
-//   - pn.icmpEcho.Sent >= rateLimitMinEchoSamples (5)
-//   - pn.icmpEcho.ProbeLossPercent() < pn.icmpTTL.RoundLossPercent() - 5.0
+// withRateLimitedHop makes the hop at the given TTL rate-limited
+// (hop.Hop.RateLimitState() == hop.RateLimitYes): TTL-probe loss significantly
+// above echo loss, with at least 20 echo samples.
 //
 // hopsFull() already seeded TTL 3 with one response sample (IP 203.0.113.10).
 // We layer on top: mark that sample as "round received" then add 8 more silent

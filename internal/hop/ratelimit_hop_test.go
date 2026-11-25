@@ -247,3 +247,42 @@ func TestHopRateLimit_VerdictReachesTheSparkline(t *testing.T) {
 		t.Errorf("last sparkline cell = %v, want SparkHeld for a rate-limited hop with no echo this round", last.Kind)
 	}
 }
+
+// The destination's sparkline follows the hop verdict like any other hop's
+// (viaduct#79): a rate-limited destination that is not echoed in a round is
+// reachable but unread, not dropped.
+func TestHopRateLimit_VerdictReachesTheDestinationSparkline(t *testing.T) {
+	const dst = "198.51.100.1"
+	h := NewHop(9)
+	for round := 0; round < 45; round++ {
+		runRound(h, 7, []hopReply{{dst, KindPrimary}}, true)
+		h.MarkTarget(net.ParseIP(dst))
+	}
+	if got := h.RateLimitState(); got != RateLimitYes {
+		t.Fatalf("fixture: destination RateLimitState = %v, want Yes", got)
+	}
+	// A round with no TTL reply and no echo sent.
+	h.MarkRoundSentProbes(7)
+	h.MarkRoundEnd()
+	samples := h.PrimaryNode().SparklineData()
+	if last := samples[len(samples)-1]; last.Kind != SparkHeld {
+		t.Errorf("last sparkline cell = %v, want SparkHeld for a rate-limited destination with no echo this round", last.Kind)
+	}
+}
+
+// A node whose hop has not yet closed a round has no verdict, so it is not
+// rate-limited: a silent round is a drop, whatever the node's own counters say.
+func TestPathNode_NoHopVerdictIsNotRateLimited(t *testing.T) {
+	pn := NewPathNode(net.ParseIP("192.0.2.7"))
+	for i := 0; i < 40; i++ {
+		pn.MarkProbeRoundEnd() // an ICMP TTL probe sent, never answered
+		pn.MarkEchoSent()
+		pn.AddSample(time.Millisecond, 0, KindEcho)
+	}
+	pn.MarkProbeRoundEnd() // clear the echo-sent mark: no echo this round
+	pn.RecordRoundAvg()
+	samples := pn.SparklineData()
+	if last := samples[len(samples)-1]; last.Kind != SparkDrop {
+		t.Errorf("last sparkline cell = %v, want SparkDrop: only the hop's verdict makes a cell held", last.Kind)
+	}
+}

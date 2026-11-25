@@ -68,9 +68,6 @@ func asnStyle() lipgloss.Style {
 func asnBoundaryStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Current.Base0A).Bold(true)
 }
-func pingBadgeStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(theme.Current.Base0C)
-}
 func amberStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Current.Base09)
 }
@@ -1224,8 +1221,8 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 
 	parts = append(parts, lossCell(h))
 
-	// RTT stats — hop-level for everyone; echo tier already contributes to
-	// PathNode stats so no separate ping branch is needed.
+	// RTT stats are hop-level, taken from the TTL-limited probes. Echo
+	// replies are kept in the node's EchoStats and do not feed them.
 	if layout.showRnd {
 		parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
 	}

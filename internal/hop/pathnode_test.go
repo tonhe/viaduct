@@ -243,10 +243,11 @@ func TestPathNodeRecordRoundAvgRecordsLossWhenNoProbes(t *testing.T) {
 	}
 }
 
-// driveRateLimited runs n rounds where the TTL tier is silent but echo replies,
-// leaving the node in RateLimitYes with the given echo RTT. Mirrors the
-// production round order (RecordRoundAvg → MarkProbeRoundEnd).
+// driveRateLimited runs n rounds where the TTL tier is silent but echo replies
+// with the given RTT, on a node whose hop is judged rate-limited. Mirrors the
+// production round order (setHopVerdict → RecordRoundAvg → MarkProbeRoundEnd).
 func driveRateLimited(pn *PathNode, n int, echoRTT time.Duration) {
+	pn.setHopVerdict(RateLimitYes)
 	for i := 0; i < n; i++ {
 		pn.MarkEchoSent()
 		pn.AddSample(echoRTT, 0, KindEcho) // echo confirms reachability
@@ -262,9 +263,6 @@ func TestRecordRoundAvg_EchoFillsGap(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("10.0.0.1"))
 	driveRateLimited(pn, rateLimitMinEchoSamples+1, 7*time.Millisecond)
 
-	if got := pn.RateLimitState(); got != RateLimitYes {
-		t.Fatalf("precondition: RateLimitState = %v, want RateLimitYes", got)
-	}
 	data := pn.SparklineData()
 	for i, s := range data {
 		if s.Kind != SparkEcho {

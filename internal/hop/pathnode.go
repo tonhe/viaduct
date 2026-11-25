@@ -71,8 +71,7 @@ type PathNode struct {
 	echoSentThisRound bool // an echo probe was dispatched to this node this round
 	isTarget          bool // this node is the trace's destination
 
-	hopVerdict    RateLimitState // the owning hop's verdict as of the last closed round
-	hopVerdictSet bool
+	hopVerdict RateLimitState // the owning hop's verdict as of the last closed round; Undetermined until one closes
 
 	recentAvgs     [trendWindowSize]float64 // per-round avg RTTs in ms
 	recentAvgIdx   int
@@ -491,8 +490,9 @@ func (pn *PathNode) GetLastRTT() time.Duration {
 	return pn.lastRTT
 }
 
-// RateLimitState classifies whether this node's TTL loss is an artifact of
-// control-plane ICMP rate limiting, using echo probes as ground truth.
+// RateLimitState classifies whether a hop's TTL-probe loss is an artifact of
+// ICMP rate limiting, using echo probes as ground truth. See
+// Hop.RateLimitState.
 type RateLimitState int
 
 const (
@@ -509,45 +509,22 @@ const (
 	rateLimitZ = 2.58
 )
 
-func (pn *PathNode) RateLimitState() RateLimitState {
-	pn.mu.Lock()
-	defer pn.mu.Unlock()
-	return pn.rateLimitStateLocked()
-}
-
-// MarkTarget records that this node is the trace's destination. The
-// destination is never judged rate-limited: an echo to it is the same packet
-// on the same path as the ICMP TTL probe that reaches it, so any difference
-// between the two loss figures is sampling noise.
+// MarkTarget records that this node is the trace's destination. The mark
+// locates the destination's hop (Table.TargetTTL, EchoNodes); it has no part
+// in the rate-limit verdict, which judges the destination like any other hop.
 func (pn *PathNode) MarkTarget() {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
 	pn.isTarget = true
 }
 
-// rateLimitStateLocked is RateLimitState without acquiring pn.mu, for callers
-// that already hold it (e.g. RecordRoundAvg).
-//
-// A node is rate-limited when it answers direct echoes but not TTL-limited
-// probes: its ICMP TTL probe loss is significantly higher than its echo loss.
-// "Significantly" is a two-proportion z-test, so the verdict accounts for how
-// many probes of each kind there are; a fixed margin flags ordinary lossy
-// links whenever the two samples happen to differ.
-func (pn *PathNode) rateLimitStateLocked() RateLimitState {
-	if pn.icmpEcho.Sent < rateLimitMinEchoSamples {
-		return RateLimitUndetermined
-	}
-	if pn.isTarget {
-		return RateLimitNo
-	}
-	// ICMP TTL: one probe per round, so Sent (rounds) is probes sent.
-	return rateLimitVerdict(pn.icmpTTL.Sent, pn.icmpTTL.Sent-pn.icmpTTL.Received,
-		pn.icmpEcho.Sent, pn.icmpEcho.Sent-pn.icmpEcho.Received)
-}
-
 // rateLimitVerdict compares TTL-probe loss with echo loss: Yes when TTL
-// probes are lost significantly more often than echoes (two-proportion z-test
-// at rateLimitZ), Undetermined below rateLimitMinEchoSamples echoes.
+// probes are lost significantly more often than echoes, Undetermined below
+// rateLimitMinEchoSamples echoes. "Significantly" is a two-proportion z-test
+// at rateLimitZ, so the verdict accounts for how many probes of each kind
+// there are; a fixed margin flags ordinary lossy links whenever the two
+// samples happen to differ. The only caller is Hop.RateLimitState: the
+// verdict is the hop's, and a node has none of its own.
 func rateLimitVerdict(ttlSent, ttlLost, echoSent, echoLost int) RateLimitState {
 	if echoSent < rateLimitMinEchoSamples {
 		return RateLimitUndetermined
@@ -590,19 +567,14 @@ func (pn *PathNode) setHopVerdict(v RateLimitState) {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
 	pn.hopVerdict = v
-	pn.hopVerdictSet = true
 }
 
 // sparkRateLimitedLocked reports whether this node should be treated as
-// rate-limited when writing a sparkline cell.
+// rate-limited when writing a sparkline cell. It is the owning hop's verdict
+// for every node, the destination included. A node whose hop has not closed
+// a round yet has no verdict and is not rate-limited.
 func (pn *PathNode) sparkRateLimitedLocked() bool {
-	if pn.isTarget {
-		return false
-	}
-	if pn.hopVerdictSet {
-		return pn.hopVerdict == RateLimitYes
-	}
-	return pn.rateLimitStateLocked() == RateLimitYes
+	return pn.hopVerdict == RateLimitYes
 }
 
 // Reset clears all stats but preserves the IP address.
@@ -633,7 +605,6 @@ func (pn *PathNode) Reset() {
 	pn.echoSentThisRound = false
 	pn.isTarget = false
 	pn.hopVerdict = RateLimitUndetermined
-	pn.hopVerdictSet = false
 	pn.recentAvgs = [trendWindowSize]float64{}
 	pn.recentAvgIdx = 0
 	pn.recentAvgCount = 0

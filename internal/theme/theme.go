@@ -132,19 +132,6 @@ func (t Theme) SparkGradient() [8]lipgloss.Color {
 	return stops
 }
 
-// hexToColorful parses a hex color string (with or without leading #) into a
-// colorful.Color. Returns black on parse failure.
-func hexToColorful(hex string) colorful.Color {
-	if len(hex) > 0 && hex[0] != '#' {
-		hex = "#" + hex
-	}
-	c, err := colorful.Hex(hex)
-	if err != nil {
-		return colorful.Color{}
-	}
-	return c
-}
-
 // colorfulToHex converts a colorful.Color to a CSS hex string (#rrggbb).
 func colorfulToHex(c colorful.Color) string {
 	r := uint8(clamp01(c.R) * 255)

@@ -72,12 +72,6 @@ func newTestModel(opts ...testOpt) Model {
 	return m
 }
 
-// withNow injects a fixed clock for deterministic test output.
-// The Model's now() method will return t on every call.
-func withNow(t time.Time) testOpt {
-	return func(m *Model) { m.nowFunc = func() time.Time { return t } }
-}
-
 // --- Option funcs ---
 
 // withHops seeds the hop table with the given samples.
@@ -137,16 +131,6 @@ func withAlertEngine(lossPct float64, latency time.Duration, rounds int) testOpt
 // withConfig replaces the model's config reference.
 func withConfig(cfg *config.Config) testOpt {
 	return func(m *Model) { m.config = cfg }
-}
-
-// withEnricher is intentionally a no-op: leaving enricher nil exercises the
-// "no ASN" code path, which is the correct default for unit tests that don't
-// want live lookups. Callers that need the "ASN configured" branch should
-// construct and attach an enricher directly via the Model fields (same package).
-func withEnricher() testOpt {
-	return func(m *Model) {
-		// nil enricher is the safe default — code must be nil-safe on this path.
-	}
 }
 
 // --- Sample fixture ---

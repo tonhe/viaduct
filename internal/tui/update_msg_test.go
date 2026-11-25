@@ -149,27 +149,19 @@ func TestOnHopUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("IsTarget marks the node so it is never judged rate-limited", func(t *testing.T) {
+	t.Run("IsTarget marks the node as the destination", func(t *testing.T) {
 		m := newTestModel()
 		ip := net.ParseIP("192.0.2.5")
 		m2, _ := m.onHopUpdate(HopUpdateMsg{Result: probe.Result{
 			TTL: 5, IP: ip, RTT: time.Millisecond, IsTarget: true, ProbeType: probe.ProbeICMPTTL,
 		}})
 
-		// Give the node the profile of a rate-limited router: ICMP TTL probes
-		// mostly unanswered, every echo answered.
-		h := m2.sessions[0].table.GetOrCreate(5)
-		pn := h.PrimaryNode()
+		pn := m2.sessions[0].table.GetOrCreate(5).PrimaryNode()
 		if pn == nil {
 			t.Fatal("no node at TTL 5")
 		}
-		for i := 0; i < 40; i++ {
-			pn.MarkProbeRoundEnd()
-			pn.MarkEchoSent()
-			pn.AddSample(time.Millisecond, 0, hop.KindEcho)
-		}
-		if got := pn.RateLimitState(); got != hop.RateLimitNo {
-			t.Errorf("destination RateLimitState = %v, want No", got)
+		if !pn.IsTarget() {
+			t.Error("destination node is not marked as the target")
 		}
 	})
 
@@ -750,13 +742,6 @@ type fakeEchoSink struct {
 
 func (f *fakeEchoSink) SubmitEchoTargets(targets []probe.EchoTarget) {
 	f.submitted = append(f.submitted, targets...)
-}
-
-// withEchoSink injects a fake echoSink into session 0.
-func withEchoSink(sink echoSinkIface) testOpt {
-	return func(m *Model) {
-		m.sessions[0].echoSink = sink
-	}
 }
 
 // Hops beyond the destination are not echo targets: the destination is
