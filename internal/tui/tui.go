@@ -432,14 +432,8 @@ func (m Model) View() string {
 	// Determine how many hop lines we can show.
 	// Fixed lines consumed: 3 header lines (title + separator + col header) + 1 status bar.
 	// In multi-target mode subtract the summary panel (header + one row per session).
-	fixedLines := 4
-	if multiTarget {
-		fixedLines += m.summaryLineCount()
-	}
-	availableRows := 0
-	if m.height > fixedLines {
-		availableRows = m.height - fixedLines
-	}
+	fixedLines := m.fixedLineCount()
+	availableRows := m.hopRowsAvailable()
 
 	// hopLines holds all rendered hop rows before viewport clipping.
 	// displayLines is the subset actually written to the builder.
@@ -1780,12 +1774,31 @@ func (m Model) FinalSummary() string {
 }
 
 // maxScrollOffset returns the maximum valid scroll offset for the current state.
+// fixedLineCount is the number of lines the default view spends on everything
+// but hop rows: title, separator, column header and status bar, plus the
+// summary panel when several targets are traced.
+func (m Model) fixedLineCount() int {
+	n := 4
+	if len(m.sessions) > 1 && !m.columnView {
+		n += m.summaryLineCount()
+	}
+	return n
+}
+
+// hopRowsAvailable is the number of hop rows the default view can show. View
+// and the scroll limit both use it: when they disagreed (the scroll limit
+// ignored the summary panel) the first hops of a long path could not be
+// scrolled to.
+func (m Model) hopRowsAvailable() int {
+	if fixed := m.fixedLineCount(); m.height > fixed {
+		return m.height - fixed
+	}
+	return 0
+}
+
 func (m Model) maxScrollOffset() int {
 	totalLines := m.countHopLines()
-	availableRows := 0
-	if m.height > 4 {
-		availableRows = m.height - 4
-	}
+	availableRows := m.hopRowsAvailable()
 	maxOff := totalLines - availableRows
 	if maxOff < 0 {
 		maxOff = 0
