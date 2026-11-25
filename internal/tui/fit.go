@@ -15,23 +15,26 @@ import (
 // barSegment is one part of a header or status line. drop is its place in the
 // queue to be left out when the line does not fit: 0 is never dropped, and
 // among the rest the highest number goes first.
+//
+// Segments are a barSeparator apart. Two neighbours in the same group (other
+// than group 0) are joined by the second one's glue instead: key hints sit a
+// space apart, and stay that way whichever of them are left.
 type barSegment struct {
-	text string
-	drop int
+	text  string
+	drop  int
+	group int
+	glue  string
 }
 
-// barSeparator sits between the segments of a shortened bar.
+// barSeparator sits between the segments of a bar.
 const barSeparator = "    "
 
-// fitBar returns full when it fits in width. Otherwise it joins segs, leaving
-// out droppable segments, highest drop number first, until the line fits. If
-// the segments that are never dropped are still too wide, the line is cut
-// with an ellipsis. Empty segments are skipped. A width of zero or less means
-// the terminal size is not known yet, and full is returned.
-func fitBar(width int, full string, segs []barSegment) string {
-	if width <= 0 || lipgloss.Width(full) <= width {
-		return full
-	}
+// fitBar joins segs, and while the line is wider than width leaves out
+// droppable segments, highest drop number first. If the segments that are
+// never dropped are still too wide, the line is cut with an ellipsis. Empty
+// segments are skipped. A width of zero or less means the terminal size is
+// not known yet, and nothing is left out.
+func fitBar(width int, segs []barSegment) string {
 	kept := make([]barSegment, 0, len(segs))
 	for _, s := range segs {
 		if s.text != "" {
@@ -39,11 +42,21 @@ func fitBar(width int, full string, segs []barSegment) string {
 		}
 	}
 	join := func() string {
-		parts := make([]string, len(kept))
+		var b strings.Builder
 		for i, s := range kept {
-			parts[i] = s.text
+			switch {
+			case i == 0:
+			case s.group != 0 && s.group == kept[i-1].group:
+				b.WriteString(s.glue)
+			default:
+				b.WriteString(barSeparator)
+			}
+			b.WriteString(s.text)
 		}
-		return strings.Join(parts, barSeparator)
+		return b.String()
+	}
+	if width <= 0 {
+		return join()
 	}
 	for lipgloss.Width(join()) > width {
 		worst := -1
@@ -140,9 +153,9 @@ func (m Model) headerLine(s *TargetSession, viewName string) string {
 
 	// The line in order. The target has drop 0 and an empty text: it is
 	// rendered last, into whatever room the others leave.
-	segs := []barSegment{{version, 3}, {"", 0}, {proto, 1}, {probes, 4}}
+	segs := []barSegment{{text: version, drop: 3}, {}, {text: proto, drop: 1}, {text: probes, drop: 4}}
 	if view != "" {
-		segs = append(segs, barSegment{view, 2})
+		segs = append(segs, barSegment{text: view, drop: 2})
 	}
 	for {
 		used := 0
@@ -178,41 +191,131 @@ func (m Model) headerLine(s *TargetSession, viewName string) string {
 	}
 }
 
-// statusParts are the pieces of a status bar. Empty ones are skipped.
-type statusParts struct {
-	trace   string // "Tracing... N hops" or "PAUSED": always shown
-	elapsed string // "Elapsed: 12s"
-	dns     string // "DNS: on"
-	flows   string // "6 flows"
-	notice  string // setup notice, protocol switch or export result
-	keys    string // key hints other than q:quit
-	scroll  string // "[scrolled] G:bottom g:top"
-	multi   string // multi-target key hints
-	footer  string // view-specific note
+// The order in which a status bar that does not fit gives up its segments
+// (viaduct#104). This block is the whole order: the last name goes first, the
+// first name goes last, and dropNever stays. The trace status (the hop count,
+// or PAUSED) and q:quit are never dropped.
+//
+// The view note goes first, then DNS, flows and elapsed, which are shown
+// elsewhere or matter less. The key hints go after those, one at a time and
+// the least used first, because a new user needs them to operate the tool.
+// The scroll state and a notice outlast the hints: they say something the
+// keys do not.
+const (
+	dropNever = iota
+
+	dropNotice      // setup notice, protocol switch or export result
+	dropScrollState // "[scrolled] G:bottom g:top"
+
+	dropHintTarget  // ↑/↓:target, tab/↑↓:focus
+	dropHintView    // [d] <next view>
+	dropHintColumns // c:columns, c:summary
+	dropHintScroll  // j/k:scroll
+	dropHintMark    // space:mark
+	dropHintPause   // p:pause
+	dropHintExport  // e:export
+	dropHintReset   // r:reset
+
+	dropElapsed
+	dropFlows
+	dropDNS
+	dropFooter // view-specific note
+)
+
+// keyHint is one key hint on the status bar and its place in the drop order.
+type keyHint struct {
+	text string
+	drop int
 }
 
-// statusLine returns full when it fits. Otherwise it keeps the trace status
-// and q:quit and leaves out, in this order: the view note, the multi-target
-// hints, the key hints, the scroll hint, DNS, flows, elapsed, and last of all
-// the notice, which says something the keys do not.
-func (m Model) statusLine(full string, p statusParts) string {
-	line := fitBar(m.width, full, []barSegment{
-		{p.trace, 0},
-		{p.elapsed, 3},
-		{p.dns, 5},
-		{p.flows, 4},
-		{p.notice, 2},
-		{p.keys, 7},
-		{"q:quit", 0},
-		{p.scroll, 6},
-		{p.footer, 9},
-		{p.multi, 8},
-	})
-	// While the key hints are shown, q:quit sits with them, as in the full line.
-	if p.keys != "" {
-		line = strings.Replace(line, p.keys+barSeparator+"q:quit", p.keys+" q:quit", 1)
+// viewKeyHints are the hints every single-pane view shows before q:quit.
+func (m Model) viewKeyHints() []keyHint {
+	return []keyHint{
+		{"j/k:scroll", dropHintScroll},
+		{"p:pause", dropHintPause},
+		{"r:reset", dropHintReset},
+		{"[d] " + m.viewMode.Next().String(), dropHintView},
 	}
-	return line
+}
+
+// targetKeyHints are the extra hints shown with more than one target.
+func (m Model) targetKeyHints() []keyHint {
+	if len(m.sessions) <= 1 {
+		return nil
+	}
+	return []keyHint{
+		{"↑/↓:target", dropHintTarget},
+		{"space:mark", dropHintMark},
+		{"c:columns", dropHintColumns},
+	}
+}
+
+// columnKeyHints are the hints of column view.
+func columnKeyHints() []keyHint {
+	return []keyHint{
+		{"tab/↑↓:focus", dropHintTarget},
+		{"space:mark", dropHintMark},
+		{"c:summary", dropHintColumns},
+		{"e:export", dropHintExport},
+		{"p:pause", dropHintPause},
+		{"r:reset", dropHintReset},
+	}
+}
+
+// statusParts are the pieces of a status bar, in the order they are shown.
+// Empty ones are skipped.
+type statusParts struct {
+	trace   string    // "Tracing... N hops" or "PAUSED": always shown
+	elapsed string    // "Elapsed: 12s"
+	dns     string    // "DNS: on"
+	flows   string    // "6 flows"
+	notice  string    // setup notice, protocol switch or export result
+	keys    []keyHint // key hints, followed by q:quit
+	keyGlue string    // what joins the key hints and q:quit; one space if empty
+	scroll  string    // "[scrolled] G:bottom g:top"
+	footer  string    // view-specific note
+	targets []keyHint // multi-target key hints
+}
+
+// statusLine is the status bar. When it does not fit the terminal it leaves
+// segments out in the order of the drop constants above, and keeps the trace
+// status and q:quit.
+func (m Model) statusLine(p statusParts) string {
+	const keyGroup, targetGroup = 1, 2
+	glue := p.keyGlue
+	if glue == "" {
+		glue = " "
+	}
+	segs := []barSegment{
+		{text: p.trace},
+		{text: p.elapsed, drop: dropElapsed},
+		{text: p.dns, drop: dropDNS},
+		{text: p.flows, drop: dropFlows},
+		{text: p.notice, drop: dropNotice},
+	}
+	for _, k := range p.keys {
+		segs = append(segs, barSegment{text: k.text, drop: k.drop, group: keyGroup, glue: glue})
+	}
+	segs = append(segs,
+		barSegment{text: "q:quit", group: keyGroup, glue: glue},
+		barSegment{text: p.scroll, drop: dropScrollState, group: keyGroup, glue: " "},
+		barSegment{text: p.footer, drop: dropFooter},
+	)
+	for _, k := range p.targets {
+		segs = append(segs, barSegment{text: k.text, drop: k.drop, group: targetGroup, glue: " "})
+	}
+	return fitBar(m.width, segs)
+}
+
+// traceStatus is the first segment of the status bar: PAUSED, or the hop
+// count. The count is the destination's distance once it has answered and the
+// highest TTL seen until then; the table also holds entries beyond the
+// destination, which are not part of the path (viaduct#105).
+func (m Model) traceStatus(s *TargetSession) string {
+	if m.paused {
+		return "PAUSED"
+	}
+	return "Tracing... " + strconv.Itoa(summaryHops(s)) + " hops"
 }
 
 // separatorLine is the rule under the header: the terminal's width, or 60
