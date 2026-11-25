@@ -102,6 +102,13 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 	specs := make([]tui.TargetSpec, len(targets))
 	for i, tgt := range targets {
 		specs[i] = tui.TargetSpec{Name: tgt, ProtocolName: protocolName}
+		// A link-local target is not supported: the trace would be one hop on
+		// the local link. A zoned literal is caught before the lookup, which
+		// returns the address without its zone.
+		if isZonedLinkLocalLiteral(tgt) {
+			specs[i].Err = fmt.Errorf("%s is a link-local address; link-local targets are not supported", tgt)
+			continue
+		}
 		ips, err := lookup(tgt)
 		if err != nil {
 			specs[i].Err = fmt.Errorf("resolve %s: %w", tgt, err)
@@ -111,6 +118,13 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 		// socket is opened, instead of leaving it to whatever the socket layer
 		// does. A name that also has unicast addresses uses those.
 		ips, err = dropMulticast(tgt, ips)
+		if err != nil {
+			specs[i].Err = err
+			continue
+		}
+		// Link-local without a zone, or a name that resolves to it. A name that
+		// also has other addresses uses those.
+		ips, err = dropLinkLocal(tgt, ips)
 		if err != nil {
 			specs[i].Err = err
 			continue
@@ -213,6 +227,42 @@ func dropMulticast(target string, ips []net.IP) ([]net.IP, error) {
 		return nil, fmt.Errorf("%s resolves only to multicast addresses; via traces unicast targets only", target)
 	}
 	return unicast, nil
+}
+
+// isLinkLocalV6 reports whether ip is an IPv6 link-local unicast address
+// (fe80::/10).
+func isLinkLocalV6(ip net.IP) bool {
+	return ip.To4() == nil && ip.IsLinkLocalUnicast()
+}
+
+// isZonedLinkLocalLiteral reports whether s is an IPv6 link-local literal with
+// a zone, such as fe80::1%eth0.
+func isZonedLinkLocalLiteral(s string) bool {
+	addr, _, zoned := strings.Cut(s, "%")
+	if !zoned {
+		return false
+	}
+	ip := net.ParseIP(addr)
+	return ip != nil && isLinkLocalV6(ip)
+}
+
+// dropLinkLocal removes IPv6 link-local addresses (fe80::/10) from a target's
+// resolved addresses. If nothing else is left, it returns an error naming the
+// target.
+func dropLinkLocal(target string, ips []net.IP) ([]net.IP, error) {
+	routable := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if !isLinkLocalV6(ip) {
+			routable = append(routable, ip)
+		}
+	}
+	if len(routable) == 0 && len(ips) > 0 {
+		if net.ParseIP(target) != nil {
+			return nil, fmt.Errorf("%s is a link-local address; link-local targets are not supported", target)
+		}
+		return nil, fmt.Errorf("%s resolves only to link-local addresses; link-local targets are not supported", target)
+	}
+	return routable, nil
 }
 
 // isIPv4MappedLiteral reports whether s is an IPv6 literal of the form

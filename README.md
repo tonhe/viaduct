@@ -126,6 +126,7 @@ If `-6` is requested and the target has no AAAA record (or the host has no IPv6 
 - **Route pre-flight:** before probing an IPv6 target, `via` checks that the host has a route to it. If family was auto-selected and there is no IPv6 route, it falls back to IPv4 and shows `no IPv6 route to <address>; using IPv4` in the status bar (on stderr in report mode). With `-6` it exits with an error instead.
 - **IPv4-mapped addresses:** `::ffff:192.0.2.1` is traced as `192.0.2.1` over IPv4. Combining one with `-6` is an error.
 - **Multicast:** multicast targets (`224.0.0.0/4`, `ff00::/8`) are rejected at startup.
+- **Link-local:** IPv6 link-local targets (`fe80::/10`), with or without a zone (`fe80::1%eth0`), are not supported and are rejected at startup.
 - **Narrow terminals:** a 39-character address is shown in full where it fits. Where it does not, it is shortened in the middle (`2001:db8…55:6661`) so hops that share a prefix stay distinguishable.
 
 ---
