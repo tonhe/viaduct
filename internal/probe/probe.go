@@ -126,6 +126,21 @@ func (pm *probeMap) addTo(key probeKey, ttl int, flowID int, sentAt time.Time, p
 	pm.items[key] = probeRecord{ttl: ttl, flowID: flowID, sentAt: sentAt, probeType: pt, dst: dst}
 }
 
+// pending counts the probes that are still unanswered and were sent less than
+// maxAge ago: the ones a reply can still arrive for.
+func (pm *probeMap) pending(maxAge time.Duration) int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, rec := range pm.items {
+		if now.Sub(rec.sentAt) < maxAge {
+			n++
+		}
+	}
+	return n
+}
+
 func (pm *probeMap) remove(key probeKey) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -518,12 +533,46 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			return nil
 		case <-time.After(t.cfg.RoundDelay):
 		}
+		// No round follows the last one to pick up its late replies, so it
+		// stays open until its probes are answered or time out.
+		if lastRound {
+			t.awaitFinalReplies(ctx)
+		}
 		if t.OnRoundEnd != nil {
 			t.OnRoundEnd()
 		}
 		if lastRound {
 			return nil
 		}
+	}
+}
+
+// finalReplyGrace is how long the last round stays open after its last reply
+// is matched, so the result can travel from the listener to the hop table
+// before the round is closed.
+const finalReplyGrace = 20 * time.Millisecond
+
+// awaitFinalReplies blocks while probes are outstanding and can still be
+// answered: until every one is matched, or the newest is Timeout old, or ctx
+// ends. With an interval shorter than the path's round-trip time the final
+// round's replies are otherwise still in flight when the run stops, and are
+// counted as lost.
+func (t *Tracer) awaitFinalReplies(ctx context.Context) {
+	if t.pm.pending(t.cfg.Timeout) == 0 {
+		return
+	}
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for t.pm.pending(t.cfg.Timeout) > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(finalReplyGrace):
 	}
 }
 
