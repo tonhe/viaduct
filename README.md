@@ -245,6 +245,8 @@ Global keys (`p` pause, `r` reset, `d` display mode) apply to all targets simult
 
 Per-target IP family is auto-selected independently. If a target fails to resolve or probe, it is shown as errored in its summary row while all other targets continue tracing. If every target errors at startup, `via` exits 1 with each error on stderr.
 
+In report mode (`-r`, or `-o`) with several targets, a target that fails does not stop the others: the rest are traced and reported, each failure is written to stderr, and `via` exits non-zero. In JSON a failed target stays in `targets` with an `error` field and no hops.
+
 Exports in multi-target mode group all targets: JSON uses a `targets` array, CSV adds a leading `target` column, and DOT produces a single digraph with shared-IP node merging. Report mode (`-r`) prints each target's table in sequence.
 
 ---

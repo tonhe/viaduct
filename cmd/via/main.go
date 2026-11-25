@@ -651,13 +651,33 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 
 	// Multi-target path.
 	versionStr := "v" + version + " (" + buildVersion + ")"
-	var reports []export.Report
+	// A target that fails does not stop the others. Its error goes to stderr,
+	// it stays in structured output with the error and no hops, and the run
+	// as a whole fails so the exit status is non-zero.
+	reports := make([]export.Report, 0, len(specs))
+	failed := 0
+	fail := func(sp tui.TargetSpec, err error) {
+		failed++
+		fmt.Fprintf(os.Stderr, "error: %s: %v\n", sp.Name, err)
+		r := export.Report{
+			Version:   versionStr,
+			Timestamp: time.Now(),
+			Target:    sp.Name,
+			Protocol:  protocolName,
+			Hops:      []export.Hop{},
+			Error:     err.Error(),
+		}
+		if sp.IP != nil {
+			r.TargetIP = sp.IP.String()
+		}
+		reports = append(reports, r)
+	}
 	for _, sp := range specs {
 		if sp.Err != nil {
 			if outputFmt == "" {
 				fmt.Printf("── %s ──\nerror: %v\n\n", sp.Name, sp.Err)
 			}
-			// Structured exports skip errored targets.
+			fail(sp, sp.Err)
 			continue
 		}
 		if outputFmt == "" {
@@ -667,7 +687,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 			// Collect into report struct without printing.
 			table, resolver, enricher, maxTTL, runErr := collectReport(sp.IP, sp.Cfg, noASN)
 			if runErr != nil {
-				fmt.Fprintf(os.Stderr, "error tracing %s: %v\n", sp.Name, runErr)
+				fail(sp, runErr)
 				continue
 			}
 			r := export.BuildReport(versionStr, sp.Name, sp.IP, protocolName, table, resolver, enricher, maxTTL)
@@ -675,7 +695,8 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 		} else {
 			// Text mode: run and print inline.
 			if err := runReport(sp.Name, sp.IP, sp.Cfg, protocolName, noASN, ""); err != nil {
-				fmt.Fprintf(os.Stderr, "error tracing %s: %v\n", sp.Name, err)
+				fmt.Printf("error: %v\n", err)
+				fail(sp, err)
 			}
 			fmt.Println()
 		}
@@ -687,14 +708,21 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 			Timestamp: time.Now().UTC(),
 			Targets:   reports,
 		}
+		var werr error
 		switch outputFmt {
 		case "json":
-			return export.WriteJSONMulti(os.Stdout, mr)
+			werr = export.WriteJSONMulti(os.Stdout, mr)
 		case "csv":
-			return export.WriteCSVMulti(os.Stdout, mr)
+			werr = export.WriteCSVMulti(os.Stdout, mr)
 		case "dot":
-			return export.WriteDOTMulti(os.Stdout, mr)
+			werr = export.WriteDOTMulti(os.Stdout, mr)
 		}
+		if werr != nil {
+			return werr
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d targets failed", failed, len(specs))
 	}
 	return nil
 }

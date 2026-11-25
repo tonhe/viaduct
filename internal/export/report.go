@@ -21,8 +21,12 @@ type Report struct {
 	// Probes is the number of TTL-limited probes sent to the hops in the
 	// report, over completed rounds: the sum of what was sent to each TTL,
 	// including hops that never answered.
-	Probes int `json:"probes"`
-	Hops      []Hop     `json:"hops"`
+	Probes int   `json:"probes"`
+	Hops   []Hop `json:"hops"`
+	// Error is set in a multi-target report for a target that could not be
+	// traced (it did not resolve, or its trace failed). Such a target has no
+	// hops. A single-target run that fails prints the error and has no report.
+	Error string `json:"error,omitempty"`
 }
 
 // Hop represents a single TTL in the trace.

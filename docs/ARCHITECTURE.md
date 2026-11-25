@@ -120,7 +120,7 @@ Messages that belong to one target carry a `TargetIdx`. Hostname and ASN results
 
 The view redraws on a 100 ms tick. `p` pauses every tracer through an atomic flag. `r` resets every table.
 
-If every target fails at setup, `via` prints each error and exits 1 before the TUI starts. A target that fails while others succeed stays in the session list as an error row.
+If every target fails at setup, `via` prints each error and exits 1 before the TUI starts. A target that fails while others succeed stays in the session list as an error row. In multi-target report mode the other targets are still traced, each failure goes to stderr, a failed target stays in the JSON with an `error` field, and the exit status is non-zero.
 
 ## Report mode and exports
 
