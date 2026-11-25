@@ -433,6 +433,15 @@ func (pn *PathNode) MarkProbeRoundEnd() {
 	pn.echoSentThisRound = false
 }
 
+// markProbesSent records the TTL-limited probes of each type sent to this
+// node's hop in the round being closed.
+func (pn *PathNode) markProbesSent(icmpTTL, primary int) {
+	pn.mu.Lock()
+	defer pn.mu.Unlock()
+	pn.icmpTTL.ProbesSent += icmpTTL
+	pn.primary.ProbesSent += primary
+}
+
 // ICMPTTLStats returns a snapshot of the ICMP TTL exceeded per-probe stats.
 func (pn *PathNode) ICMPTTLStats() ProbeStats {
 	pn.mu.Lock()

@@ -389,12 +389,18 @@ func wantHop(t *testing.T, h export.Hop, ip string, rounds, sent, received int) 
 		}
 		t.Errorf("TTL %d: nodes = %v, want [%s]", h.TTL, ips, ip)
 	}
-	if h.Sent != rounds {
-		t.Errorf("TTL %d: rounds = %d, want %d", h.TTL, h.Sent, rounds)
+	if h.Rounds != rounds {
+		t.Errorf("TTL %d: rounds = %d, want %d", h.TTL, h.Rounds, rounds)
 	}
-	if h.ProbesSent != sent || h.ProbesReceived != received {
-		t.Errorf("TTL %d: probes sent/received = %d/%d, want %d/%d",
-			h.TTL, h.ProbesSent, h.ProbesReceived, sent, received)
+	if h.ProbesSent != sent || h.ProbesReceived != received || h.Sent != sent {
+		t.Errorf("TTL %d: probes sent/received = %d/%d (sent field %d), want %d/%d",
+			h.TTL, h.ProbesSent, h.ProbesReceived, h.Sent, sent, received)
+	}
+	// Node counts are in probes too. With one node, its replies are the hop's.
+	if len(h.Nodes) == 1 {
+		if n := h.Nodes[0]; n.Sent != sent || n.Received != received {
+			t.Errorf("TTL %d: node sent/received = %d/%d, want %d/%d", h.TTL, n.Sent, n.Received, sent, received)
+		}
 	}
 	wantLoss := 0.0
 	if sent > 0 {

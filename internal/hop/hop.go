@@ -117,10 +117,19 @@ func (h *Hop) MarkRoundSentProbes(probes int) {
 func (h *Hop) MarkRoundEnd() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Probes sent to this hop in the round being closed. A round is one ICMP
+	// TTL probe followed by the UDP or TCP flows, so the first is the ICMP
+	// probe and the rest are primary probes.
+	inRound := h.probesSent - h.closedSent
+	icmpSent, primarySent := 0, 0
+	if inRound > 0 {
+		icmpSent, primarySent = 1, inRound-1
+	}
 	h.closedSent = h.probesSent
 	h.closedRecvd = h.probesRecvd
 	verdict := h.rateLimitStateLocked()
 	for _, n := range h.Nodes {
+		n.markProbesSent(icmpSent, primarySent)
 		n.setHopVerdict(verdict)
 		n.RecordRoundAvg()
 		n.AdvanceRound()

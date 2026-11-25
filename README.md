@@ -144,7 +144,14 @@ The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come 
 
 **Before the verdict is possible.** Until a hop has 20 echo samples (about 20 rounds), loss at that hop may be rate limiting or may be real. It is shown as `N%?`, dimmed, and does not count toward alerting. Once the samples are in, it becomes either a plain figure or `~N%†`.
 
-TUI, report mode, alerting and exports all use the same figure. In the JSON, each hop has `loss_pct` (raw TTL-probe loss), `headline_loss_pct` (the figure shown) and `loss_kind` (`measured`, `rate_limited` or `provisional`), plus `probes_sent` and `probes_received`; each node has counts for each probe type and the `rate_limited` verdict; the top-level `probes` is the total sent to the hops in the report.
+TUI, report mode and alerting all use the same figure, and the JSON carries it. In the JSON:
+
+- Each hop has `loss_pct` (raw TTL-probe loss), `headline_loss_pct` (the figure shown) and `loss_kind` (`measured`, `rate_limited` or `provisional`).
+- Every count is in probes. A hop has `probes_sent`, `probes_received`, `sent` (the same as `probes_sent`) and `rounds`. A hop that never answered has no nodes and still reports what was sent to it.
+- A node has `sent` (probes sent to its hop) and `received` (its own replies), a `probes` breakdown by probe type with `sent` and `received` for each, and the `rate_limited` verdict.
+- The top-level `probes` is the total sent to the hops in the report, and equals the sum of the hops' `probes_sent`.
+
+CSV and DOT exports carry the raw loss figure only.
 
 Echoes go to the nodes of the path only, one per node per round, up to and including the destination.
 

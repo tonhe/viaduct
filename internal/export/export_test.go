@@ -224,8 +224,9 @@ func TestBuildReport_ProbeCounts(t *testing.T) {
 	if got.ProbesSent != 14 || got.ProbesReceived != 11 {
 		t.Errorf("ProbesSent, ProbesReceived = %d, %d, want 14, 11", got.ProbesSent, got.ProbesReceived)
 	}
-	if got.Sent != 2 {
-		t.Errorf("Sent (rounds) = %d, want 2", got.Sent)
+	// Sent is in probes, as ProbesSent is; rounds have their own field.
+	if got.Sent != 14 || got.Rounds != 2 {
+		t.Errorf("Sent, Rounds = %d, %d, want 14 (probes), 2", got.Sent, got.Rounds)
 	}
 
 	var buf bytes.Buffer
@@ -360,11 +361,26 @@ func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	if len(hop2.Nodes) != 0 {
 		t.Fatalf("TTL 2 should be a gap hop with no nodes, got %d nodes", len(hop2.Nodes))
 	}
-	// The gap path produces Hop{TTL: ttl} which has Loss=0, Sent=0.
-	// If the || → && mutant survived, we'd get Loss=100% and Sent=10 here,
-	// which would expose the mutation.
-	if hop2.Loss != 0 {
-		t.Fatalf("gap hop should have Loss=0, got %.1f (possible mutant || → &&)", hop2.Loss)
+	// A hop that was probed and never answered reports what was sent to it:
+	// 10 probes, none answered, 100% loss. (It used to export all zeros while
+	// the report's total counted its probes.)
+	if hop2.Loss != 100 || hop2.ProbesSent != 10 || hop2.ProbesReceived != 0 || hop2.Rounds != 10 {
+		t.Fatalf("silent hop: loss %.1f probes_sent %d probes_received %d rounds %d; want 100, 10, 0, 10",
+			hop2.Loss, hop2.ProbesSent, hop2.ProbesReceived, hop2.Rounds)
+	}
+}
+
+// A TTL with no hop in the table at all (never probed) is exported as a bare
+// placeholder with zero counts.
+func TestBuildReport_UnprobedTTLIsAPlaceholder(t *testing.T) {
+	table := hop.NewTable(30)
+	table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), time.Millisecond, 0, hop.KindPrimary)
+	r := BuildReport("v0", "example.com", net.ParseIP("198.51.100.1"), "udp", table, nil, nil, 2)
+	if len(r.Hops) != 2 {
+		t.Fatalf("hops = %d, want 2", len(r.Hops))
+	}
+	if got := r.Hops[1]; got.TTL != 2 || got.ProbesSent != 0 || got.Loss != 0 || len(got.Nodes) != 0 {
+		t.Errorf("unprobed TTL 2 = %+v, want a bare placeholder", got)
 	}
 }
 

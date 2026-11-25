@@ -14,6 +14,12 @@ type ProbeStats struct {
 	Received   int
 	RecvRounds int
 
+	// ProbesSent is, for the TTL kinds, the number of probes of this type
+	// sent to the node's hop in the rounds the node was known: the figure
+	// Received is counted against. (Sent counts rounds for those kinds.) For
+	// the echo kind it is not used; Sent already counts echoes.
+	ProbesSent int
+
 	MinRTT  time.Duration
 	MaxRTT  time.Duration
 	LastRTT time.Duration

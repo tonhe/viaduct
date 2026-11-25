@@ -137,8 +137,22 @@ func TestAllRepliesFromR2Dropped(t *testing.T) {
 			r := via(t, traceArgs(m, rounds, dst1V4)...)
 			sent := rounds * m.perRound
 			wantHop(t, hopByTTL(t, r, 1), r1V4, rounds, sent, sent)
-			if h := hopByTTL(t, r, 2); len(h.Nodes) != 0 {
+			// The silent hop has no node, and still reports exactly what was
+			// sent to it: every probe, none answered, 100% loss.
+			h := hopByTTL(t, r, 2)
+			if len(h.Nodes) != 0 {
 				t.Errorf("TTL 2: got %d nodes, want none (every reply was dropped)", len(h.Nodes))
+			}
+			if h.Rounds != rounds || h.ProbesSent != sent || h.ProbesReceived != 0 || h.Loss != 100 {
+				t.Errorf("TTL 2: rounds %d probes sent/received %d/%d loss %.1f; want %d, %d/0, 100",
+					h.Rounds, h.ProbesSent, h.ProbesReceived, h.Loss, rounds, sent)
+			}
+			sum := 0
+			for _, hh := range r.Hops {
+				sum += hh.ProbesSent
+			}
+			if sum != r.Probes {
+				t.Errorf("sum of hops' probes_sent = %d, report probes = %d; want them equal", sum, r.Probes)
 			}
 			wantHop(t, hopByTTL(t, r, 3), r3V4, rounds, sent, sent)
 			wantHop(t, hopByTTL(t, r, 4), dst1V4, rounds, sent, sent)

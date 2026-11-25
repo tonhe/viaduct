@@ -27,8 +27,11 @@ type Report struct {
 
 // Hop represents a single TTL in the trace.
 //
-// Loss is per probe: (ProbesSent - ProbesReceived) / ProbesSent over completed
-// rounds. Sent is the number of rounds, as shown in the Rnd column.
+// Every count is in probes. Loss is per probe: (ProbesSent - ProbesReceived)
+// / ProbesSent over completed rounds. Sent equals ProbesSent; it is kept
+// because it was the probe count before interleaved probes. Rounds is the
+// number of rounds, as shown in the Rnd column. A hop that never answered has
+// no nodes but still reports what was sent to it.
 //
 // HeadlineLoss is the figure the views show, and LossKind says what it is:
 // "measured" (it equals Loss), "rate_limited" (the loss of direct echoes to
@@ -41,12 +44,19 @@ type Hop struct {
 	Loss           float64 `json:"loss_pct"`
 	HeadlineLoss   float64 `json:"headline_loss_pct"`
 	LossKind       string  `json:"loss_kind,omitempty"`
+	Rounds         int     `json:"rounds"`
 	Sent           int     `json:"sent"`
 	ProbesSent     int     `json:"probes_sent"`
 	ProbesReceived int     `json:"probes_received"`
 }
 
 // Node represents a unique responder at a given TTL.
+//
+// Sent is the TTL-limited probes sent to the node's hop and Received is the
+// replies this node sent, both in probes. At a hop with one node,
+// 1 - Received/Sent is the hop's loss; at an ECMP hop Received/Sent is the
+// node's share. Loss is the hop's raw loss, the same on each of its nodes: a
+// TTL-limited probe is addressed to a hop distance, not to a node.
 type Node struct {
 	IP        string   `json:"ip"`
 	Hostname  string   `json:"hostname,omitempty"`
@@ -74,10 +84,11 @@ type NodeProbes struct {
 	Echo    ProbeCount `json:"echo"`     // direct ICMP echo requests to this node
 }
 
-// ProbeCount is probes sent and replies received for one probe type. For the
-// two TTL-limited types, Sent counts rounds in which this node was known,
-// because a TTL-limited probe is addressed to a hop distance, not to a node;
-// for Echo it counts the echo requests actually sent to the node.
+// ProbeCount is probes sent and replies received for one probe type, both in
+// probes. For the two TTL-limited types, Sent is the probes of that type sent
+// to the node's hop in the rounds the node was known, because a TTL-limited
+// probe is addressed to a hop distance, not to a node; for Echo it is the
+// echo requests sent to the node.
 type ProbeCount struct {
 	Sent     int `json:"sent"`
 	Received int `json:"received"`
@@ -145,11 +156,13 @@ func BuildReport(version string, target string, targetIP net.IP,
 			sent, _ := h.ProbeCounts()
 			r.Probes += sent // counted whether or not the hop ever answered
 		}
-		if !ok || h.GetIP() == nil {
+		if !ok {
 			r.Hops = append(r.Hops, Hop{TTL: ttl})
 			continue
 		}
 
+		// A hop that never answered has no nodes, and still reports what was
+		// sent to it: its probes are in the report's total.
 		probesSent, probesRecvd := h.ProbeCounts()
 		headline, lossKind := h.Loss()
 		eh := Hop{
@@ -157,7 +170,8 @@ func BuildReport(version string, target string, targetIP net.IP,
 			Loss:           h.LossPercent(),
 			HeadlineLoss:   headline,
 			LossKind:       lossKindName(lossKind),
-			Sent:           h.Rounds(),
+			Rounds:         h.Rounds(),
+			Sent:           probesSent,
 			ProbesSent:     probesSent,
 			ProbesReceived: probesRecvd,
 		}
@@ -180,7 +194,7 @@ func BuildReport(version string, target string, targetIP net.IP,
 					Jitter: msFromDuration(node.Jitter()),
 				},
 				Loss:      h.LossPercent(),
-				Sent:      h.Rounds(),
+				Sent:      probesSent,
 				Received:  node.GetReceived(),
 				FlowIDs:   node.GetFlowIDs(),
 				Stability: node.StabilityPercent(),
@@ -188,8 +202,8 @@ func BuildReport(version string, target string, targetIP net.IP,
 			}
 			icmpTTL, primary, echo := node.ICMPTTLStats(), node.PrimaryStats(), node.EchoStats()
 			en.Probes = NodeProbes{
-				ICMPTTL: ProbeCount{Sent: icmpTTL.Sent, Received: icmpTTL.Received},
-				Primary: ProbeCount{Sent: primary.Sent, Received: primary.Received},
+				ICMPTTL: ProbeCount{Sent: icmpTTL.ProbesSent, Received: icmpTTL.Received},
+				Primary: ProbeCount{Sent: primary.ProbesSent, Received: primary.Received},
 				Echo:    ProbeCount{Sent: echo.Sent, Received: echo.Received},
 			}
 			// The verdict is the hop's (see hop.Hop.RateLimitState).
