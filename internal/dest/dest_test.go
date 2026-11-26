@@ -47,14 +47,68 @@ func TestTrackerFirstRoundSettlesAtOnce(t *testing.T) {
 // in a run where it otherwise answers at TTL 25. The hops between are silent.
 func TestTrackerStrayReplyInTheFirstRound(t *testing.T) {
 	var tr Tracker
+	// The first round probes every TTL: the target's replies run unbroken
+	// from TTL 25 to the top, and the one at TTL 21 is a stray. The
+	// destination is TTL 25 at once.
 	feed(&tr, round{target: one(21, 25, 26, 27, 28, 29, 30)}, 30, 30)
-	if tr.TTL() != 21 {
-		t.Fatalf("after round 1: TTL %d, want 21 (the lowest answered, as before)", tr.TTL())
+	if tr.TTL() != 25 || tr.Reach() != 25 {
+		t.Fatalf("after round 1: TTL %d Reach %d, want 25 and 25", tr.TTL(), tr.Reach())
 	}
-	// Nothing answers at TTL 21 again: the tracker looks one TTL further each
-	// round until it finds the target.
+	for i := 0; i < 5; i++ {
+		feed(&tr, round{target: one(25)}, 25, 30)
+		if tr.TTL() != 25 || tr.Reach() != 25 {
+			t.Fatalf("TTL %d Reach %d, want 25 and 25", tr.TTL(), tr.Reach())
+		}
+	}
+}
+
+// What the first round settles on, by the target's replies in it.
+func TestTrackerFirstSettle(t *testing.T) {
+	seven := func(ttls ...int) map[int][]int { // seven flows answered at each TTL
+		m := map[int][]int{}
+		for f := 0; f < 7; f++ {
+			m[f] = ttls
+		}
+		return m
+	}
+	strayOfSeven := seven(25, 26, 27, 28, 29, 30)
+	strayOfSeven[3] = append([]int{21}, strayOfSeven[3]...)
+	for _, tc := range []struct {
+		name   string
+		target map[int][]int
+		want   int
+	}{
+		{"an unbroken run", one(5, 6, 7, 8), 5},
+		{"one reply below a gap", one(21, 25, 26, 27, 28, 29, 30), 25},
+		{"one reply of one flow below a gap, seven flows", strayOfSeven, 25},
+		{"two replies below the gap are not a stray", one(20, 21, 25, 26, 27, 28, 29, 30), 20},
+		{"two replies at one TTL below the gap are not a stray", map[int][]int{0: {21, 25, 26}, 1: {21, 25, 26}}, 21},
+		{"a run of one TTL above is not enough", one(21, 30), 21},
+		{"a lossy round: replies here and there", one(10, 12, 13, 17, 19, 20), 10},
+		{"a lossy round that ends on a run", one(10, 12, 15, 16, 17), 10},
+		{"a single reply", one(9), 9},
+	} {
+		var tr Tracker
+		feed(&tr, round{target: tc.target, routers: one(1, 2, 3)}, 30, 30)
+		if tr.TTL() != tc.want {
+			t.Errorf("%s: TTL %d, want %d", tc.name, tr.TTL(), tc.want)
+		}
+	}
+}
+
+// A first round that settled too low (a stray below a run of one TTL): the
+// target never answers there again. The tracker looks one TTL further each
+// round until it finds the target, and the destination follows after
+// SilentMoveRounds rounds answered there: silence at the old TTL is weak
+// evidence, the same as loss.
+func TestTrackerSilentAtTheDestinationAnsweredBeyond(t *testing.T) {
+	var tr Tracker
+	feed(&tr, round{target: one(21, 25)}, 25, 25)
+	if tr.TTL() != 21 {
+		t.Fatalf("after round 1: TTL %d, want 21", tr.TTL())
+	}
 	for want := 22; want <= 25; want++ {
-		feed(&tr, round{}, tr.Reach(), 30)
+		feed(&tr, round{}, tr.Reach(), 25)
 		if tr.Reach() != want {
 			t.Fatalf("Reach %d, want %d", tr.Reach(), want)
 		}
@@ -62,19 +116,47 @@ func TestTrackerStrayReplyInTheFirstRound(t *testing.T) {
 			t.Fatalf("TTL moved to %d on silence", tr.TTL())
 		}
 	}
-	// The target answers at 25. The destination follows after MoveRounds
-	// rounds, and the tracer keeps probing TTL 25 meanwhile.
-	for i := 1; i <= MoveRounds; i++ {
+	for i := 1; i <= SilentMoveRounds; i++ {
 		if tr.TTL() != 21 {
-			t.Fatalf("TTL %d before round %d at TTL 25, want 21", tr.TTL(), i)
+			t.Fatalf("TTL %d before round %d answered at TTL 25, want 21", tr.TTL(), i)
 		}
-		feed(&tr, round{target: one(25)}, tr.Reach(), 30)
+		feed(&tr, round{target: one(25)}, tr.Reach(), 25)
 		if tr.Reach() != 25 {
 			t.Fatalf("Reach %d, want 25", tr.Reach())
 		}
+		if i == SilentMoveRounds/2 {
+			feed(&tr, round{}, tr.Reach(), 25) // a round that found nothing neither counts nor ends the run
+		}
 	}
 	if tr.TTL() != 25 {
-		t.Errorf("TTL %d, want 25 after %d rounds answered there", tr.TTL(), MoveRounds)
+		t.Errorf("TTL %d, want 25 after %d rounds answered there", tr.TTL(), SilentMoveRounds)
+	}
+}
+
+// One answer at the destination's TTL ends such a run, however long it was,
+// and a reply nearer than the run's TTL starts it over.
+func TestTrackerSilentRunEndsOnAnAnswerAtTheDestination(t *testing.T) {
+	var tr Tracker
+	feed(&tr, round{target: one(5)}, 30, 30)
+	for i := 0; i < 10; i++ {
+		for j := 1; j < SilentMoveRounds; j++ {
+			feed(&tr, round{target: one(7)}, 7, 30)
+		}
+		feed(&tr, round{target: one(5, 7)}, 7, 30)
+	}
+	// Rounds answered at TTL 7 and rounds answered at TTL 6 do not add up.
+	for i := 0; i < 10; i++ {
+		for j := 1; j < SilentMoveRounds; j++ {
+			feed(&tr, round{target: one(7)}, 7, 30)
+		}
+		feed(&tr, round{target: one(6)}, 7, 30)
+		for j := 2; j < SilentMoveRounds; j++ {
+			feed(&tr, round{target: one(6, 7)}, 7, 30)
+		}
+		feed(&tr, round{target: one(5)}, 7, 30)
+	}
+	if tr.TTL() != 5 {
+		t.Errorf("TTL %d, want 5", tr.TTL())
 	}
 }
 
@@ -224,16 +306,34 @@ func TestTrackerMoveDownTakesTheHighestOfTheRun(t *testing.T) {
 	}
 }
 
-// Moving up takes the lowest: a round that lost the probe at the new TTL
-// and was answered one further does not push the destination out.
+// Moving up on a router's evidence takes the lowest TTL of the run: a round
+// that lost the probe at the new TTL and was answered one further does not
+// push the destination out. Three rounds are enough, because a router
+// answering where the destination was is positive evidence of a longer path.
 func TestTrackerMoveUpTakesTheLowestOfTheRun(t *testing.T) {
 	var tr Tracker
 	feed(&tr, round{target: one(5)}, 30, 30)
-	feed(&tr, round{target: one(8)}, 9, 30)
-	feed(&tr, round{target: one(7)}, 9, 30)
-	feed(&tr, round{target: one(9)}, 9, 30)
+	feed(&tr, round{target: one(8), routers: one(5, 6)}, 9, 30)
+	feed(&tr, round{target: one(7), routers: one(5, 6)}, 9, 30)
+	if tr.TTL() != 5 {
+		t.Fatalf("TTL %d after %d rounds, want 5", tr.TTL(), MoveRounds-1)
+	}
+	feed(&tr, round{target: one(9), routers: one(5, 6)}, 9, 30)
 	if tr.TTL() != 7 {
 		t.Errorf("TTL %d, want 7", tr.TTL())
+	}
+}
+
+// The same replies from the target without the routers are what loss at the
+// destination looks like: they do not move it in three rounds.
+func TestTrackerSilenceDoesNotMoveItInThreeRounds(t *testing.T) {
+	var tr Tracker
+	feed(&tr, round{target: one(5)}, 30, 30)
+	for i := 0; i < SilentMoveRounds-1; i++ {
+		feed(&tr, round{target: one(7)}, 9, 30)
+	}
+	if tr.TTL() != 5 {
+		t.Errorf("TTL %d after %d rounds answered at TTL 7 only, want 5", tr.TTL(), SilentMoveRounds-1)
 	}
 }
 

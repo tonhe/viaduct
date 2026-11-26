@@ -42,8 +42,10 @@ func (t *Table) EndRound() {
 //
 // It is the TTL at which the target is the hop for the trace as a whole: the
 // lowest at which it answers with no router still answering other flows
-// there, judged round by round and moved only after dest.MoveRounds
-// consecutive rounds agree (see dest.Tracker). A lower TTL where the target
+// there, judged round by round and moved only on a run of rounds that agree:
+// dest.MoveRounds on positive evidence, dest.SilentMoveRounds when the target
+// is merely silent at it and answers beyond, which is what loss looks like
+// (see dest.Tracker). A lower TTL where the target
 // answered once, or answers only some flows, is an ordinary hop that lists
 // the target among its nodes.
 //

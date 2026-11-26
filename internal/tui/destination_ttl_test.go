@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"net"
 	"strings"
 	"testing"
@@ -202,27 +203,21 @@ func TestDestination_StrayReplyBelowTheUsualDistance(t *testing.T) {
 		s.round(ps)
 	}
 
+	// The first round probes every TTL. The target's replies run unbroken
+	// from TTL 25 up; the one at TTL 21 stands alone below a gap and is taken
+	// for the stray it is: the destination is TTL 25 when the round closes.
 	icmpRound(30, 21)
-	s.wantDestination(21) // the first round settles it at once, as before
-
-	// The tracer looks one TTL further each round the target is silent.
-	for upTo := 21; upTo <= 24; upTo++ {
-		icmpRound(upTo, 0)
-		s.wantDestination(21)
-	}
-	// It finds the target at TTL 25; the destination follows after
-	// dest.MoveRounds rounds.
-	for i := 1; i < dest.MoveRounds; i++ {
-		icmpRound(25, 0)
-		s.wantDestination(21)
-	}
-	icmpRound(25, 0)
 	s.wantDestination(25)
 
 	for s.rounds < 40 {
-		icmpRound(25, 0)
+		// Strays in later rounds, two rounds in a row: no move either.
+		stray := 0
+		if s.rounds == 10 || s.rounds == 11 {
+			stray = 21
+		}
+		icmpRound(25, stray)
+		s.wantDestination(25)
 	}
-	s.wantDestination(25)
 
 	h := s.sess().table.Get(25)
 	if pct, kind := h.Loss(); pct != 0 || kind != hop.LossMeasured {
@@ -240,11 +235,11 @@ func TestDestination_StrayReplyBelowTheUsualDistance(t *testing.T) {
 		t.Errorf("export destination hop = %+v, want the target with 0%% measured loss", last)
 	}
 
-	// TTL 21 is an ordinary hop that lists the target: one answer in 40
+	// TTL 21 is an ordinary hop that lists the target: three answers in 40
 	// rounds. It is not the destination and is judged on its own.
 	h21 := s.sess().table.Get(21)
-	if sent, recvd := h21.ProbeCounts(); sent != 40 || recvd != 1 {
-		t.Errorf("TTL 21: probes sent/received = %d/%d, want 40/1", sent, recvd)
+	if sent, recvd := h21.ProbeCounts(); sent != 40 || recvd != 3 {
+		t.Errorf("TTL 21: probes sent/received = %d/%d, want 40/3", sent, recvd)
 	}
 }
 
@@ -326,8 +321,9 @@ func TestDestination_FlowsOfUnequalPathLength(t *testing.T) {
 // The path gets shorter: the target, at TTL 6, starts answering at TTL 5.
 // The destination moves after dest.MoveRounds rounds. The target ignores
 // ping, so its loss is measured and can alert: it stops answering for a
-// while at TTL 6 and the alert is raised. On the move the alert state starts
-// over at the new row, and each hop keeps its own counts and verdict.
+// while at TTL 6 and the alert is raised. The alert stays raised until the
+// destination has moved: the new row has lost nothing, so its first round as
+// the destination clears it. Each hop keeps its own counts and verdict.
 func TestDestination_PathGetsShorter(t *testing.T) {
 	s := newDestSim(t, withAlertEngine(5, 0, 3))
 	s.echoAnswered = func(ip string) bool { return ip != destSimTarget }
@@ -376,8 +372,12 @@ func TestDestination_PathGetsShorter(t *testing.T) {
 	}
 	icmpRound(10, 5, true)
 	s.wantDestination(5)
+	if moved := s.log.containing("destination moved from ttl=6 to ttl=5"); len(moved) != 1 {
+		t.Errorf("debug log: %d lines for the move from TTL 6 to TTL 5, want 1", len(moved))
+	}
 
-	// The alert state starts over at the new row.
+	// The alert follows the destination to its new row, which has lost
+	// nothing: this round was a good one, and it clears the alert.
 	if engine.State() != AlertHealthy || engine.consecutiveBad != 0 {
 		t.Errorf("alert after the move: state %v, %d consecutive bad rounds; want healthy and 0", engine.State(), engine.consecutiveBad)
 	}
@@ -401,10 +401,98 @@ func TestDestination_PathGetsShorter(t *testing.T) {
 	}
 }
 
-// The alert engine counts consecutive bad rounds at the destination's hop.
-// When the destination moves, the rounds counted were another hop's: the
-// count and a raised alert are dropped, and the new hop has to earn its own.
-func TestAlertEngine_StartsOverWhenTheDestinationMoves(t *testing.T) {
+// A destination with real loss: one flow, the target at TTL 6 loses half the
+// probes that reach it and ignores ping, so its loss is measured and well
+// over the alert threshold. The tracer probes further out after a round the
+// target did not answer (played here by a dest.Tracker, as probe.Tracer has
+// one), and the target answers some of those probes while the one at TTL 6
+// is lost. That is what loss looks like, not a longer path: the destination
+// row stays at TTL 6 in every output, the rows beyond it stay hidden and get
+// no echoes, and the loss alert, once raised, stays raised.
+func TestDestination_LossyDestinationKeepsItsRowAndItsAlert(t *testing.T) {
+	const dist, rounds = 6, 300
+	s := newDestSim(t, withAlertEngine(5, 0, 3))
+	s.echoAnswered = func(ip string) bool { return ip != destSimTarget }
+	engine := s.sess().alertEngine
+	rnd := rand.New(rand.NewSource(1))
+	var tracer dest.Tracker
+	flow := dest.Flow{Kind: int(probe.ProbeICMPTTL), Aux: true}
+
+	raisedAt, beyondProbed := 0, 0
+	for s.rounds < rounds {
+		upTo := tracer.Reach()
+		if upTo == 0 {
+			upTo = 30
+		} else if upTo > dist {
+			beyondProbed++
+		}
+		var ps []simProbe
+		for ttl := 1; ttl <= upTo; ttl++ {
+			p := simProbe{ttl: ttl, pt: probe.ProbeICMPTTL}
+			switch {
+			case ttl < dist:
+				p.from = router(ttl)
+				tracer.Router(flow, ttl)
+			case s.rounds == 0 || rnd.Float64() >= 0.5: // round one is clean
+				p.from = destSimTarget
+				tracer.Target(flow, ttl)
+			}
+			ps = append(ps, p)
+		}
+		s.round(ps)
+		tracer.EndRound(upTo, 30)
+
+		s.wantDestination(dist)
+		switch {
+		case raisedAt == 0 && engine.State() == AlertDegraded:
+			raisedAt = s.rounds
+		case raisedAt != 0 && engine.State() != AlertDegraded:
+			t.Fatalf("round %d: the loss alert raised in round %d was cleared; the destination still loses half its probes", s.rounds, raisedAt)
+		}
+		if t.Failed() {
+			t.FailNow()
+		}
+	}
+	// The target ignores ping: its loss counts once 20 echoes have gone
+	// unanswered, and three bad rounds raise the alert.
+	if raisedAt == 0 || raisedAt > 30 {
+		t.Errorf("the loss alert was raised in round %d, want it raised by round 30", raisedAt)
+	}
+	if beyondProbed == 0 {
+		t.Error("fixture: no round probed beyond the destination, so the test shows nothing")
+	}
+	pct, kind := s.sess().table.Get(dist).Loss()
+	if kind != hop.LossMeasured || pct < 40 || pct > 60 {
+		t.Errorf("destination row: loss %s, want about 50%% measured", hop.FormatLoss(pct, kind))
+	}
+	// The debug log's round lines count the hops of the path. The TTLs
+	// probed beyond the destination are counted apart, so that a hidden TTL
+	// that answered nothing is not reported as a silent hop.
+	apart := 0
+	for _, l := range s.log.containing(" hops probed") {
+		if l == "" || strings.Contains(l, "round 1:") {
+			continue
+		}
+		if !strings.Contains(l, fmt.Sprintf(" of %d hops probed", dist)) {
+			t.Errorf("round line counts hops beyond the destination among those probed: %q", l)
+		}
+		if strings.Contains(l, " TTLs probed beyond the destination") {
+			apart++
+		}
+	}
+	if apart != beyondProbed {
+		t.Errorf("%d round lines report TTLs probed beyond the destination, want %d", apart, beyondProbed)
+	}
+	if moved := s.log.containing("destination moved"); len(moved) != 0 {
+		t.Errorf("debug log: %q, want no move", moved)
+	}
+}
+
+// The alert engine follows the destination's hop, whichever TTL that is.
+// When the destination moves, the count of bad rounds and a raised alert
+// carry over: the alert is about the destination, and it clears when the
+// destination, at its new hop, has a good round.
+func TestAlertEngine_KeepsItsStateWhenTheDestinationMoves(t *testing.T) {
 	table := hop.NewTable(30)
 	ip := net.ParseIP("192.0.2.9")
 	// Both hops have answered a probe, and neither has answered any of 20
@@ -427,17 +515,12 @@ func TestAlertEngine_StartsOverWhenTheDestinationMoves(t *testing.T) {
 	e := NewAlertEngine(5, 0, 3)
 	lostRound(e, 5)
 	lostRound(e, 5)
-	lostRound(e, 4) // the destination moved: this is the first bad round at TTL 4
-	if e.State() != AlertHealthy || e.consecutiveBad != 1 {
-		t.Fatalf("after a move: state %v, %d consecutive bad rounds; want healthy and 1", e.State(), e.consecutiveBad)
-	}
-	lostRound(e, 4)
-	lostRound(e, 4)
+	lostRound(e, 4) // the destination moved to a hop that is losing probes too
 	if e.State() != AlertDegraded {
-		t.Fatalf("state %v after 3 bad rounds at the new destination, want degraded", e.State())
+		t.Fatalf("state %v after 3 bad rounds at the destination, want degraded: a move does not start the count over", e.State())
 	}
-	lostRound(e, 5) // and back: the raised alert is dropped with the count
-	if e.State() != AlertHealthy || e.consecutiveBad != 1 {
-		t.Errorf("after moving back: state %v, %d consecutive bad rounds; want healthy and 1", e.State(), e.consecutiveBad)
+	lostRound(e, 5)
+	if e.State() != AlertDegraded {
+		t.Errorf("state %v after the destination moved back, want degraded", e.State())
 	}
 }

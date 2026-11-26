@@ -159,7 +159,7 @@ func TestTargetTTL_EchoRepliesAreNotEvidence(t *testing.T) {
 	noteReply(tbl, 5, destTarget, 0, KindICMPTTL)
 	noteReply(tbl, 6, destTarget, 0, KindICMPTTL)
 	tbl.EndRound()
-	for i := 0; i < 2*dest.MoveRounds; i++ {
+	for i := 0; i < 2*dest.SilentMoveRounds; i++ {
 		noteReply(tbl, 6, destTarget, 0, KindEcho)
 		tbl.EndRound()
 	}
@@ -168,13 +168,38 @@ func TestTargetTTL_EchoRepliesAreNotEvidence(t *testing.T) {
 	}
 }
 
-// ResetAll forgets the destination with the hops' nodes.
-func TestTargetTTL_ResetAll(t *testing.T) {
+// ResetAll clears what was measured and keeps the destination's TTL: the
+// target is where it was, the tracer still probes up to it, and the views
+// still end there.
+func TestTargetTTL_ResetAllKeepsTheDestination(t *testing.T) {
+	tbl := NewTable(30)
+	noteReply(tbl, 5, destTarget, 0, KindICMPTTL)
+	noteReply(tbl, 6, destTarget, 0, KindICMPTTL)
+	tbl.EndRound()
+	tbl.ResetAll()
+	if got := tbl.TargetTTL(); got != 5 {
+		t.Errorf("TargetTTL = %d after ResetAll, want 5", got)
+	}
+	if got := len(tbl.Get(5).GetNodes()); got != 0 {
+		t.Errorf("TTL 5 has %d nodes after ResetAll, want 0", got)
+	}
+}
+
+// With no router seen at the destination's TTL, the target answering beyond
+// it and not at it is what loss looks like: it moves the destination only
+// after dest.SilentMoveRounds rounds.
+func TestTargetTTL_SilenceMovesItOnlyAfterALongRun(t *testing.T) {
 	tbl := NewTable(30)
 	noteReply(tbl, 5, destTarget, 0, KindICMPTTL)
 	tbl.EndRound()
-	tbl.ResetAll()
-	if got := tbl.TargetTTL(); got != 0 {
-		t.Errorf("TargetTTL = %d after ResetAll, want 0", got)
+	for i := 1; i <= dest.SilentMoveRounds; i++ {
+		if got := tbl.TargetTTL(); got != 5 {
+			t.Fatalf("TargetTTL = %d after %d rounds answered at TTL 7 only, want 5", got, i-1)
+		}
+		noteReply(tbl, 7, destTarget, 0, KindICMPTTL)
+		tbl.EndRound()
+	}
+	if got := tbl.TargetTTL(); got != 7 {
+		t.Errorf("TargetTTL = %d after %d rounds, want 7", got, dest.SilentMoveRounds)
 	}
 }

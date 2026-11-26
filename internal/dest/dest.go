@@ -8,8 +8,9 @@ package dest
 
 import "sync"
 
-// MoveRounds is the number of consecutive rounds that must point at another
-// TTL before the destination moves there.
+// MoveRounds is the number of rounds of positive evidence that move the
+// destination: the target answering below the destination's TTL, or a router
+// answering at it or beyond it (see Tracker).
 //
 // One round is not enough: a single reply from the target at a TTL below its
 // distance (a probe that took a shorter path once) would move the destination
@@ -20,6 +21,26 @@ import "sync"
 // and a real change is followed after three rounds, which also fits inside a
 // short report run.
 const MoveRounds = 3
+
+// SilentMoveRounds is the number of rounds that move the destination up on
+// the target's replies alone: the target answered at one and the same TTL
+// beyond the destination's, and neither there nor in between, with no router
+// seen at the destination's TTL.
+//
+// That is also exactly what loss at the destination looks like once the
+// tracer probes beyond it, so it takes far more rounds than MoveRounds. With
+// the target where it is and losing probes, a round's probes at the
+// destination's TTL and at a TTL x beyond it are lost alike. Of the rounds
+// that end such a run or count toward it, "answered at x and at nothing
+// nearer" is never the likelier outcome than "answered at the destination's
+// TTL": with independent loss p and x one hop out its share is p/(1+p), less
+// further out. A run of 24 has a chance of at most (p/(1+p))^23: 1 in 10^11
+// at 50% loss, 4 in 10^8 at 90%. A run can start in at most p(1-p) of the
+// rounds, so at 90% loss and a round a second that is one false move in
+// about ten years; TestLossyDestinationKeepsItsTTL has none in 500,000
+// rounds. The price is that a path that really becomes longer through hops
+// that answer nothing is followed 24 rounds after the target is found again.
+const SilentMoveRounds = 24
 
 // Flow identifies one stream of TTL-limited probes that routers forward
 // alike: a probe type and, where the type sends several, the flow's number.
@@ -35,24 +56,37 @@ type Flow struct {
 // Tracker follows the destination's TTL over the rounds of one trace. The
 // zero value is ready to use, and a Tracker is safe for concurrent use.
 //
-// Each round it takes the lowest TTL at which the target answered that lies
-// above every TTL at which another node answered a flow the target answers.
-// A TTL where a router still answers some flows is not the destination's,
-// even if the target answers other flows there: with load-balanced paths of
-// unequal length the target is the hop for the whole trace only where every
-// flow that reaches it has reached it. A flow the target has never answered
-// (ICMP probes to a host that ignores them, say) has no say. Neither has the
-// ICMP TTL probe (Flow.Aux) once the target has answered a flow of the
-// trace's own protocol: where the UDP or TCP flows all reach the target is
-// the destination of a UDP or TCP trace, even if ICMP takes a longer path.
-// Silence is not evidence either: a TTL where the target answers and nothing
-// else does is a candidate even if some probes there went unanswered.
+// Each round it takes a candidate: the lowest TTL at which the target
+// answered that lies above every TTL at which another node answered a flow
+// the target answers. A TTL where a router still answers some flows is not
+// the destination's, even if the target answers other flows there: with
+// load-balanced paths of unequal length the target is the hop for the whole
+// trace only where every flow that reaches it has reached it. A flow the
+// target has never answered (ICMP probes to a host that ignores them, say)
+// has no say. Neither has the ICMP TTL probe (Flow.Aux) once the target has
+// answered a flow of the trace's own protocol: where the UDP or TCP flows all
+// reach the target is the destination of a UDP or TCP trace, even if ICMP
+// takes a longer path.
 //
-// The first round that finds the target settles the destination at once.
-// After that it moves, up or down, only when MoveRounds consecutive rounds
-// that found the target all point the same way; a round that did not find it
-// neither counts nor breaks the run. Moving down it takes the highest TTL of
-// those rounds, moving up the lowest.
+// The first round that finds the target settles the destination at once, on
+// its candidate. One exception: when all but one of the target's replies in
+// that round form an unbroken run of TTLs up to the highest, and that one
+// reply lies below a gap, the reply is a stray (a probe that took a shorter
+// path once) and the destination is where the run starts.
+//
+// After that the destination moves only on a run of rounds that point the
+// same way. A round with the candidate at the destination's TTL ends a run; a
+// round without a candidate neither counts nor ends it.
+//
+//   - Down, when the target answers below the destination's TTL with no
+//     router there: MoveRounds rounds, to the highest candidate of the run.
+//   - Up, when a router answers at the destination's TTL or beyond it: the
+//     path is longer. MoveRounds such rounds, to the lowest candidate.
+//   - Up, when the target is merely silent at the destination's TTL and
+//     answers beyond it: that is what loss at the destination looks like, so
+//     it takes SilentMoveRounds rounds that all have the same candidate.
+//
+// A destination that loses probes, however many, therefore keeps its TTL.
 type Tracker struct {
 	mu sync.Mutex
 
@@ -63,13 +97,14 @@ type Tracker struct {
 	known map[Flow]bool
 
 	// The round being collected.
-	answered []int        // TTLs at which the target answered
+	answered []int        // the TTL of each reply from the target
 	routers  map[Flow]int // per flow, the highest TTL at which another node answered
 
 	// The run of rounds pointing away from ttl.
 	dir    int // -1 below ttl, +1 above, 0 no run
-	streak int
-	pick   int
+	pick   int // where the run would move the destination
+	streak int // rounds of positive evidence in the run
+	silent int // an upward run's rounds with the candidate at pick
 }
 
 // Target records that the target answered a TTL-limited probe of flow f sent
@@ -109,8 +144,8 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// The highest TTL at which a router answered a flow that reaches the
-	// target: the destination lies beyond it.
+	// The highest TTL at which a router answered a flow that counts: the
+	// destination lies beyond it.
 	own := false // the target answers a flow of the trace's own protocol
 	for f := range t.known {
 		own = own || !f.Aux
@@ -121,11 +156,16 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 			router = ttl
 		}
 	}
-	// The round's candidate: the lowest TTL the target answered at beyond it.
+	// The target's replies beyond it, by TTL, and the round's candidate: the
+	// lowest of those TTLs.
+	replies := make(map[int]int)
 	c := 0
 	for _, ttl := range t.answered {
-		if ttl > router && (c == 0 || ttl < c) {
-			c = ttl
+		if ttl > router {
+			replies[ttl]++
+			if c == 0 || ttl < c {
+				c = ttl
+			}
 		}
 	}
 	t.answered, t.routers = t.answered[:0], nil
@@ -134,26 +174,39 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 	case c == 0:
 		// The target was not found: no evidence about where it is.
 	case t.ttl == 0:
-		t.ttl = c
+		t.ttl = firstSettle(c, replies)
 	case c == t.ttl:
-		t.dir, t.streak = 0, 0
-	default:
-		dir := 1
-		if c < t.ttl {
-			dir = -1
+		t.dir = 0
+	case c < t.ttl:
+		if t.dir != -1 {
+			t.dir, t.pick, t.streak = -1, c, 0
 		}
-		if dir != t.dir {
-			t.dir, t.streak, t.pick = dir, 0, c
-		}
-		t.streak++
-		// Down: the highest of the run, where the target answered in every
-		// one of its rounds. Up: the lowest it has been seen at.
-		if (dir < 0 && c > t.pick) || (dir > 0 && c < t.pick) {
+		// The highest of the run: where the target answered in every one of
+		// its rounds.
+		if c > t.pick {
 			t.pick = c
 		}
+		t.streak++
 		if t.streak >= MoveRounds {
-			t.ttl = t.pick
-			t.dir, t.streak = 0, 0
+			t.ttl, t.dir = t.pick, 0
+		}
+	default:
+		if t.dir != 1 {
+			t.dir, t.pick, t.streak, t.silent = 1, c, 0, 0
+		}
+		// The lowest the target has been seen at. The rounds that count on
+		// the target's replies alone must all have had it there.
+		if c < t.pick {
+			t.pick, t.silent = c, 0
+		}
+		if c == t.pick {
+			t.silent++
+		}
+		if router >= t.ttl {
+			t.streak++ // a router where the destination was: the path is longer
+		}
+		if t.streak >= MoveRounds || t.silent >= SilentMoveRounds {
+			t.ttl, t.dir = t.pick, 0
 		}
 	}
 
@@ -182,6 +235,40 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 	}
 }
 
+// firstSettle is where the first round that found the target puts the
+// destination: on the round's candidate c, or, when the reply at c is a
+// stray, where the target's other replies start. replies holds the number of
+// replies from the target at each TTL.
+//
+// The round probes every TTL, and the target answers each probe that reaches
+// it, so its replies run unbroken from its distance to the highest TTL
+// probed. A single reply below a gap, with at least two TTLs of replies in
+// the run above, is one probe that reached the target by a shorter path.
+// Settling on it would leave the destination row on a TTL the target does not
+// answer at until SilentMoveRounds rounds had moved it.
+func firstSettle(c int, replies map[int]int) int {
+	top := 0
+	for ttl := range replies {
+		if ttl > top {
+			top = ttl
+		}
+	}
+	start := top
+	for replies[start-1] > 0 {
+		start--
+	}
+	below := 0
+	for ttl, n := range replies {
+		if ttl < start {
+			below += n
+		}
+	}
+	if below == 1 && top > start {
+		return start
+	}
+	return c
+}
+
 // TTL returns the destination's TTL, or 0 while no round has found the
 // target.
 func (t *Tracker) TTL() int {
@@ -205,5 +292,5 @@ func (t *Tracker) Reset() {
 	defer t.mu.Unlock()
 	t.ttl, t.reach = 0, 0
 	t.known, t.answered, t.routers = nil, nil, nil
-	t.dir, t.streak, t.pick = 0, 0, 0
+	t.dir, t.pick, t.streak, t.silent = 0, 0, 0, 0
 }

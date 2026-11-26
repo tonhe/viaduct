@@ -856,14 +856,15 @@ func (t *Table) MaxTTLSeen() int {
 	return t.maxTTLSeenLocked()
 }
 
-// ResetAll resets stats on all hops.
+// ResetAll resets stats on all hops. The destination's TTL is kept: a reset
+// clears what was measured, not where the target is, and the tracer keeps
+// probing up to it.
 func (t *Table) ResetAll() {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	for _, h := range t.hops {
 		h.Reset()
 	}
-	t.dest.Reset()
 }
 
 func (t *Table) maxTTLSeenLocked() int {

@@ -112,17 +112,36 @@ func runAnswered(t *testing.T, rounds int, answer func(round, ttl int) bool) []i
 
 // viaduct#234: one reply from the target at TTL 4 in the first round, in a
 // run where it otherwise answers at TTL 7. The cap on the send loop was set
-// by that first reply and never changed, so the destination's own TTL was not
-// probed again. Now the tracer looks one TTL further each round the target
-// does not answer, finds it at TTL 7 and stays there.
-func TestRun_CapRisesWhenTheTargetDoesNotAnswerAtIt(t *testing.T) {
-	got := runAnswered(t, 8, func(round, ttl int) bool {
+// by that first reply, the first to arrive, and never changed, so the
+// destination's own TTL was not probed again. Now the round's replies settle
+// it when the round closes: they run unbroken from TTL 7, and the one at
+// TTL 4 is a stray.
+func TestRun_StrayReplyInRoundOneDoesNotSetTheCap(t *testing.T) {
+	got := runAnswered(t, 5, func(round, ttl int) bool {
 		if round == 0 && ttl == 4 {
 			return true
 		}
 		return ttl >= 7
 	})
-	want := []int{10, 4, 5, 6, 7, 7, 7, 7}
+	want := []int{10, 7, 7, 7, 7}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("highest TTL probed per round = %v, want %v", got, want)
+	}
+}
+
+// The path gets longer through hops that answer nothing: from round three
+// the target answers from TTL 8, not 6. The cap rises one TTL each round the
+// target is not found, probes are sent at the higher TTLs, and the cap stays
+// at TTL 8, where the target answers, while the destination's move there is
+// being confirmed.
+func TestRun_CapRisesWhenTheTargetDoesNotAnswerAtIt(t *testing.T) {
+	got := runAnswered(t, 8, func(round, ttl int) bool {
+		if round >= 2 {
+			return ttl >= 8
+		}
+		return ttl >= 6
+	})
+	want := []int{10, 6, 6, 7, 8, 8, 8, 8}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("highest TTL probed per round = %v, want %v", got, want)
 	}

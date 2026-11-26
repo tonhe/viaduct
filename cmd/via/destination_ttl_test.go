@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tonhe/viaduct/internal/dest"
 	"github.com/tonhe/viaduct/internal/export"
 	"github.com/tonhe/viaduct/internal/hop"
 	"github.com/tonhe/viaduct/internal/probe"
@@ -122,17 +121,15 @@ func scriptRouter(ttl int) string { return fmt.Sprintf("198.51.100.%d", ttl) }
 
 // strayScript: ICMP mode, routers at TTL 1 to 4, TTL 5 to 8 silent, the
 // target at TTL 9. In round one a probe sent with TTL 6 reaches the target
-// too. The tracer then looks one TTL further each round, as probe.Tracer
-// does, and finds the target at TTL 9 in round five.
+// too. Round one probes TTL 1 to 12; the target's replies run unbroken from
+// TTL 9, so the tracer probes up to TTL 9 from round two on, as probe.Tracer
+// does.
 func strayScript(rounds int) [][]scriptedProbe {
 	var out [][]scriptedProbe
 	for r := 0; r < rounds; r++ {
 		upTo := 9
-		switch {
-		case r == 0:
+		if r == 0 {
 			upTo = 12
-		case r <= 3:
-			upTo = 5 + r // 6, 7, 8
 		}
 		var round []scriptedProbe
 		for ttl := 1; ttl <= upTo; ttl++ {
@@ -226,8 +223,11 @@ func textRows(out string) map[int]string {
 	return rows
 }
 
+// A short run, so that the report is right from the first round on: a run
+// that ended before the destination had been corrected would report the
+// stray's TTL.
 func TestRunReport_StrayReplyDoesNotPinTheDestination(t *testing.T) {
-	const rounds = 12
+	const rounds = 3
 	for _, format := range []string{"json", ""} {
 		t.Run("format="+format, func(t *testing.T) {
 			installScript(t, strayScript(rounds))
@@ -242,14 +242,10 @@ func TestRunReport_StrayReplyDoesNotPinTheDestination(t *testing.T) {
 			if got := debugDestination(t, sink.lines); got != 9 {
 				t.Errorf("debug log: destination at TTL %d, want 9", got)
 			}
-			moved := 0
 			for _, l := range sink.lines {
-				if strings.Contains(l, fmt.Sprintf("round %d: destination moved from ttl=6 to ttl=9", 4+dest.MoveRounds)) {
-					moved++
+				if strings.Contains(l, "destination moved") {
+					t.Errorf("debug log: the destination moved, want it at TTL 9 from round one: %q", l)
 				}
-			}
-			if moved != 1 {
-				t.Errorf("debug log: %d lines for the move from TTL 6 to TTL 9 in round %d, want 1", moved, 4+dest.MoveRounds)
 			}
 
 			if format == "" {
@@ -273,9 +269,8 @@ func TestRunReport_StrayReplyDoesNotPinTheDestination(t *testing.T) {
 			if len(last.Nodes) != 1 || last.Nodes[0].IP != scriptTarget {
 				t.Fatalf("JSON: last hop's nodes = %+v, want the target alone", last.Nodes)
 			}
-			// TTL 9 was probed in round one and from round five on, and
-			// answered every time.
-			if want := rounds - 3; last.ProbesSent != want || last.ProbesReceived != want || last.Loss != 0 || last.HeadlineLoss != 0 {
+			// TTL 9 was probed in every round and answered every time.
+			if want := rounds; last.ProbesSent != want || last.ProbesReceived != want || last.Loss != 0 || last.HeadlineLoss != 0 {
 				t.Errorf("JSON: destination sent/received %d/%d, loss %.1f, headline %.1f; want %d/%d and no loss",
 					last.ProbesSent, last.ProbesReceived, last.Loss, last.HeadlineLoss, want, want)
 			}
