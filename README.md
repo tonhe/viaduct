@@ -197,7 +197,7 @@ Press <kbd>d</kbd> to cycle through five view presets:
 | **Health** | Loss%, Avg, Delta, Sparkline, Trend | Quick health assessment |
 | **Latency** | Avg, Best, Wrst, GMean, Delta, Sparkline | Detailed latency analysis |
 | **Variability** | StDev, Jitter, Jitter Mean, Sparkline, Trend | Stability analysis |
-| **Probe Detail** | Loss%, % of replies, ICMP-TTL, UDP/TCP-TTL, Echo (received/sent), Rnd | Per-probe-type diagnostics, rate-limit verification |
+| **Probe Detail** | Loss%, % of replies, ICMP-TTL, UDP/TCP-TTL (not in ICMP mode), Echo (received/sent), Rnd | Per-probe-type diagnostics, rate-limit verification |
 
 **Additional metrics:**
 

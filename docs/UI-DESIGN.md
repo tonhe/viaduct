@@ -196,14 +196,14 @@ Loss belongs to the hop, not to a node: an unanswered TTL-limited probe does not
 | `Loss%` | 8 | the hop's loss, on the hop's first line only. It is the same cell as the main table's, including `~N%†` and `N%?`. The other node lines of a divergent hop show a dim `-`. |
 | `% of replies` | 12 | the node's share of the hop's replies to TTL-limited probes, as a whole percent. A dim `-` when the hop has no replies. |
 | `ICMP-TTL` | 9 | ICMP TTL-limited probes, `received/sent` |
-| `UDP-TTL` | 9 | primary-protocol TTL-limited probes, `received/sent`. The header is `TCP-TTL` with TCP probes. In ICMP mode the cells are a dim `—`, because there are no primary probes. |
+| `UDP-TTL` | 9 | primary-protocol TTL-limited probes, `received/sent`. The header is `TCP-TTL` with TCP probes. In ICMP mode the column is left out, because there are no primary probes; `ICMP-TTL` covers the probes sent. |
 | `Echo` | 9 | direct echoes to the node, `received/sent` |
 | `Rnd` | 5 | the hop's rounds |
 
 - A count cell is a dim `—` when no probe of that type was sent.
 - The Echo count is dim while the hop has no verdict: until it first has the 20 echo samples a rate-limit verdict needs, counted over the hop's nodes. Until then the count is still accumulating and must not look like a settled figure. Once the hop has had a verdict the count stays undimmed, also while a held verdict covers fewer than 20 samples.
 - A TTL with no reply is the hop number and `*`.
-- `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column, ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle.
+- `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column (when there is one), ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle.
 - In column view `d` does not replace the panes. The panes stay as they are and the header bar names no view.
 
 ## Multi-target
