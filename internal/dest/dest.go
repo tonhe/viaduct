@@ -66,7 +66,9 @@ type Flow struct {
 // has no say. Neither has the ICMP TTL probe (Flow.Aux) once the target has
 // answered a flow of the trace's own protocol: where the UDP or TCP flows all
 // reach the target is the destination of a UDP or TCP trace, even if ICMP
-// takes a longer path.
+// takes a longer path, or a shorter one. The target's replies to the ICMP
+// probe count only in a round in which it answered none of the trace's own
+// flows.
 //
 // The first round that finds the target settles the destination at once, on
 // its candidate. One exception: when all but one of the target's replies in
@@ -84,7 +86,8 @@ type Flow struct {
 //     path is longer. MoveRounds such rounds, to the lowest candidate.
 //   - Up, when the target is merely silent at the destination's TTL and
 //     answers beyond it: that is what loss at the destination looks like, so
-//     it takes SilentMoveRounds rounds that all have the same candidate.
+//     it takes SilentMoveRounds rounds with the same candidate, counted from
+//     the last round in which the target answered nearer than that.
 //
 // A destination that loses probes, however many, therefore keeps its TTL.
 type Tracker struct {
@@ -97,14 +100,24 @@ type Tracker struct {
 	known map[Flow]bool
 
 	// The round being collected.
-	answered []int        // the TTL of each reply from the target
+	answered []reply      // each reply from the target
 	routers  map[Flow]int // per flow, the highest TTL at which another node answered
 
 	// The run of rounds pointing away from ttl.
 	dir    int // -1 below ttl, +1 above, 0 no run
-	pick   int // where the run would move the destination
+	pick   int // where positive evidence would move the destination
 	streak int // rounds of positive evidence in the run
-	silent int // an upward run's rounds with the candidate at pick
+	// silent counts, for each TTL beyond the destination's, the rounds of an
+	// upward run whose candidate it was since the target last answered
+	// nearer than it.
+	silent map[int]int
+}
+
+// reply is one reply from the target: the TTL of the probe it answered, and
+// whether that was the ICMP TTL probe (Flow.Aux).
+type reply struct {
+	ttl int
+	aux bool
 }
 
 // Target records that the target answered a TTL-limited probe of flow f sent
@@ -115,7 +128,7 @@ func (t *Tracker) Target(f Flow, ttl int) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.answered = append(t.answered, ttl)
+	t.answered = append(t.answered, reply{ttl, f.Aux})
 	if t.known == nil {
 		t.known = make(map[Flow]bool)
 	}
@@ -157,14 +170,22 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 		}
 	}
 	// The target's replies beyond it, by TTL, and the round's candidate: the
-	// lowest of those TTLs.
+	// lowest of those TTLs. Where the target answered the trace's own flows
+	// in this round, they decide and its replies to the ICMP TTL probe are
+	// left out, as that probe's routers are: ICMP may take a shorter path
+	// too. A round in which only the ICMP probe was answered still finds the
+	// target.
+	ownReplied := false
+	for _, r := range t.answered {
+		ownReplied = ownReplied || (!r.aux && r.ttl > router)
+	}
 	replies := make(map[int]int)
 	c := 0
-	for _, ttl := range t.answered {
-		if ttl > router {
-			replies[ttl]++
-			if c == 0 || ttl < c {
-				c = ttl
+	for _, r := range t.answered {
+		if r.ttl > router && !(r.aux && ownReplied) {
+			replies[r.ttl]++
+			if c == 0 || r.ttl < c {
+				c = r.ttl
 			}
 		}
 	}
@@ -192,21 +213,28 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 		}
 	default:
 		if t.dir != 1 {
-			t.dir, t.pick, t.streak, t.silent = 1, c, 0, 0
+			t.dir, t.pick, t.streak, t.silent = 1, c, 0, make(map[int]int)
 		}
-		// The lowest the target has been seen at. The rounds that count on
-		// the target's replies alone must all have had it there.
 		if c < t.pick {
-			t.pick, t.silent = c, 0
+			t.pick = c // the lowest the target has been seen at
 		}
-		if c == t.pick {
-			t.silent++
+		// On the target's replies alone: this round counts for its candidate,
+		// and takes away the rounds of every TTL further out, where the
+		// target cannot be if it answers here.
+		for ttl := range t.silent {
+			if ttl > c {
+				delete(t.silent, ttl)
+			}
 		}
+		t.silent[c]++
 		if router >= t.ttl {
 			t.streak++ // a router where the destination was: the path is longer
 		}
-		if t.streak >= MoveRounds || t.silent >= SilentMoveRounds {
+		switch {
+		case t.streak >= MoveRounds:
 			t.ttl, t.dir = t.pick, 0
+		case t.silent[c] >= SilentMoveRounds:
+			t.ttl, t.dir = c, 0
 		}
 	}
 
@@ -292,5 +320,5 @@ func (t *Tracker) Reset() {
 	defer t.mu.Unlock()
 	t.ttl, t.reach = 0, 0
 	t.known, t.answered, t.routers = nil, nil, nil
-	t.dir, t.pick, t.streak, t.silent = 0, 0, 0, 0
+	t.dir, t.pick, t.streak, t.silent = 0, 0, 0, nil
 }

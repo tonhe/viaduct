@@ -324,6 +324,75 @@ func TestTrackerMoveUpTakesTheLowestOfTheRun(t *testing.T) {
 	}
 }
 
+// A run on the target's replies alone is counted per TTL. One round answered
+// at TTL 6 and then every round at TTL 7 moves the destination to TTL 7 after
+// SilentMoveRounds rounds there: the round at TTL 6 does not hold the run at
+// a TTL the target no longer answers at.
+func TestTrackerSilentRunFollowsAFartherCandidate(t *testing.T) {
+	var tr Tracker
+	feed(&tr, round{target: one(5)}, 30, 30)
+	feed(&tr, round{target: one(6)}, 7, 30)
+	for i := 1; i <= SilentMoveRounds; i++ {
+		if tr.TTL() != 5 {
+			t.Fatalf("TTL %d after %d rounds answered at TTL 7, want 5", tr.TTL(), i-1)
+		}
+		feed(&tr, round{target: one(7)}, 7, 30)
+	}
+	if tr.TTL() != 7 {
+		t.Errorf("TTL %d after %d rounds answered at TTL 7 only, want 7", tr.TTL(), SilentMoveRounds)
+	}
+}
+
+// A reply nearer than a TTL takes that TTL's rounds away: rounds answered at
+// TTL 7 before and after a round answered at TTL 6 do not add up.
+func TestTrackerSilentRunRestartsBeyondANearerReply(t *testing.T) {
+	var tr Tracker
+	feed(&tr, round{target: one(5)}, 30, 30)
+	for i := 0; i < 5; i++ {
+		for j := 1; j < SilentMoveRounds; j++ {
+			feed(&tr, round{target: one(7)}, 7, 30)
+		}
+		feed(&tr, round{target: one(6, 7)}, 7, 30)
+	}
+	if tr.TTL() != 5 {
+		t.Errorf("TTL %d, want 5", tr.TTL())
+	}
+}
+
+// A UDP trace whose ICMP TTL probe takes a path one hop shorter, with nothing
+// answering the UDP probes at that hop: the target answers ICMP at TTL 8 and
+// every UDP flow at TTL 9. The trace's own flows decide: the destination is
+// TTL 9, not the TTL where only the ICMP probe arrives.
+func TestTrackerOwnFlowsDecideOverANearerAuxReply(t *testing.T) {
+	var tr Tracker
+	icmp := Flow{Kind: 1, Aux: true}
+	play := func(upTo int) {
+		for ttl := 8; ttl <= upTo; ttl++ {
+			tr.Target(icmp, ttl)
+			if ttl >= 9 {
+				for id := 0; id < 6; id++ {
+					tr.Target(Flow{Kind: 2, ID: id}, ttl)
+				}
+			}
+		}
+		tr.EndRound(upTo, 30)
+	}
+	play(30)
+	for i := 0; i < 5; i++ {
+		if tr.TTL() != 9 || tr.Reach() != 9 {
+			t.Fatalf("TTL %d Reach %d, want 9 and 9", tr.TTL(), tr.Reach())
+		}
+		play(9)
+	}
+	// A round in which only the ICMP probe is answered, at the destination's
+	// TTL, still finds the target: the tracer does not look further out.
+	tr.Target(icmp, 9)
+	tr.EndRound(9, 30)
+	if tr.TTL() != 9 || tr.Reach() != 9 {
+		t.Errorf("after a round answered by ICMP only: TTL %d Reach %d, want 9 and 9", tr.TTL(), tr.Reach())
+	}
+}
+
 // The same replies from the target without the routers are what loss at the
 // destination looks like: they do not move it in three rounds.
 func TestTrackerSilenceDoesNotMoveItInThreeRounds(t *testing.T) {

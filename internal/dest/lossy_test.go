@@ -62,7 +62,9 @@ type simResult struct {
 
 // simulate traces a stable path for the given rounds: routers answer every
 // probe below dist, and the target answers each of the flows probes sent with
-// a TTL of dist or more unless the model loses it.
+// a TTL of dist or more unless the model loses it. With one flow the trace is
+// an ICMP-mode one; with more, flow 0 is the ICMP TTL probe of a UDP or TCP
+// trace and the others are the trace's own flows.
 func simulate(m lossModel, dist, maxTTL, flows, rounds int) simResult {
 	var tr Tracker
 	var res simResult
@@ -78,6 +80,9 @@ func simulate(m lossModel, dist, maxTTL, flows, rounds int) simResult {
 		for ttl := 1; ttl <= to; ttl++ {
 			for id := 0; id < flows; id++ {
 				f := Flow{Kind: 1, ID: id}
+				if id == 0 {
+					f = Flow{Aux: true}
+				}
 				if ttl < dist {
 					tr.Router(f, ttl)
 				} else if !m.lost() {
@@ -107,7 +112,8 @@ func simulate(m lossModel, dist, maxTTL, flows, rounds int) simResult {
 
 // Once the destination is at the target's TTL it never leaves it, whatever
 // the loss: 5000 rounds a case, loss up to 90%, independent and in bursts,
-// one flow and seven, five seeds each. And it gets there: a first round that
+// one flow (ICMP mode) and seven (the ICMP TTL probe and six flows of a UDP
+// or TCP trace), five seeds each. And it gets there: a first round that
 // lost the probe at the target's TTL settles too far out, and the target's
 // later answers at its TTL bring the destination down.
 func TestLossyDestinationKeepsItsTTL(t *testing.T) {
