@@ -11,7 +11,9 @@
 
 </div>
 
-> This README describes the development version on `main`. For the latest release, see the [README at v0.2.1](https://github.com/tonhe/viaduct/blob/v0.2.1/README.md).
+> This README describes the development version on `main`. For the latest release, see the [README at v0.3.0](https://github.com/tonhe/viaduct/blob/v0.3.0/README.md).
+
+> **Windows.** The Windows builds and installers are published, and the test suite runs on Windows in CI, but v0.3.0 has had no live run on Windows. TCP mode (`-P tcp`) and the direct-echo probes behind rate-limit detection are untested there against a real network. Reports from Windows users are welcome ([#182](https://github.com/tonhe/viaduct/issues/182)).
 
 Traditional `traceroute` shows one path. Real networks aren't single paths — they're forests of parallel ECMP links, rate-limiting routers, and load balancers that return different answers every probe. `via` sees all of it.
 
@@ -116,6 +118,7 @@ via -r google.com
 |----------|---------------------------|--------|
 | Linux | the raw TCP socket the probes are sent on | Supported |
 | macOS | a packet capture (BPF) on the outgoing interface, because the macOS kernel does not hand TCP segments to raw sockets | Supported |
+| Windows | the raw TCP socket, with no Windows-specific handling | Not known: never run against a real network ([#182](https://github.com/tonhe/viaduct/issues/182)). If the destination shows as lost, use `-P udp` or `-P icmp` |
 | FreeBSD, OpenBSD, NetBSD | the raw TCP socket, which is not expected to receive them | Not supported: the destination shows as lost. Use `-P udp` or `-P icmp` |
 
 On macOS the capture needs a free `/dev/bpf*` device (one per target) and an interface type `via` knows: Ethernet, Wi-Fi, loopback and `utun`/`ipsec` tunnels. If it cannot be set up, `via` stops with an error that says why and suggests another mode, for example:
