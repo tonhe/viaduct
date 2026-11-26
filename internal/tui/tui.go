@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -1874,18 +1875,29 @@ func (m Model) countHopLines() int {
 	return count
 }
 
+// hostOS is the operating system the error view's advice is written for. A
+// variable so tests can pin it: the golden files are made for "linux" and
+// must come out the same on every platform the tests run on.
+var hostOS = runtime.GOOS
+
 func (m Model) errorView() string {
 	lines := []string{
 		lossStyle().Render("Error: " + m.err.Error()),
 		"",
 		"This tool requires raw socket permissions.",
 		"",
-		"Options:",
-		"  1. Run with sudo:  sudo via <target>",
-		"  2. Set capability: sudo setcap cap_net_raw+ep $(which via)",
-		"",
-		"Press q to quit.",
 	}
+	if hostOS == "linux" {
+		// File capabilities (setcap) exist on Linux only.
+		lines = append(lines,
+			"Options:",
+			"  1. Run with sudo:  sudo via <target>",
+			"  2. Set capability: sudo setcap cap_net_raw+ep $(which via)",
+		)
+	} else {
+		lines = append(lines, "Run with sudo:  sudo via <target>")
+	}
+	lines = append(lines, "", "Press q to quit.")
 	var b strings.Builder
 	for _, line := range lines {
 		b.WriteString(lineBg(line, m.width))
