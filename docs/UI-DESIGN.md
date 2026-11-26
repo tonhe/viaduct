@@ -140,10 +140,11 @@ The header, separator and status bar use the bar background. Everything between 
 
 ### Hop rows
 
-- A TTL with no reply is the hop number and `*`.
+- Every column starts at the same cell in every row and under its header. The tree connector has a column of its own, in the header too, so it never moves the columns after it; a row that needs more room cuts a cell's content instead. `TestRowAlignment_*` in `internal/tui/row_align_test.go` holds every view to this.
+- A TTL with no reply is the hop number and `*` in the IP column.
 - A hop with one responder is one row.
 - A divergent hop (more than one responder) is one row per node, most replies first. The hop number appears on the first row only, in `Base0D`. Loss%, Rnd, ASN, Delta and Trend appear on the first row only. The other rows show `-` or blank there, because a TTL-limited probe is addressed to a hop distance and its loss can't be attributed to one node.
-- How many nodes a divergent hop shows depends on height. Every TTL gets one row first. Spare rows are handed to divergent hops from the top down. Nodes that don't get a row are summarised as `... +N more paths`.
+- How many nodes a divergent hop shows depends on height. Every TTL gets one row first. Spare rows are handed to divergent hops from the top down. Nodes that don't get a row are summarised as `... +N more paths`, starting in the IP column.
 - An ASN cell is bold `Base0A` when its AS number differs from the previous responding hop's, and `Base03` otherwise.
 - The largest positive Delta in the table is amber.
 
@@ -154,7 +155,7 @@ Columns are joined by one space.
 | Column | Width |
 |---|---|
 | `#` | 3 |
-| tree | 4, present when more than one flow is probed |
+| tree | 4, present when more than one flow is probed or any hop is divergent |
 | `IP` | longest address shown, between 15 and 39 |
 | `Hostname` | 15, grows in steps of 10 |
 | `ASN` | longest label shown, at least 7 |
@@ -162,7 +163,7 @@ Columns are joined by one space.
 | `Rnd` | 5 |
 | `Avg` `Best` `Wrst` `StDev` `Last` `Delta` `GMean` `Jttr` `Javg` | 7 each |
 | `Spark` | 14 |
-| `Trend` | 9 |
+| `Trend` | 11 |
 
 `#`, `IP`, `Loss%`, `Avg` and `Spark` are reserved first. The remaining width is spent in a priority order that depends on the view:
 
