@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -886,8 +885,6 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 		tracer.SubmitEchoTargets(collectEchoTargets(table))
 	})
 
-	var maxTTLHit int32
-
 	collectorDone := make(chan struct{})
 	go func() {
 		defer close(collectorDone)
@@ -896,15 +893,7 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 			case <-ctx.Done():
 				return
 			case r := <-probeResults:
-				h := table.GetOrCreate(r.TTL)
-				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
-				if r.IsTarget {
-					h.MarkTarget(r.IP)
-					cur := atomic.LoadInt32(&maxTTLHit)
-					if cur == 0 || int32(r.TTL) < cur {
-						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
-					}
-				}
+				recordResult(table, r)
 				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
 					resolver.Submit(r.IP)
 				}
@@ -924,12 +913,26 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	<-collectorDone
 	debug.Final(table)
 
+	return table, resolver, enricher, pathMaxTTL(table), nil
+}
+
+// recordResult adds a probe result to the hop table: the sample, and who
+// answered it, from which the table tells the destination's TTL.
+func recordResult(table *hop.Table, r probe.Result) {
+	kind := probeKindFor(r.ProbeType)
+	table.GetOrCreate(r.TTL).AddSample(r.IP, r.RTT, r.FlowID, kind)
+	table.NoteReply(r.TTL, r.IP, r.FlowID, kind, r.IsTarget)
+}
+
+// pathMaxTTL is the last TTL a report shows: the destination's
+// (hop.Table.TargetTTL, the same one the TUI, the debug log and alerting
+// use), or the highest TTL seen while the target has not answered.
+func pathMaxTTL(table *hop.Table) int {
 	maxTTL := table.MaxTTLSeen()
-	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
+	if hit := table.TargetTTL(); hit > 0 && hit < maxTTL {
 		maxTTL = hit
 	}
-
-	return table, resolver, enricher, maxTTL, nil
+	return maxTTL
 }
 
 // probeKindFor maps a probe.ProbeType to the hop.ProbeKind slot that a
@@ -1010,9 +1013,6 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 		tracer.SubmitEchoTargets(collectEchoTargets(table))
 	})
 
-	// Track target hit for display (atomic for cross-goroutine safety)
-	var maxTTLHit int32
-
 	// Collect probe results in a goroutine
 	collectorDone := make(chan struct{})
 	go func() {
@@ -1022,15 +1022,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 			case <-ctx.Done():
 				return
 			case r := <-probeResults:
-				h := table.GetOrCreate(r.TTL)
-				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
-				if r.IsTarget {
-					h.MarkTarget(r.IP)
-					cur := atomic.LoadInt32(&maxTTLHit)
-					if cur == 0 || int32(r.TTL) < cur {
-						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
-					}
-				}
+				recordResult(table, r)
 				// Echo replies come from IPs we already know — skip DNS
 				// resubmission to save cache churn, matching the TUI path.
 				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
@@ -1055,10 +1047,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	<-collectorDone // wait for collector goroutine to exit
 	debug.Final(table)
 
-	maxTTL := table.MaxTTLSeen()
-	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
-		maxTTL = hit
-	}
+	maxTTL := pathMaxTTL(table)
 
 	if outputFmt != "" {
 		versionStr := displayVersion(version) + " (" + buildVersion + ")"
@@ -1072,7 +1061,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 			export.WriteDOT(os.Stdout, report)
 		}
 	} else {
-		printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName)
+		printReport(target, targetIP, table, resolver, enricher, table.TargetTTL(), cfg.NumPaths, protocolName)
 	}
 	return table, nil
 }

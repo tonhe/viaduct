@@ -553,9 +553,10 @@ const (
 	rateLimitZ = 2.58
 )
 
-// MarkTarget records that this node is the trace's destination. The mark
-// locates the destination's hop (Table.TargetTTL, EchoNodes); it has no part
-// in the rate-limit verdict, which judges the destination like any other hop.
+// MarkTarget records that this node is the trace's target, answering at this
+// TTL. The target can be marked at several TTLs; which of them is the
+// destination's hop is Table.TargetTTL's to say. The mark has no part in the
+// rate-limit verdict, which judges the destination like any other hop.
 func (pn *PathNode) MarkTarget() {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()

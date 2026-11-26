@@ -28,6 +28,7 @@ type AlertEngine struct {
 	affectedHop    int
 	affectedASN    string
 	disabled       bool
+	lastMaxTTL     int // the last TTL ObserveRound looked at in the previous round
 }
 
 // NewAlertEngine creates a new alert engine with the given thresholds.
@@ -83,11 +84,19 @@ func (e *AlertEngine) Update(destLoss float64, destLatency time.Duration) bool {
 
 // ObserveRound feeds a round that has just been closed to the engine: hops
 // are the table's hops, sentTo the TTLs probes were sent to in that round and
-// maxTTL the last TTL to look at. A nil engine (alerting off) does nothing.
+// maxTTL the last TTL to look at: the destination's, once known. A nil engine
+// (alerting off) does nothing.
 func (e *AlertEngine) ObserveRound(hops []*hop.Hop, sentTo map[int]bool, maxTTL int) {
 	if e == nil {
 		return
 	}
+	// The destination moved (hop.Table.TargetTTL): the bad rounds counted so
+	// far, and an alert raised from them, were about another hop. Start over
+	// at the new one, which is judged on its own figures.
+	if e.lastMaxTTL != 0 && maxTTL != e.lastMaxTTL {
+		e.Reset()
+	}
+	e.lastMaxTTL = maxTTL
 	hopMap := make(map[int]*hop.Hop, len(hops))
 	for _, h := range hops {
 		hopMap[h.TTL] = h

@@ -37,6 +37,7 @@ type RoundDebug struct {
 	last   time.Time // when the previous round closed
 	rounds int
 	alert  string // the text of the alert that is raised, "" when none is
+	dest   int    // the destination's TTL when the previous round closed, 0 while unknown
 	prev   map[int]roundCounts
 	// held is the periodic snapshot of the last round closed, not yet
 	// written: the next round's close writes it, Final drops it.
@@ -96,8 +97,9 @@ func NewReportDebug(logf func(format string, args ...any), target, protocol stri
 	return d
 }
 
-// CloseRound closes the round on every hop of table and returns the TTLs
-// probes were sent to in that round.
+// CloseRound closes the round on every hop of table and on the table itself,
+// which settles the destination's TTL, and returns the TTLs probes were sent
+// to in that round.
 func CloseRound(table *hop.Table) map[int]bool {
 	hops := table.Snapshot()
 	sentTo := make(map[int]bool, len(hops))
@@ -107,6 +109,7 @@ func CloseRound(table *hop.Table) map[int]bool {
 		}
 		h.MarkRoundEnd()
 	}
+	table.EndRound()
 	return sentTo
 }
 
@@ -177,8 +180,16 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 		byType(sum.icmpRecvd, sum.primaryRecvd, sum.echoRecvd),
 		silent, probed)
 
+	target := table.TargetTTL()
+	if d.dest != 0 && target != 0 && target != d.dest {
+		d.printf("round %d: destination moved from ttl=%d to ttl=%d", d.rounds, d.dest, target)
+	}
+	if target != 0 {
+		d.dest = target
+	}
+
 	if d.drive {
-		d.engine.ObserveRound(hops, sentTo, alertMaxTTL(table, table.TargetTTL()))
+		d.engine.ObserveRound(hops, sentTo, alertMaxTTL(table, target))
 	}
 	d.logAlert()
 
