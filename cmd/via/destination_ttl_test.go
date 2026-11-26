@@ -119,11 +119,11 @@ func (l *lineSink) logf(format string, args ...any) {
 
 func scriptRouter(ttl int) string { return fmt.Sprintf("198.51.100.%d", ttl) }
 
-// strayScript: ICMP mode, routers at TTL 1 to 4, TTL 5 to 8 silent, the
-// target at TTL 9. In round one a probe sent with TTL 6 reaches the target
-// too. Round one probes TTL 1 to 12; the target's replies run unbroken from
-// TTL 9, so the tracer probes up to TTL 9 from round two on, as probe.Tracer
-// does.
+// strayScript: ICMP mode, routers at TTL 1 to 8, the target at TTL 9. In
+// round one the probe sent with TTL 6 reaches the target, not the router.
+// Round one probes TTL 1 to 12; the routers that answer at TTL 7 and 8 place
+// the destination beyond them, so the tracer probes up to TTL 9 from round
+// two on, as probe.Tracer does.
 func strayScript(rounds int) [][]scriptedProbe {
 	var out [][]scriptedProbe
 	for r := 0; r < rounds; r++ {
@@ -133,11 +133,8 @@ func strayScript(rounds int) [][]scriptedProbe {
 		}
 		var round []scriptedProbe
 		for ttl := 1; ttl <= upTo; ttl++ {
-			p := scriptedProbe{ttl: ttl, pt: probe.ProbeICMPTTL}
-			switch {
-			case ttl <= 4:
-				p.from = scriptRouter(ttl)
-			case ttl >= 9, r == 0 && ttl == 6:
+			p := scriptedProbe{ttl: ttl, pt: probe.ProbeICMPTTL, from: scriptRouter(ttl)}
+			if ttl >= 9 || (r == 0 && ttl == 6) {
 				p.from = scriptTarget
 			}
 			round = append(round, p)
@@ -277,9 +274,79 @@ func TestRunReport_StrayReplyDoesNotPinTheDestination(t *testing.T) {
 			if n := last.Nodes[0]; n.RateLimited == "yes" || last.LossKind == "rate_limited" {
 				t.Errorf("JSON: destination rate_limited %q, loss_kind %q; want not rate-limited", n.RateLimited, last.LossKind)
 			}
-			// TTL 6 is an ordinary hop that lists the target.
-			if h6 := report.Hops[5]; h6.ProbesSent != rounds || h6.ProbesReceived != 1 {
-				t.Errorf("JSON: TTL 6 sent/received = %d/%d, want %d/1", h6.ProbesSent, h6.ProbesReceived, rounds)
+			// TTL 6 is an ordinary hop that lists the target beside its router.
+			h6 := report.Hops[5]
+			listed := false
+			for _, n := range h6.Nodes {
+				listed = listed || n.IP == scriptTarget
+			}
+			if h6.ProbesSent != rounds || h6.ProbesReceived != rounds || len(h6.Nodes) != 2 || !listed {
+				t.Errorf("JSON: TTL 6 sent/received = %d/%d with nodes %+v, want %d/%d, the router and the target", h6.ProbesSent, h6.ProbesReceived, h6.Nodes, rounds, rounds)
+			}
+		})
+	}
+}
+
+// A reply lost in round one is not a path change. ICMP mode, one flow, a
+// stable path with the target at TTL 10; round one probes every TTL and the
+// reply to the probe sent with TTL 11 is lost. A three-round report has ten
+// rows and ends on the target with no loss.
+func TestRunReport_LostReplyInRoundOneDoesNotMoveTheDestination(t *testing.T) {
+	const rounds = 3
+	var script [][]scriptedProbe
+	for r := 0; r < rounds; r++ {
+		upTo := 10
+		if r == 0 {
+			upTo = 30
+		}
+		var round []scriptedProbe
+		for ttl := 1; ttl <= upTo; ttl++ {
+			p := scriptedProbe{ttl: ttl, pt: probe.ProbeICMPTTL, from: scriptRouter(ttl)}
+			if ttl >= 10 {
+				p.from = scriptTarget
+			}
+			if ttl == 11 {
+				p.from = ""
+			}
+			round = append(round, p)
+		}
+		script = append(script, round)
+	}
+	for _, format := range []string{"json", ""} {
+		t.Run("format="+format, func(t *testing.T) {
+			installScript(t, script)
+			sink := &lineSink{}
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, sink), "icmp", true, format)
+			})
+			if runErr != nil {
+				t.Fatalf("runReport: %v", runErr)
+			}
+			if got := debugDestination(t, sink.lines); got != 10 {
+				t.Errorf("debug log: destination at TTL %d, want 10", got)
+			}
+			if format == "" {
+				rows := textRows(out)
+				if len(rows) != 10 {
+					t.Fatalf("text report has %d hop rows, want 10:\n%s", len(rows), out)
+				}
+				if !strings.Contains(rows[10], scriptTarget+" ") || !strings.Contains(rows[10], " 0.0% ") {
+					t.Errorf("text report: destination row = %q, want the target with 0.0%% loss", rows[10])
+				}
+				return
+			}
+			var report export.Report
+			if err := json.Unmarshal([]byte(out), &report); err != nil {
+				t.Fatalf("JSON: %v\n%s", err, out)
+			}
+			if len(report.Hops) != 10 {
+				t.Fatalf("JSON: %d hops, want 10 (the destination at TTL 10)", len(report.Hops))
+			}
+			last := report.Hops[9]
+			if last.ProbesSent != rounds || last.ProbesReceived != rounds || last.HeadlineLoss != 0 {
+				t.Errorf("JSON: destination sent/received %d/%d, headline %.1f; want %d/%d and no loss",
+					last.ProbesSent, last.ProbesReceived, last.HeadlineLoss, rounds, rounds)
 			}
 		})
 	}

@@ -43,60 +43,58 @@ func TestTrackerFirstRoundSettlesAtOnce(t *testing.T) {
 	}
 }
 
-// viaduct#234, first case: one flow, and one reply from the target at TTL 21
-// in a run where it otherwise answers at TTL 25. The hops between are silent.
-func TestTrackerStrayReplyInTheFirstRound(t *testing.T) {
-	var tr Tracker
-	// The first round probes every TTL: the target's replies run unbroken
-	// from TTL 25 to the top, and the one at TTL 21 is a stray. The
-	// destination is TTL 25 at once.
-	feed(&tr, round{target: one(21, 25, 26, 27, 28, 29, 30)}, 30, 30)
-	if tr.TTL() != 25 || tr.Reach() != 25 {
-		t.Fatalf("after round 1: TTL %d Reach %d, want 25 and 25", tr.TTL(), tr.Reach())
-	}
-	for i := 0; i < 5; i++ {
-		feed(&tr, round{target: one(25)}, 25, 30)
-		if tr.TTL() != 25 || tr.Reach() != 25 {
-			t.Fatalf("TTL %d Reach %d, want 25 and 25", tr.TTL(), tr.Reach())
+// A reply lost in round one is not a path change. One flow, the target at
+// TTL 10: the replies to the probes at TTL 11, or at TTL 11 and 12, are lost,
+// so the target's replies have a gap above the lowest. The destination is
+// the lowest TTL the target answered at, as on a clean round.
+func TestTrackerLostReplyInRoundOneDoesNotMoveTheFirstSettle(t *testing.T) {
+	upFrom := func(first int, more ...int) []int {
+		ttls := append([]int{first}, more...)
+		for ttl := ttls[len(ttls)-1] + 1; ttl <= 30; ttl++ {
+			ttls = append(ttls, ttl)
 		}
+		return ttls
 	}
-}
-
-// What the first round settles on, by the target's replies in it.
-func TestTrackerFirstSettle(t *testing.T) {
-	seven := func(ttls ...int) map[int][]int { // seven flows answered at each TTL
+	seven := func(ttls []int) map[int][]int { // seven flows, one of them answered at TTL 10
 		m := map[int][]int{}
 		for f := 0; f < 7; f++ {
-			m[f] = ttls
+			m[f] = ttls[1:]
 		}
+		m[3] = ttls
 		return m
 	}
-	strayOfSeven := seven(25, 26, 27, 28, 29, 30)
-	strayOfSeven[3] = append([]int{21}, strayOfSeven[3]...)
 	for _, tc := range []struct {
 		name   string
 		target map[int][]int
-		want   int
 	}{
-		{"an unbroken run", one(5, 6, 7, 8), 5},
-		{"one reply below a gap", one(21, 25, 26, 27, 28, 29, 30), 25},
-		{"one reply of one flow below a gap, seven flows", strayOfSeven, 25},
-		{"two replies below the gap are not a stray", one(20, 21, 25, 26, 27, 28, 29, 30), 20},
-		{"two replies at one TTL below the gap are not a stray", map[int][]int{0: {21, 25, 26}, 1: {21, 25, 26}}, 21},
-		{"a run of one TTL above is not enough", one(21, 30), 21},
-		{"a lossy round: replies here and there", one(10, 12, 13, 17, 19, 20), 10},
-		{"a lossy round that ends on a run", one(10, 12, 15, 16, 17), 10},
-		{"a single reply", one(9), 9},
+		{"one lost reply", one(upFrom(10, 12)...)},
+		{"two adjacent lost replies", one(upFrom(10, 13)...)},
+		{"four lost replies", one(upFrom(10, 15)...)},
+		{"lost replies here and there", one(10, 12, 13, 17, 19, 20)},
+		{"seven flows, six lose their reply at TTL 10 and all lose TTL 11", seven(upFrom(10, 12))},
 	} {
 		var tr Tracker
-		feed(&tr, round{target: tc.target, routers: one(1, 2, 3)}, 30, 30)
-		if tr.TTL() != tc.want {
-			t.Errorf("%s: TTL %d, want %d", tc.name, tr.TTL(), tc.want)
+		feed(&tr, round{target: tc.target, routers: one(1, 2, 3, 4, 5, 6, 7, 8, 9)}, 30, 30)
+		if tr.TTL() != 10 || tr.Reach() != 10 {
+			t.Errorf("%s: TTL %d Reach %d, want 10 and 10", tc.name, tr.TTL(), tr.Reach())
 		}
 	}
 }
 
-// A first round that settled too low (a stray below a run of one TTL): the
+// viaduct#234, first case, with routers that answer: one reply from the
+// target at TTL 21 in a round where it otherwise answers from TTL 25, and
+// routers answer at TTL 22 to 24. The routers place the destination beyond
+// them: TTL 25 when the round closes.
+func TestTrackerStrayReplyBelowRoutersThatAnswer(t *testing.T) {
+	var tr Tracker
+	feed(&tr, round{target: one(21, 25, 26, 27, 28, 29, 30), routers: one(19, 20, 22, 23, 24)}, 30, 30)
+	if tr.TTL() != 25 || tr.Reach() != 25 {
+		t.Fatalf("after round 1: TTL %d Reach %d, want 25 and 25", tr.TTL(), tr.Reach())
+	}
+}
+
+// A first round that settled too low (a stray reply, with nothing answering
+// between it and the target's distance, which looks like lost replies): the
 // target never answers there again. The tracker looks one TTL further each
 // round until it finds the target, and the destination follows after
 // SilentMoveRounds rounds answered there: silence at the old TTL is weak
@@ -359,37 +357,39 @@ func TestTrackerSilentRunRestartsBeyondANearerReply(t *testing.T) {
 	}
 }
 
-// A UDP trace whose ICMP TTL probe takes a path one hop shorter, with nothing
-// answering the UDP probes at that hop: the target answers ICMP at TTL 8 and
-// every UDP flow at TTL 9. The trace's own flows decide: the destination is
-// TTL 9, not the TTL where only the ICMP probe arrives.
-func TestTrackerOwnFlowsDecideOverANearerAuxReply(t *testing.T) {
-	var tr Tracker
+// A UDP trace in which the target answers the ICMP TTL probe at TTL 8 and
+// the UDP flows from TTL 9. With a router answering the UDP probes at TTL 8,
+// the destination is TTL 9. With nothing answering them there, it is TTL 8:
+// six unanswered probes are what six lost or throttled replies look like, and
+// only replies are evidence.
+func TestTrackerAuxReplyNearerThanTheOwnFlows(t *testing.T) {
 	icmp := Flow{Kind: 1, Aux: true}
-	play := func(upTo int) {
-		for ttl := 8; ttl <= upTo; ttl++ {
-			tr.Target(icmp, ttl)
-			if ttl >= 9 {
+	for _, tc := range []struct {
+		name   string
+		router bool
+		want   int
+	}{
+		{"a router answers the flows at TTL 8", true, 9},
+		{"nothing answers the flows at TTL 8", false, 8},
+	} {
+		var tr Tracker
+		for round, upTo := 0, 30; round < 5; round, upTo = round+1, tr.Reach() {
+			for ttl := 8; ttl <= upTo; ttl++ {
+				tr.Target(icmp, ttl)
 				for id := 0; id < 6; id++ {
-					tr.Target(Flow{Kind: 2, ID: id}, ttl)
+					switch {
+					case ttl >= 9:
+						tr.Target(Flow{Kind: 2, ID: id}, ttl)
+					case tc.router:
+						tr.Router(Flow{Kind: 2, ID: id}, ttl)
+					}
 				}
 			}
+			tr.EndRound(upTo, 30)
+			if tr.TTL() != tc.want || tr.Reach() != tc.want {
+				t.Fatalf("%s, round %d: TTL %d Reach %d, want %d and %d", tc.name, round+1, tr.TTL(), tr.Reach(), tc.want, tc.want)
+			}
 		}
-		tr.EndRound(upTo, 30)
-	}
-	play(30)
-	for i := 0; i < 5; i++ {
-		if tr.TTL() != 9 || tr.Reach() != 9 {
-			t.Fatalf("TTL %d Reach %d, want 9 and 9", tr.TTL(), tr.Reach())
-		}
-		play(9)
-	}
-	// A round in which only the ICMP probe is answered, at the destination's
-	// TTL, still finds the target: the tracer does not look further out.
-	tr.Target(icmp, 9)
-	tr.EndRound(9, 30)
-	if tr.TTL() != 9 || tr.Reach() != 9 {
-		t.Errorf("after a round answered by ICMP only: TTL %d Reach %d, want 9 and 9", tr.TTL(), tr.Reach())
 	}
 }
 

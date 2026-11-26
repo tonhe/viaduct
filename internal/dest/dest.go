@@ -63,18 +63,20 @@ type Flow struct {
 // load-balanced paths of unequal length the target is the hop for the whole
 // trace only where every flow that reaches it has reached it. A flow the
 // target has never answered (ICMP probes to a host that ignores them, say)
-// has no say. Neither has the ICMP TTL probe (Flow.Aux) once the target has
-// answered a flow of the trace's own protocol: where the UDP or TCP flows all
-// reach the target is the destination of a UDP or TCP trace, even if ICMP
-// takes a longer path, or a shorter one. The target's replies to the ICMP
-// probe count only in a round in which it answered none of the trace's own
-// flows.
+// has no say. Neither has a router that answers the ICMP TTL probe (Flow.Aux)
+// once the target has answered a flow of the trace's own protocol: where the
+// UDP or TCP flows all reach the target is the destination of a UDP or TCP
+// trace, even if ICMP takes a longer path. Only replies are evidence; a probe
+// that went unanswered is not, because a lost reply, a throttled one and a
+// hop that answers nothing look the same.
 //
 // The first round that finds the target settles the destination at once, on
-// its candidate. One exception: when all but one of the target's replies in
-// that round form an unbroken run of TTLs up to the highest, and that one
-// reply lies below a gap, the reply is a stray (a probe that took a shorter
-// path once) and the destination is where the run starts.
+// its candidate. Gaps in the target's replies above it mean nothing: a lost
+// reply and a hop that answers nothing look the same. A stray reply in that
+// round (a probe that took a shorter path once) is left out when routers
+// answer between it and the target's distance; when nothing answers there,
+// the destination settles on the stray and moves up on the target's replies
+// alone, the slow way below.
 //
 // After that the destination moves only on a run of rounds that point the
 // same way. A round with the candidate at the destination's TTL ends a run; a
@@ -100,7 +102,7 @@ type Tracker struct {
 	known map[Flow]bool
 
 	// The round being collected.
-	answered []reply      // each reply from the target
+	answered []int        // the TTL of each reply from the target
 	routers  map[Flow]int // per flow, the highest TTL at which another node answered
 
 	// The run of rounds pointing away from ttl.
@@ -113,13 +115,6 @@ type Tracker struct {
 	silent map[int]int
 }
 
-// reply is one reply from the target: the TTL of the probe it answered, and
-// whether that was the ICMP TTL probe (Flow.Aux).
-type reply struct {
-	ttl int
-	aux bool
-}
-
 // Target records that the target answered a TTL-limited probe of flow f sent
 // with ttl.
 func (t *Tracker) Target(f Flow, ttl int) {
@@ -128,7 +123,7 @@ func (t *Tracker) Target(f Flow, ttl int) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.answered = append(t.answered, reply{ttl, f.Aux})
+	t.answered = append(t.answered, ttl)
 	if t.known == nil {
 		t.known = make(map[Flow]bool)
 	}
@@ -169,24 +164,14 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 			router = ttl
 		}
 	}
-	// The target's replies beyond it, by TTL, and the round's candidate: the
-	// lowest of those TTLs. Where the target answered the trace's own flows
-	// in this round, they decide and its replies to the ICMP TTL probe are
-	// left out, as that probe's routers are: ICMP may take a shorter path
-	// too. A round in which only the ICMP probe was answered still finds the
-	// target.
-	ownReplied := false
-	for _, r := range t.answered {
-		ownReplied = ownReplied || (!r.aux && r.ttl > router)
-	}
-	replies := make(map[int]int)
+	// The round's candidate: the lowest TTL beyond it at which the target
+	// answered any probe. Probes that went unanswered below the candidate's
+	// TTL or at it say nothing: a lost reply, a throttled one and a hop that
+	// answers nothing look the same.
 	c := 0
-	for _, r := range t.answered {
-		if r.ttl > router && !(r.aux && ownReplied) {
-			replies[r.ttl]++
-			if c == 0 || r.ttl < c {
-				c = r.ttl
-			}
+	for _, ttl := range t.answered {
+		if ttl > router && (c == 0 || ttl < c) {
+			c = ttl
 		}
 	}
 	t.answered, t.routers = t.answered[:0], nil
@@ -195,7 +180,7 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 	case c == 0:
 		// The target was not found: no evidence about where it is.
 	case t.ttl == 0:
-		t.ttl = firstSettle(c, replies)
+		t.ttl = c
 	case c == t.ttl:
 		t.dir = 0
 	case c < t.ttl:
@@ -261,40 +246,6 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 			t.reach = maxTTL
 		}
 	}
-}
-
-// firstSettle is where the first round that found the target puts the
-// destination: on the round's candidate c, or, when the reply at c is a
-// stray, where the target's other replies start. replies holds the number of
-// replies from the target at each TTL.
-//
-// The round probes every TTL, and the target answers each probe that reaches
-// it, so its replies run unbroken from its distance to the highest TTL
-// probed. A single reply below a gap, with at least two TTLs of replies in
-// the run above, is one probe that reached the target by a shorter path.
-// Settling on it would leave the destination row on a TTL the target does not
-// answer at until SilentMoveRounds rounds had moved it.
-func firstSettle(c int, replies map[int]int) int {
-	top := 0
-	for ttl := range replies {
-		if ttl > top {
-			top = ttl
-		}
-	}
-	start := top
-	for replies[start-1] > 0 {
-		start--
-	}
-	below := 0
-	for ttl, n := range replies {
-		if ttl < start {
-			below += n
-		}
-	}
-	if below == 1 && top > start {
-		return start
-	}
-	return c
 }
 
 // TTL returns the destination's TTL, or 0 while no round has found the

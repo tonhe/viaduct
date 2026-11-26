@@ -153,3 +153,50 @@ func TestLossyDestinationKeepsItsTTL(t *testing.T) {
 		}
 	}
 }
+
+// The first round settles the destination on the lowest TTL the target
+// answered at, whatever replies were lost above it: 5000 first rounds a case,
+// independent loss from 5% to 90%, one flow and seven. A gap in the target's
+// replies is never read as a longer path (the bound is none at all), so a
+// short report on a lossy path does not end rows beyond the target.
+func TestFirstRoundSettlesOnTheLowestAnsweredTTL(t *testing.T) {
+	const dist, maxTTL, rounds = 10, 30, 5000
+	for _, flows := range []int{1, 7} {
+		for _, p := range []float64{0.05, 0.1, 0.3, 0.5, 0.7, 0.9} {
+			r := rand.New(rand.NewSource(1))
+			found, above := 0, 0
+			for i := 0; i < rounds; i++ {
+				var tr Tracker
+				lowest := 0
+				for ttl := 1; ttl <= maxTTL; ttl++ {
+					for id := 0; id < flows; id++ {
+						f := Flow{Kind: 1, ID: id}
+						if id == 0 {
+							f = Flow{Aux: true}
+						}
+						switch {
+						case ttl < dist:
+							tr.Router(f, ttl)
+						case r.Float64() >= p:
+							tr.Target(f, ttl)
+							if lowest == 0 {
+								lowest = ttl
+							}
+						}
+					}
+				}
+				tr.EndRound(maxTTL, maxTTL)
+				if lowest != 0 {
+					found++
+				}
+				if tr.TTL() != lowest {
+					above++
+				}
+			}
+			t.Logf("p=%.2f, %d flows: %d of %d first rounds found the target; first settle away from the lowest answered TTL in %d", p, flows, found, rounds, above)
+			if above != 0 {
+				t.Errorf("p=%.2f, %d flows: the first settle was not the lowest TTL the target answered at in %d of %d first rounds, want 0", p, flows, above, rounds)
+			}
+		}
+	}
+}

@@ -113,17 +113,19 @@ func runAnswered(t *testing.T, rounds int, answer func(round, ttl int) bool) []i
 // viaduct#234: one reply from the target at TTL 4 in the first round, in a
 // run where it otherwise answers at TTL 7. The cap on the send loop was set
 // by that first reply, the first to arrive, and never changed, so the
-// destination's own TTL was not probed again. Now the round's replies settle
-// it when the round closes: they run unbroken from TTL 7, and the one at
-// TTL 4 is a stray.
-func TestRun_StrayReplyInRoundOneDoesNotSetTheCap(t *testing.T) {
-	got := runAnswered(t, 5, func(round, ttl int) bool {
+// destination's own TTL was not probed again. Nothing answers between TTL 4
+// and TTL 7 here, so round one still settles on TTL 4 (a gap in the target's
+// replies is what lost replies look like), but the tracer now looks one TTL
+// further each round the target does not answer, finds it at TTL 7 and keeps
+// probing it there.
+func TestRun_StrayReplyInRoundOneDoesNotPinTheCap(t *testing.T) {
+	got := runAnswered(t, 8, func(round, ttl int) bool {
 		if round == 0 && ttl == 4 {
 			return true
 		}
 		return ttl >= 7
 	})
-	want := []int{10, 7, 7, 7, 7}
+	want := []int{10, 4, 5, 6, 7, 7, 7, 7}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("highest TTL probed per round = %v, want %v", got, want)
 	}

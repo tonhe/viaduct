@@ -203,16 +203,34 @@ func TestDestination_StrayReplyBelowTheUsualDistance(t *testing.T) {
 		s.round(ps)
 	}
 
-	// The first round probes every TTL. The target's replies run unbroken
-	// from TTL 25 up; the one at TTL 21 stands alone below a gap and is taken
-	// for the stray it is: the destination is TTL 25 when the round closes.
+	// The first round probes every TTL and settles on the lowest TTL the
+	// target answered at. Nothing answers between TTL 21 and TTL 25, and a
+	// gap in the target's replies is what lost replies look like, so that is
+	// TTL 21.
 	icmpRound(30, 21)
+	s.wantDestination(21)
+	// The tracer looks one TTL further each round the target is silent.
+	for upTo := 21; upTo <= 24; upTo++ {
+		icmpRound(upTo, 0)
+		s.wantDestination(21)
+	}
+	// It finds the target at TTL 25. The target silent at the destination's
+	// TTL and answering beyond it is also what loss looks like, so the row
+	// follows after dest.SilentMoveRounds rounds answered there: round 29.
+	for i := 1; i < dest.SilentMoveRounds; i++ {
+		icmpRound(25, 0)
+		s.wantDestination(21)
+	}
+	icmpRound(25, 0)
 	s.wantDestination(25)
+	if s.rounds != 5+dest.SilentMoveRounds {
+		t.Fatalf("fixture: the move came in round %d, want %d", s.rounds, 5+dest.SilentMoveRounds)
+	}
 
-	for s.rounds < 40 {
-		// Strays in later rounds, two rounds in a row: no move either.
+	for s.rounds < 60 {
+		// Strays in later rounds, two rounds in a row: no move back.
 		stray := 0
-		if s.rounds == 10 || s.rounds == 11 {
+		if s.rounds == 40 || s.rounds == 41 {
 			stray = 21
 		}
 		icmpRound(25, stray)
@@ -235,11 +253,39 @@ func TestDestination_StrayReplyBelowTheUsualDistance(t *testing.T) {
 		t.Errorf("export destination hop = %+v, want the target with 0%% measured loss", last)
 	}
 
-	// TTL 21 is an ordinary hop that lists the target: three answers in 40
+	// TTL 21 is an ordinary hop that lists the target: three answers in 60
 	// rounds. It is not the destination and is judged on its own.
 	h21 := s.sess().table.Get(21)
-	if sent, recvd := h21.ProbeCounts(); sent != 40 || recvd != 3 {
-		t.Errorf("TTL 21: probes sent/received = %d/%d, want 40/3", sent, recvd)
+	if sent, recvd := h21.ProbeCounts(); sent != 60 || recvd != 3 {
+		t.Errorf("TTL 21: probes sent/received = %d/%d, want 60/3", sent, recvd)
+	}
+}
+
+// The same stray reply on a path whose routers answer: TTL 1 to 24 are
+// routers, the target is at TTL 25, and in round one the probe sent with
+// TTL 21 reaches the target. The routers that answer at TTL 22 to 24 place
+// the destination beyond them: TTL 25 when round one closes, and in every
+// round after.
+func TestDestination_StrayReplyBelowRoutersThatAnswer(t *testing.T) {
+	s := newDestSim(t)
+	for s.rounds < 5 {
+		upTo := 25
+		if s.rounds == 0 {
+			upTo = 30
+		}
+		var ps []simProbe
+		for ttl := 1; ttl <= upTo; ttl++ {
+			p := simProbe{ttl: ttl, pt: probe.ProbeICMPTTL, from: router(ttl)}
+			if ttl >= 25 || (s.rounds == 0 && ttl == 21) {
+				p.from = destSimTarget
+			}
+			ps = append(ps, p)
+		}
+		s.round(ps)
+		s.wantDestination(25)
+	}
+	if moved := s.log.containing("destination moved"); len(moved) != 0 {
+		t.Errorf("debug log: %q, want no move", moved)
 	}
 }
 
