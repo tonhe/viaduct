@@ -20,7 +20,7 @@ func (t *Tracer) noteDestinationReply(rec probeRecord, isTarget bool) {
 	if rec.probeType == ProbeICMPEcho {
 		return
 	}
-	f := dest.Flow{Kind: int(rec.probeType), ID: rec.flowID}
+	f := dest.Flow{Kind: int(rec.probeType), ID: rec.flowID, Aux: rec.probeType == ProbeICMPTTL}
 	if isTarget {
 		t.dest.Target(f, rec.ttl)
 	} else {

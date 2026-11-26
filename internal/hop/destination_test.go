@@ -95,6 +95,31 @@ func TestTargetTTL_FlowsOfUnequalPathLength(t *testing.T) {
 	}
 }
 
+// A UDP trace whose ICMP TTL probe takes a path one hop longer than its UDP
+// flows: both flows reach the target at TTL 9, where a router answers the
+// ICMP probe, and the target answers that probe at TTL 10. The destination
+// is TTL 9: the trace's own flows decide, and the row ends on the target.
+func TestTargetTTL_ICMPProbeOnALongerPathThanTheFlows(t *testing.T) {
+	tbl := NewTable(30)
+	for round := 0; round < 5; round++ {
+		noteReply(tbl, 9, destRouter, 0, KindICMPTTL)
+		noteReply(tbl, 9, destTarget, 0, KindPrimary)
+		noteReply(tbl, 9, destTarget, 1, KindPrimary)
+		if round == 0 {
+			noteReply(tbl, 10, destTarget, 0, KindICMPTTL)
+			noteReply(tbl, 10, destTarget, 0, KindPrimary)
+			noteReply(tbl, 10, destTarget, 1, KindPrimary)
+		}
+		tbl.EndRound()
+		if got := tbl.TargetTTL(); got != 9 {
+			t.Fatalf("round %d: TargetTTL = %d, want 9", round+1, got)
+		}
+	}
+	if pn := tbl.Get(9).PrimaryNode(); pn == nil || !pn.GetIP().Equal(destTarget) {
+		t.Error("TTL 9: the headline node is not the target")
+	}
+}
+
 // The destination moves down when the target answers at a lower TTL, with
 // no router there, for dest.MoveRounds rounds in a row; and back up the same
 // way.

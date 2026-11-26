@@ -133,6 +133,51 @@ func TestTrackerFlowTheTargetNeverAnswersIsIgnored(t *testing.T) {
 	}
 }
 
+// A UDP trace whose ICMP TTL probe takes a path one hop longer: every UDP
+// flow reaches the target at TTL 9, a router answers the ICMP probe there and
+// the target answers it at TTL 10. The destination is TTL 9, where the
+// trace's own flows all arrive.
+func TestTrackerAuxFlowDoesNotOutvoteTheTracesOwnFlows(t *testing.T) {
+	var tr Tracker
+	icmp := Flow{Kind: 1, Aux: true}
+	play := func(upTo int) {
+		tr.Router(icmp, 9)
+		for ttl := 9; ttl <= upTo; ttl++ {
+			for id := 0; id < 6; id++ {
+				tr.Target(Flow{Kind: 2, ID: id}, ttl)
+			}
+			if ttl >= 10 {
+				tr.Target(icmp, ttl)
+			}
+		}
+		tr.EndRound(upTo, 30)
+	}
+	play(30)
+	for i := 0; i < 5; i++ {
+		if tr.TTL() != 9 || tr.Reach() != 9 {
+			t.Fatalf("TTL %d Reach %d, want 9 and 9", tr.TTL(), tr.Reach())
+		}
+		play(9)
+	}
+}
+
+// When the target answers nothing but the ICMP TTL probe (ICMP mode, or a
+// host that drops UDP without an error), that probe decides: a router that
+// answers it at a TTL where the target answered once holds the destination
+// beyond.
+func TestTrackerAuxFlowDecidesWhenItIsTheOnlyOneAnswered(t *testing.T) {
+	var tr Tracker
+	icmp := Flow{Kind: 1, Aux: true}
+	tr.Target(icmp, 8)
+	tr.Router(icmp, 8)
+	tr.Target(icmp, 9)
+	tr.Router(Flow{Kind: 2}, 9) // a UDP flow the target never answers
+	tr.EndRound(30, 30)
+	if tr.TTL() != 9 {
+		t.Errorf("TTL %d, want 9", tr.TTL())
+	}
+}
+
 // The path gets longer for some flows: routers now answer them at the TTL
 // that was the destination's. The tracker probes past those routers at once
 // and the destination moves after MoveRounds rounds.

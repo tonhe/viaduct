@@ -23,9 +23,13 @@ const MoveRounds = 3
 
 // Flow identifies one stream of TTL-limited probes that routers forward
 // alike: a probe type and, where the type sends several, the flow's number.
+//
+// Aux marks the ICMP TTL probe: in a UDP or TCP trace it is sent beside the
+// trace's own flows, and routers may forward it along another path.
 type Flow struct {
 	Kind int
 	ID   int
+	Aux  bool
 }
 
 // Tracker follows the destination's TTL over the rounds of one trace. The
@@ -37,9 +41,12 @@ type Flow struct {
 // even if the target answers other flows there: with load-balanced paths of
 // unequal length the target is the hop for the whole trace only where every
 // flow that reaches it has reached it. A flow the target has never answered
-// (ICMP probes to a host that ignores them, say) has no say. Silence is not
-// evidence either: a TTL where the target answers and nothing else does is a
-// candidate even if some probes there went unanswered.
+// (ICMP probes to a host that ignores them, say) has no say. Neither has the
+// ICMP TTL probe (Flow.Aux) once the target has answered a flow of the
+// trace's own protocol: where the UDP or TCP flows all reach the target is
+// the destination of a UDP or TCP trace, even if ICMP takes a longer path.
+// Silence is not evidence either: a TTL where the target answers and nothing
+// else does is a candidate even if some probes there went unanswered.
 //
 // The first round that finds the target settles the destination at once.
 // After that it moves, up or down, only when MoveRounds consecutive rounds
@@ -104,9 +111,13 @@ func (t *Tracker) EndRound(probedTo, maxTTL int) {
 
 	// The highest TTL at which a router answered a flow that reaches the
 	// target: the destination lies beyond it.
+	own := false // the target answers a flow of the trace's own protocol
+	for f := range t.known {
+		own = own || !f.Aux
+	}
 	router := 0
 	for f, ttl := range t.routers {
-		if t.known[f] && ttl > router {
+		if t.known[f] && !(f.Aux && own) && ttl > router {
 			router = ttl
 		}
 	}

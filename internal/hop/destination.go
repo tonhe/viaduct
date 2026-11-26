@@ -22,7 +22,7 @@ func (t *Table) NoteReply(ttl int, ip net.IP, flowID int, kind ProbeKind, isTarg
 	if kind == KindEcho {
 		return
 	}
-	f := dest.Flow{Kind: int(kind), ID: flowID}
+	f := dest.Flow{Kind: int(kind), ID: flowID, Aux: kind == KindICMPTTL}
 	if isTarget {
 		t.dest.Target(f, ttl)
 	} else {
