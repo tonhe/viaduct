@@ -142,7 +142,7 @@ With `--debug-log` the tracer writes where replies are read from (on macOS: the 
 
 **The figure shown.** `Hop.Loss` returns the figure every view shows and its kind: echo loss for a rate-limited hop (`~N%†`), TTL-probe loss marked provisional while the verdict is undetermined and there is loss (`N%?`), and plain TTL-probe loss otherwise. `hop.FormatLoss` renders it. Alerting uses `Hop.SettledLoss`, which counts provisional loss as none.
 
-**Hops beyond the destination.** Round one probes every TTL, so the destination is recorded at its own TTL and at every TTL beyond; those entries never update again. `Table.TargetTTL` gives the destination's distance, `Table.EchoNodes` stops there, and views and exports read nothing past it.
+**Hops beyond the destination.** Round one probes every TTL, so the destination is recorded at its own TTL and at every TTL beyond; those entries never update again. `Table.TargetTTL` gives the destination's distance, `Table.EchoNodes` stops there, and views and exports read nothing past it. The debug log's hop lines are the exception: they list those entries, marked `beyond=yes`.
 
 **Sparkline samples.** At each round end a node records one sample: its average RTT that round if a TTL-limited probe was answered, else the echo RTT if an echo was answered, else a "held" marker if the node is rate-limited and wasn't echoed that round, else a drop. The last 28 samples are kept.
 

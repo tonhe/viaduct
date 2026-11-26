@@ -347,3 +347,89 @@ func TestReportDebug_DrivesItsOwnAlertEngine(t *testing.T) {
 		t.Errorf("round lines with alerting off: %q", quiet.lines)
 	}
 }
+
+// Hops beyond the destination are in the hop table (round one probes every
+// TTL before the destination's distance is known) and are listed in the
+// snapshot and final sets, marked beyond=yes, with the fields every hop line
+// has. Hops up to the destination carry no mark.
+func TestDebugLog_HopsBeyondDestination(t *testing.T) {
+	sink := &debugSink{}
+	d := NewReportDebug(sink.logf, "192.0.2.9", "udp", 5, 0, 3, true)
+	table := hop.NewTable(30)
+	router, dest := net.ParseIP("198.51.100.1"), net.ParseIP("192.0.2.9")
+	answer := func(ttl int, ip net.IP) {
+		h := table.Get(ttl)
+		h.AddSample(ip, time.Millisecond, 0, hop.KindICMPTTL)
+		h.AddSample(ip, time.Millisecond, 0, hop.KindPrimary)
+		h.AddSample(ip, time.Millisecond, 1, hop.KindPrimary)
+	}
+	// Later rounds stop at the destination's TTL.
+	pathRound := func() {
+		table.MarkRoundSentByType(1, 1, 2)
+		table.MarkRoundSentByType(2, 1, 2)
+		answer(1, router)
+		answer(2, dest)
+		d.RoundClosed(table, CloseRound(table))
+	}
+	// Round one probes TTLs 1 to 4: the destination answers at 2 and at 3,
+	// nothing answers at 4.
+	for ttl := 1; ttl <= 4; ttl++ {
+		table.MarkRoundSentByType(ttl, 1, 2)
+	}
+	answer(1, router)
+	answer(2, dest)
+	table.Get(2).MarkTarget(dest)
+	answer(3, dest)
+	table.Get(3).MarkTarget(dest)
+	d.RoundClosed(table, CloseRound(table))
+	for i := 1; i < 10; i++ {
+		pathRound()
+	}
+	if got := table.TargetTTL(); got != 2 {
+		t.Fatalf("fixture: destination's TTL = %d, want 2", got)
+	}
+	pathRound() // round 11 closes: round 10's snapshot is written
+	d.Final(table)
+
+	const tail = " echo=0/0 echo-counted=0/0 rate-limited=undetermined"
+	for _, tc := range []struct {
+		label string
+		round int
+	}{{"snapshot", 10}, {"final", 11}} {
+		r := tc.round
+		want := []string{
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=1 nodes=198.51.100.1 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0", tc.label, r, r, 2*r) + tail,
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=2 nodes=192.0.2.9 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0", tc.label, r, r, 2*r) + tail,
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=3 nodes=192.0.2.9 loss=0.0%% kind=measured icmp-ttl=1/0 udp-ttl=2/0", tc.label, r) + tail + " beyond=yes",
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=4 nodes=- loss=100.0%% kind=measured icmp-ttl=1/1 udp-ttl=2/2", tc.label, r) + tail + " beyond=yes",
+		}
+		got := sink.containing(" " + tc.label + " ")
+		if len(got) != len(want) {
+			t.Fatalf("got %d %s lines, want %d (every hop in the table):\n%s", len(got), tc.label, len(want), strings.Join(got, "\n"))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s line %d:\n got %s\nwant %s", tc.label, i+1, got[i], want[i])
+			}
+		}
+	}
+}
+
+// While the destination has not answered there is no destination TTL, and no
+// hop is marked as beyond it.
+func TestDebugLog_NoBeyondMarkWithoutDestination(t *testing.T) {
+	sink := &debugSink{}
+	d := NewReportDebug(sink.logf, "192.0.2.9", "udp", 5, 0, 3, true)
+	table := hop.NewTable(30)
+	for ttl := 1; ttl <= 3; ttl++ {
+		table.MarkRoundSentByType(ttl, 1, 2)
+	}
+	d.RoundClosed(table, CloseRound(table))
+	d.Final(table)
+	if got := sink.containing(" final "); len(got) != 3 {
+		t.Fatalf("got %d final lines, want 3:\n%s", len(got), strings.Join(got, "\n"))
+	}
+	if got := sink.containing("beyond="); len(got) != 0 {
+		t.Errorf("hops marked beyond a destination that has not answered: %q", got)
+	}
+}
