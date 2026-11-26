@@ -60,13 +60,15 @@ func (l pdLayout) width() int {
 }
 
 // computePDLayout fits the Probe Detail columns into width. ipNeeded is the
-// widest address to show. A width of zero or less means the terminal size is
-// not known yet: everything is shown.
-func computePDLayout(width, ipNeeded int) pdLayout {
+// widest address to show. hasPrimary is false when the session sends no
+// primary-protocol probes (ICMP mode): the primary column is then left out.
+// A width of zero or less means the terminal size is not known yet:
+// everything is shown.
+func computePDLayout(width, ipNeeded int, hasPrimary bool) pdLayout {
 	if ipNeeded < pdWidthIP {
 		ipNeeded = pdWidthIP
 	}
-	l := pdLayout{ipw: ipNeeded, showICMP: true, showPrimary: true, showEcho: true, showRnd: true}
+	l := pdLayout{ipw: ipNeeded, showICMP: true, showPrimary: hasPrimary, showEcho: true, showRnd: true}
 	if width <= 0 {
 		return l
 	}
@@ -145,9 +147,8 @@ func primaryColHeader(protocolName string) string {
 // renderProbeDetailHopRow renders one node's row. first marks the hop's first
 // line, which carries the hop's loss; the other node lines of an ECMP hop
 // show a dash there. hopReplies is the hop's total of TTL-probe replies, for
-// the share. isICMPProto means the session probes with ICMP only, so there
-// are no primary probes.
-func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout, first bool, hopReplies int, isICMPProto bool) string {
+// the share.
+func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout, first bool, hopReplies int) string {
 	ipStr := ""
 	if ip := pn.GetIP(); ip != nil {
 		ipStr = truncateAddr(ip.String(), l.ipw)
@@ -168,11 +169,7 @@ func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout,
 		parts = append(parts, countCell(icmpStats.Received, icmpStats.ProbesSent, false))
 	}
 	if l.showPrimary {
-		if isICMPProto {
-			parts = append(parts, dimStyle().Render(padCell("—", pdWidthCount)))
-		} else {
-			parts = append(parts, countCell(primaryStats.Received, primaryStats.ProbesSent, false))
-		}
+		parts = append(parts, countCell(primaryStats.Received, primaryStats.ProbesSent, false))
 	}
 	if l.showEcho {
 		// Dimmed until the hop has enough echo samples for a verdict.
@@ -189,10 +186,12 @@ func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout,
 // wraps them with lineBg.
 func (m Model) renderProbeDetailView() []string {
 	s := m.focused()
-	isICMPProto := s.protocolName == "icmp"
+	// In ICMP mode no primary-protocol probes are sent, so there is no
+	// primary column: the ICMP-TTL column covers the probes sent.
+	hasPrimary := s.protocolName != "icmp"
 
 	hops := pathHops(s)
-	l := computePDLayout(m.width, computeIPColWidth(hops))
+	l := computePDLayout(m.width, computeIPColWidth(hops), hasPrimary)
 
 	lines := []string{dimStyle().Render(m.renderProbeDetailHeader(l, primaryColHeader(s.protocolName)))}
 
@@ -227,7 +226,7 @@ func (m Model) renderProbeDetailView() []string {
 			if pn == nil {
 				continue
 			}
-			lines = append(lines, m.renderProbeDetailHopRow(h, pn, l, i == 0, hopReplies, isICMPProto))
+			lines = append(lines, m.renderProbeDetailHopRow(h, pn, l, i == 0, hopReplies))
 		}
 	}
 

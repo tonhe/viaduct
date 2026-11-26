@@ -173,16 +173,79 @@ func TestProbeDetail_TypeCellsAreCounts(t *testing.T) {
 	}
 }
 
-func TestProbeDetail_ICMPModeHasNoPrimaryColumnFigures(t *testing.T) {
-	m := pdModel(120, 30)
-	m.sessions[0].protocolName = "icmp"
-	h := m.sessions[0].table.GetOrCreate(1)
-	for r := 0; r < 10; r++ {
-		pdRound(h, 1, "192.0.2.1", nil)
+// In ICMP mode no primary-protocol probes are sent, so Probe Detail has no
+// UDP-TTL or TCP-TTL column (it used to show a UDP-TTL column of dashes).
+// UDP and TCP modes keep their primary column.
+func TestProbeDetail_PrimaryColumnByProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		proto      string
+		wantCol    string // "" means no primary column
+		wantHeader string
+	}{
+		{"icmp", "", "#   IP                Loss%    % of replies ICMP-TTL  Echo      Rnd"},
+		{"udp", "UDP-TTL", "#   IP                Loss%    % of replies ICMP-TTL  UDP-TTL   Echo      Rnd"},
+		{"tcp", "TCP-TTL", "#   IP                Loss%    % of replies ICMP-TTL  TCP-TTL   Echo      Rnd"},
+	} {
+		t.Run(tc.proto, func(t *testing.T) {
+			m := pdModel(120, 30)
+			m.sessions[0].protocolName = tc.proto
+			h := m.sessions[0].table.GetOrCreate(1)
+			for r := 0; r < 10; r++ {
+				if tc.wantCol == "" {
+					pdRound(h, 1, "192.0.2.1", nil)
+				} else {
+					pdRound(h, 2, "192.0.2.1", map[string]int{"192.0.2.1": 1})
+				}
+			}
+			header, rows := pdRows(m)
+			if header != tc.wantHeader {
+				t.Errorf("header =\n%q, want\n%q", header, tc.wantHeader)
+			}
+			for _, col := range []string{"UDP-TTL", "TCP-TTL"} {
+				if col != tc.wantCol && strings.Contains(header, col) {
+					t.Errorf("%s mode header has a %s column: %q", tc.proto, col, header)
+				}
+			}
+			if tc.wantCol == "" {
+				// ICMP 10/10, echo 10/10, and no dash cell for a primary column.
+				if strings.Count(rows[0], "10/10") != 2 || strings.Contains(rows[0], "—") {
+					t.Errorf("ICMP mode row = %q, want ICMP and Echo counts and no primary cell", rows[0])
+				}
+			} else if strings.Count(rows[0], "10/10") != 3 {
+				t.Errorf("%s mode row = %q, want ICMP, primary and Echo counts of 10/10", tc.proto, rows[0])
+			}
+			for _, w := range []int{60, 80, 120} {
+				m.width = w
+				assertFits(t, tc.proto+" Probe Detail", m.View(), w, 30)
+			}
+		})
 	}
-	_, rows := pdRows(m)
-	if !strings.Contains(rows[0], "10/10") || !strings.Contains(rows[0], "—") {
-		t.Errorf("ICMP mode row = %q, want ICMP 10/10 and a dash for the primary column", rows[0])
+}
+
+// Without a primary column the remaining columns drop in the same order:
+// Rnd, Echo, ICMP-TTL.
+func TestComputePDLayout_NoPrimaryKeepsDropOrder(t *testing.T) {
+	full := computePDLayout(0, 17, false)
+	if full.showPrimary || !full.showICMP || !full.showEcho || !full.showRnd {
+		t.Fatalf("unknown width without primary: %+v", full)
+	}
+	base := pdWidthTTL + 1 + 17 + 1 + pdWidthLoss + 1 + pdWidthShare
+	for _, tc := range []struct {
+		width           int
+		icmp, echo, rnd bool
+	}{
+		{base + 2*(1+pdWidthCount) + 1 + pdWidthRnd, true, true, true},
+		{base + 2*(1+pdWidthCount), true, true, false},
+		{base + 1 + pdWidthCount, true, false, false},
+		{base, false, false, false},
+	} {
+		l := computePDLayout(tc.width, 17, false)
+		if l.showPrimary || l.showICMP != tc.icmp || l.showEcho != tc.echo || l.showRnd != tc.rnd {
+			t.Errorf("width %d: %+v, want icmp=%v echo=%v rnd=%v", tc.width, l, tc.icmp, tc.echo, tc.rnd)
+		}
+		if l.width() > tc.width {
+			t.Errorf("width %d: layout is %d wide", tc.width, l.width())
+		}
 	}
 }
 
@@ -252,17 +315,17 @@ func TestShareCell(t *testing.T) {
 }
 
 func TestComputePDLayout_DropsCountColumnsBeforeTheAddress(t *testing.T) {
-	wide := computePDLayout(120, 39)
+	wide := computePDLayout(120, 39, true)
 	if !wide.showICMP || !wide.showPrimary || !wide.showEcho || !wide.showRnd || wide.ipw != 39 {
 		t.Errorf("at 120 columns everything fits: %+v", wide)
 	}
 	for _, w := range []int{40, 60, 80} {
-		l := computePDLayout(w, 39)
+		l := computePDLayout(w, 39, true)
 		if l.width() > w && l.ipw > minIPColWidth {
 			t.Errorf("layout at width %d is %d wide: %+v", w, l.width(), l)
 		}
 	}
-	if l := computePDLayout(80, 15); !l.showICMP || !l.showPrimary || !l.showEcho {
+	if l := computePDLayout(80, 15, true); !l.showICMP || !l.showPrimary || !l.showEcho {
 		t.Errorf("an IPv4 path at 80 columns keeps the three count columns: %+v", l)
 	}
 }
