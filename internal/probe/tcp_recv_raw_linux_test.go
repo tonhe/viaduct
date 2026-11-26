@@ -27,7 +27,7 @@ func TestListenTCP_RawSocketDeliversTheSYNACK(t *testing.T) {
 		t.Run(fam.name, func(t *testing.T) {
 			ln, err := net.Listen(fam.network, net.JoinHostPort(fam.addr, "0"))
 			if err != nil {
-				t.Skipf("no %s loopback listener: %v", fam.name, err)
+				skipUnlessRequired(t, "no %s loopback listener: %v", fam.name, err)
 			}
 			defer ln.Close()
 			port := ln.Addr().(*net.TCPAddr).Port
@@ -36,7 +36,7 @@ func TestListenTCP_RawSocketDeliversTheSYNACK(t *testing.T) {
 			rawConn, err := net.ListenPacket(rawNet, RawListenAddr(fam.version))
 			if err != nil {
 				if os.Geteuid() != 0 {
-					t.Skipf("raw socket needs CAP_NET_RAW: %v", err)
+					skipUnlessRequired(t, "raw socket needs CAP_NET_RAW: %v", err)
 				}
 				t.Fatalf("raw socket: %v", err)
 			}

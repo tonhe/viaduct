@@ -23,7 +23,7 @@ import (
 //	sudo go test ./internal/probe -run TestBPF -v -count=1
 func TestBPF_SYNACKFromALocalListenerIsReceived(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("needs root: raw TCP socket and /dev/bpf*")
+		skipUnlessRequired(t, "needs root: raw TCP socket and /dev/bpf*")
 	}
 	for _, fam := range []struct {
 		name    string
@@ -37,7 +37,7 @@ func TestBPF_SYNACKFromALocalListenerIsReceived(t *testing.T) {
 		t.Run(fam.name, func(t *testing.T) {
 			ln, err := net.Listen(fam.network, net.JoinHostPort(fam.addr, "0"))
 			if err != nil {
-				t.Skipf("no %s loopback listener: %v", fam.name, err)
+				skipUnlessRequired(t, "no %s loopback listener: %v", fam.name, err)
 			}
 			defer ln.Close()
 			port := ln.Addr().(*net.TCPAddr).Port

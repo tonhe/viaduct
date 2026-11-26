@@ -36,9 +36,21 @@ jobs:
         with:
           name: coverage-${{ matrix.os }}
           path: coverage.out
+      # The real-socket tests of internal/probe skip without root, so the
+      # steps above never run them. Here they run as root; the make target
+      # sets VIA_REQUIRE_RAW_SOCKETS=1, which makes a skip a failure. They
+      # send to 127.0.0.1 and ::1 only. The Linux run is in the lab job.
+      - name: Build the root-only probe tests
+        if: runner.os == 'macOS'
+        run: make test-root-build
+      - name: Run the root-only probe tests (sudo)
+        if: runner.os == 'macOS'
+        run: sudo make test-root
 
   # Network lab: runs via and mtr across a namespace topology with exact,
   # deterministic packet drops and asserts exact probe counts. Linux only.
+  # The job has root, so it also runs the root-only probe tests on Linux
+  # (see the macOS steps of the test job).
   lab:
     runs-on: ubuntu-latest
     steps:
@@ -52,5 +64,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends iproute2 nftables tcpdump mtr-tiny
       - name: Build via and the lab tests
         run: make lab-build
+      - name: Build the root-only probe tests
+        run: make test-root-build
       - name: Run the lab
         run: sudo make lab-test
+      # Runs whether or not the lab passed, so one failure does not hide the other.
+      - name: Run the root-only probe tests (sudo)
+        if: ${{ !cancelled() }}
+        run: sudo make test-root

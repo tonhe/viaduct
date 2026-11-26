@@ -327,7 +327,7 @@ func closedTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
-		t.Skipf("no IPv6 loopback: %v", err)
+		skipUnlessRequired(t, "no IPv6 loopback: %v", err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
@@ -354,13 +354,13 @@ func TestRun_IPv6ProbeChecksumValidForKernelSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			probeConn, err := net.ListenPacket(tc.network, "::1")
 			if err != nil {
-				t.Skipf("raw %s socket not available (needs root or CAP_NET_RAW): %v", tc.network, err)
+				skipUnlessRequired(t, "raw %s socket not available (needs root or CAP_NET_RAW): %v", tc.network, err)
 			}
 			offset, _ := v6ChecksumOffset(tc.network)
 			err = setV6Checksum(probeConn, offset)
 			probeConn.Close()
 			if err != nil {
-				t.Skipf("this platform rejects IPV6_CHECKSUM on %s (%v); the bound-socket fallback applies", tc.network, err)
+				skipUnlessRequired(t, "this platform rejects IPV6_CHECKSUM on %s (%v); the bound-socket fallback applies", tc.network, err)
 			}
 
 			cfg := DefaultConfig()
@@ -384,7 +384,7 @@ func TestRun_IPv6ProbeChecksumValidForKernelSource(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- tr.Run(ctx, results) }()
 			if err := <-done; err != nil {
-				t.Skipf("Run could not open its sockets: %v", err)
+				skipUnlessRequired(t, "Run could not open its sockets: %v", err)
 			}
 			close(results)
 

@@ -11,13 +11,22 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION) -X main.buildVersion=$(BUILD_TS
 
 LAB_TEST := lab.test
 
-.PHONY: build clean install test test-tui test-all test-race golden-update coverage-gate soak-test lab-build lab-test lab-docker
+# The real-socket tests of internal/probe, which need root (see test-root).
+# A test that is not built for the platform (TestBPF_ is macOS only,
+# TestListenTCP_ is Linux only) simply does not match, which leaves four on
+# each of the two systems. test-root checks that count, so a test that is
+# renamed and falls out of the pattern fails the run instead of going missing.
+ROOT_TEST       := probe.root.test
+ROOT_TESTS      := ^(TestRun_IPv6ProbeChecksumValidForKernelSource|TestOpenEchoConn_TakesAsLittleAsThePlatformAllows|TestEchoConn_SmallReceiveBufferHoldsNextToNothing|TestBPF_SYNACKFromALocalListenerIsReceived|TestListenTCP_RawSocketDeliversTheSYNACK)$$
+ROOT_TEST_COUNT := 4
+
+.PHONY: build clean install test test-tui test-all test-race golden-update coverage-gate soak-test lab-build lab-test lab-docker test-root-build test-root
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) $(PKG)
 
 clean:
-	rm -f $(BINARY) $(LAB_TEST)
+	rm -f $(BINARY) $(LAB_TEST) $(ROOT_TEST)
 	rm -rf dist/ bin/
 
 install: build
@@ -56,6 +65,37 @@ golden-update:
 # Run the per-package coverage floor check (matches CI).
 coverage-gate:
 	bash scripts/check-coverage.sh
+
+# Root-only tests: the tests of internal/probe that open real raw sockets (and
+# /dev/bpf* on macOS) and skip without root, so the unprivileged runs above
+# never execute them. They send to the loopback addresses only (127.0.0.1 and
+# ::1). Linux and macOS.
+#
+#   make test-root-build && sudo make test-root
+#
+# Building is separate from running so the build uses your Go toolchain and
+# only the run needs root. VIA_REQUIRE_RAW_SOCKETS=1 turns the tests' skips
+# into failures: a host that cannot run one of them fails here instead of
+# passing with the test skipped.
+test-root-build:
+	go test -c -o $(ROOT_TEST) ./internal/probe
+
+test-root:
+	@if [ "$$(id -u)" != "0" ]; then \
+		echo "test-root needs root (raw sockets; /dev/bpf* on macOS)."; \
+		echo "Run 'make test-root-build' and then 'sudo make test-root'."; \
+		exit 1; \
+	fi
+	@if [ ! -x $(ROOT_TEST) ]; then \
+		echo "Run 'make test-root-build' first, as your normal user."; \
+		exit 1; \
+	fi
+	@n=$$(./$(ROOT_TEST) -test.list '$(ROOT_TESTS)' | wc -l); \
+	if [ "$$n" -ne $(ROOT_TEST_COUNT) ]; then \
+		echo "ROOT_TESTS matches $$n tests in $(ROOT_TEST), want $(ROOT_TEST_COUNT): was one renamed?"; \
+		exit 1; \
+	fi
+	cd internal/probe && env VIA_REQUIRE_RAW_SOCKETS=1 $(CURDIR)/$(ROOT_TEST) -test.v -test.count 1 -test.timeout 5m -test.run '$(ROOT_TESTS)'
 
 # Network lab: checks via's numbers against real packets on a topology built
 # from Linux network namespaces (scripts/lab, internal/lab). Deterministic: it
