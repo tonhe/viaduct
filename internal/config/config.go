@@ -176,6 +176,11 @@ func Save(c *Config) error {
 		"",
 		"# Number of consecutive rounds that must breach thresholds before alerting (1–20)",
 		fmt.Sprintf("alert_rounds = %d", c.AlertRounds),
+		"",
+		"# ── Export Settings ──────────────────────────────────────────────────────────",
+		"",
+		"# Export format for the TUI export key: json, csv, dot",
+		fmt.Sprintf("export_format = %q", exportFormatOrDefault(c.ExportFormat)),
 	}
 
 	for _, line := range lines {
@@ -184,6 +189,15 @@ func Save(c *Config) error {
 		}
 	}
 	return nil
+}
+
+// exportFormatOrDefault returns f, or "json" (the format the TUI export key
+// uses when export_format is unset) when f is empty.
+func exportFormatOrDefault(f string) string {
+	if f == "" {
+		return "json"
+	}
+	return f
 }
 
 // Validate clamps / corrects invalid Config values in-place.
