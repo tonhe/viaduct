@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -94,7 +93,7 @@ func main() {
 	rootCmd.Flags().String("debug-log", "", "append diagnostics to this file: send failures, a line per round, per-hop loss snapshots, alerts")
 
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
 }
 
@@ -387,13 +386,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	}
 	testConn, err := icmp.ListenPacket(probe.ListenerNet(capFamily), probe.RawListenAddr(capFamily))
 	if err != nil {
-		if os.Geteuid() != 0 {
-			// Try re-exec under sudo
-			if sudoErr := reExecWithSudo(); sudoErr == nil {
-				return nil // parent exits cleanly
-			}
-		}
-		return fmt.Errorf("raw socket permission denied: %w\n\nRun with sudo or set capability:\n  sudo setcap cap_net_raw+ep $(which via)", err)
+		// Not root: re-run under sudo and exit with that run's status.
+		// Otherwise report the socket error. See rawSocketDenied.
+		return rawSocketDenied(cmd, err)
 	}
 	testConn.Close()
 
@@ -508,6 +503,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build protocol with config available
+	if w := icmpPathsWarning(protocolName, numPaths, cmd.Flags().Changed("paths")); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	proto, err := buildProtocol(protocolName, dstPort, &numPaths, baseCfg)
 	if err != nil {
 		return err
@@ -1336,8 +1334,7 @@ func buildProtocol(protocolName string, dstPort int, numPaths *int, cfg probe.Co
 	switch protocolName {
 	case "icmp":
 		if *numPaths > 1 {
-			fmt.Fprintln(os.Stderr, "Warning: ICMP mode does not support multipath discovery, ignoring --paths")
-			*numPaths = 1
+			*numPaths = 1 // runTrace warns when --paths was given; see icmpPathsWarning
 		}
 		return probe.NewICMPProtocol(cfg), nil
 	case "udp":
@@ -1361,18 +1358,6 @@ func buildProtocol(protocolName string, dstPort int, numPaths *int, cfg probe.Co
 	default:
 		return nil, fmt.Errorf("unknown protocol: %s (valid: udp, icmp, tcp, auto)", protocolName)
 	}
-}
-
-func reExecWithSudo() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command("sudo", append([]string{exe}, os.Args[1:]...)...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 // selectFamily picks an IP version and target address based on user flags

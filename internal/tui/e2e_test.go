@@ -94,6 +94,7 @@ func TestE2E_HappyPath(t *testing.T) {
 // TestE2E_FailurePath sends one hop update then a ProbeErrorMsg, which causes
 // the model to auto-quit via tea.Quit. Verifies err is set and golden frame.
 func TestE2E_FailurePath(t *testing.T) {
+	setHostOS(t, "linux") // the golden file holds the Linux advice
 	tm, _ := startE2E(t, withSize(120, 24))
 
 	tm.Send(HopUpdateMsg{Result: probe.Result{
