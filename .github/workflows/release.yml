@@ -28,10 +28,12 @@ jobs:
       # Nothing is published by this step: it builds one linux/amd64 binary
       # into dist/ from the same .goreleaser.yml (same ldflags, same commit)
       # as the release below. No token is passed to it.
+      # GoReleaser is pinned to an exact version, the same in both steps.
+      # Upgrading it is a deliberate change to both lines.
       - name: Build one binary to check the version
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: "~> v2"
+          version: "v2.20.3"
           args: build --single-target --clean
         env:
           GOOS: linux
@@ -67,7 +69,7 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: "~> v2"
+          version: "v2.20.3"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -82,6 +84,13 @@ jobs:
             inno_arch: x64compatible
           - goarch: arm64
             inno_arch: arm64
+    # The tag, the repository and the matrix values reach the PowerShell
+    # scripts as environment variables, never as text pasted into the script.
+    env:
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+      ARCH: ${{ matrix.goarch }}
+      INNO_ARCH: ${{ matrix.inno_arch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,9 +99,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          $zip = "viaduct_${version}_windows_${{ matrix.goarch }}.zip"
-          gh release download "${{ github.ref_name }}" --pattern "$zip" --repo "${{ github.repository }}"
+          $version = $env:TAG.TrimStart("v")
+          $zip = "viaduct_${version}_windows_$($env:ARCH).zip"
+          $url = "https://github.com/$($env:REPO)/releases/download/$($env:TAG)/$zip"
+          gh release download "$env:TAG" --pattern "$zip" --repo "$env:REPO"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
+            Write-Output "::error::could not download $url"
+            exit 1
+          }
           Expand-Archive -Path "$zip" -DestinationPath staging
 
       - name: Install Inno Setup
@@ -100,13 +114,13 @@ jobs:
 
       - name: Build installer
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          $version = $env:TAG.TrimStart("v")
           $sourcedir = (Resolve-Path staging).Path
           $outdir = (Get-Location).Path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DMyAppVersion="$version" `
-            /DMyAppArch="${{ matrix.goarch }}" `
-            /DInnoArch="${{ matrix.inno_arch }}" `
+            /DMyAppArch="$env:ARCH" `
+            /DInnoArch="$env:INNO_ARCH" `
             /DSourceDir="$sourcedir" `
             /DOutputPath="$outdir" `
             ".github\installer\windows\via.iss"
@@ -115,9 +129,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          $installer = "via_${version}_windows_${{ matrix.goarch }}_installer.exe"
-          gh release upload "${{ github.ref_name }}" "$installer" --repo "${{ github.repository }}"
+          $version = $env:TAG.TrimStart("v")
+          $installer = "via_${version}_windows_$($env:ARCH)_installer.exe"
+          gh release upload "$env:TAG" "$installer" --repo "$env:REPO"
 
   update-homebrew:
     needs: release
@@ -145,12 +159,25 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           TARBALL_URL="https://github.com/tonhe/viaduct/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
 
-          # Download tarball with retry to avoid race with release job
+          # Download tarball with retry to avoid race with release job.
+          # If every attempt fails, stop here and name the URL, before the
+          # checksum of a file that does not exist.
+          downloaded=0
           for i in 1 2 3; do
-            curl -fsSL -o tarball.tar.gz "$TARBALL_URL" && break
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
+            if curl -fsSL -o tarball.tar.gz "$TARBALL_URL"; then
+              downloaded=1
+              break
+            fi
+            echo "Attempt $i failed"
+            if [ "$i" -lt 3 ]; then
+              echo "retrying in 10s..."
+              sleep 10
+            fi
           done
+          if [ "$downloaded" -ne 1 ]; then
+            echo "::error::could not download $TARBALL_URL after 3 attempts"
+            exit 1
+          fi
 
           SHA256=$(shasum -a 256 tarball.tar.gz | cut -d' ' -f1)
           rm -f tarball.tar.gz
