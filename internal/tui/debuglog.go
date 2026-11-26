@@ -221,15 +221,14 @@ func (d *RoundDebug) write(lines []string) {
 	}
 }
 
-// snapshot returns one line per hop, up to the destination's. Counts are
-// sent/lost over completed rounds.
+// snapshot returns one line per hop in the table. A hop beyond the
+// destination's TTL is marked beyond=yes: the views leave those hops out, and
+// the log lists them because they show a destination TTL that is wrong or has
+// moved. Counts are sent/lost over completed rounds.
 func (d *RoundDebug) snapshot(label string, table *hop.Table) []string {
 	var lines []string
 	target := table.TargetTTL()
 	for _, h := range table.Snapshot() {
-		if target > 0 && h.TTL > target {
-			break
-		}
 		var nodes []string
 		for _, n := range h.GetNodes() {
 			if ip := n.GetIP(); ip != nil {
@@ -246,9 +245,13 @@ func (d *RoundDebug) snapshot(label string, table *hop.Table) []string {
 		if d.primary != "" {
 			ttlProbes += fmt.Sprintf(" %s=%d/%d", d.primary, primarySent, lost(primarySent, primaryRecvd))
 		}
-		lines = append(lines, fmt.Sprintf("%s round=%d ttl=%d nodes=%s loss=%s kind=%s %s echo=%d/%d echo-counted=%d/%d rate-limited=%s",
+		line := fmt.Sprintf("%s round=%d ttl=%d nodes=%s loss=%s kind=%s %s echo=%d/%d echo-counted=%d/%d rate-limited=%s",
 			label, d.rounds, h.TTL, strings.Join(nodes, ","), hop.FormatLoss(pct, kind), kind, ttlProbes,
-			echoSent, lost(echoSent, echoRecvd), countedSent, lost(countedSent, countedRecvd), h.RateLimitState()))
+			echoSent, lost(echoSent, echoRecvd), countedSent, lost(countedSent, countedRecvd), h.RateLimitState())
+		if target > 0 && h.TTL > target {
+			line += " beyond=yes"
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }
