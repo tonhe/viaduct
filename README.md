@@ -459,7 +459,7 @@ Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table t
 
   `via` reads the config file at startup, so set `export_format` before starting `via` or restart it after changing the file. Pressing <kbd>e</kbd> during a trace keeps using the format loaded at startup.
 
-  The settings menu does not show `export_format`, and saving settings from the menu rewrites the config file without it, so add the line again after saving settings.
+  The settings menu does not show `export_format`. Saving settings from the menu keeps its value, and writes `export_format = "json"` when the key was not set.
 - **Location** — the file is written to the current working directory (the directory you ran `via` from).
 - **File name** — `via-<target>-<timestamp>.<format>`, where `<target>` is the target as given on the command line and `<timestamp>` is local time as `YYYYMMDD-HHMM` (e.g. `via-google.com-20261124-1530.json`). Exporting again within the same minute overwrites the earlier file. With more than one target the file is `via-multi-<timestamp>.<format>` and holds every target that did not fail at startup.
 - **Result** — the status line shows `Exported to <path>` or `Export failed: <error>` for a few seconds.
