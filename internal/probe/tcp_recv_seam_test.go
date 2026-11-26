@@ -122,6 +122,41 @@ func synAckFrame(link, version int, from, to string, syn []byte) []byte {
 	return bpfRecord(linkFrame(link, pkt), 18)
 }
 
+// stoppableSource wraps the source the TCP listener reads so the test can
+// tell when the listener has returned. run does not wait for its listener
+// (viaduct#219), so a test that closes the results channel once run returns
+// must first stop the listener and wait for it.
+//
+// Once stop is closed, the next read returns net.ErrClosed. Every read that
+// returns a closed error closes exited: the listener returns on that error
+// without sending, and any send it made before has finished.
+type stoppableSource struct {
+	src    tcpSegmentSource
+	stop   chan struct{}
+	exited chan struct{}
+	once   sync.Once
+}
+
+func newStoppableSource(src tcpSegmentSource) *stoppableSource {
+	return &stoppableSource{src: src, stop: make(chan struct{}), exited: make(chan struct{})}
+}
+
+func (s *stoppableSource) ReadFrom(b []byte) (int, net.Addr, error) {
+	select {
+	case <-s.stop:
+		s.once.Do(func() { close(s.exited) })
+		return 0, nil, net.ErrClosed
+	default:
+	}
+	n, from, err := s.src.ReadFrom(b)
+	if errors.Is(err, net.ErrClosed) {
+		s.once.Do(func() { close(s.exited) })
+	}
+	return n, from, err
+}
+
+func (s *stoppableSource) SetReadDeadline(d time.Time) error { return s.src.SetReadDeadline(d) }
+
 // seamRun runs a TCP trace of a few rounds whose destination is at hop 3 and
 // returns the results that name the destination.
 func seamRun(t *testing.T, version int, source, target string, snd *synSender, open func(net.PacketConn) (tcpSegmentSource, func(), error)) (dest []Result, tr *Tracer) {
@@ -131,7 +166,15 @@ func seamRun(t *testing.T, version int, source, target string, snd *synSender, o
 	cfg.MaxRounds = 3
 	cfg.RoundDelay = 30 * time.Millisecond
 	tr = stallTracer(cfg, tgt, snd)
-	tr.newTCPSource = open
+	var stoppable *stoppableSource
+	tr.newTCPSource = func(rawConn net.PacketConn) (tcpSegmentSource, func(), error) {
+		src, cleanup, err := open(rawConn)
+		if err != nil || src == nil {
+			return src, cleanup, err
+		}
+		stoppable = newStoppableSource(src)
+		return stoppable, cleanup, nil
+	}
 
 	results := make(chan Result, 1024)
 	done := make(chan error, 1)
@@ -143,6 +186,16 @@ func seamRun(t *testing.T, version int, source, target string, snd *synSender, o
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not finish")
+	}
+	// run can return while its listener is still sending on results; stop
+	// it and wait before closing the channel.
+	if stoppable != nil {
+		close(stoppable.stop)
+		select {
+		case <-stoppable.exited:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the TCP listener did not return after its source was stopped")
+		}
 	}
 	close(results)
 	for r := range results {
