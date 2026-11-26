@@ -62,6 +62,8 @@ make install    # builds and copies to ~/bin/
 > sudo setcap cap_net_raw+ep $(which via)
 > ```
 
+`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead.
+
 ---
 
 ## Quick Start
