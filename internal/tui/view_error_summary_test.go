@@ -14,6 +14,7 @@ import (
 
 func TestGolden_ErrorView(t *testing.T) {
 	setTestTheme(t)
+	setHostOS(t, "linux")
 	m := newTestModel(withSize(100, 24))
 	m.err = errors.New("raw socket permission denied: operation not permitted")
 	got := m.View()

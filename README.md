@@ -64,6 +64,8 @@ make install    # builds and copies to ~/bin/
 > sudo setcap cap_net_raw+ep $(which via)
 > ```
 
+`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead.
+
 ---
 
 ## Quick Start
@@ -128,6 +130,12 @@ TCP mode on macOS reads the destination's replies from a packet capture (BPF), w
 ```
 
 The other reasons are `no interface has the source address <address>` and `no free BPF device`. A reply counts only when it comes from the target's address.
+
+### Source address
+
+All probes of a trace leave from one source address. `via` finds it once for each target when it starts (the address the system would use to reach the target) and binds every socket that sends probes to it, in every protocol mode and in both IPv4 and IPv6. Without that, a host with several addresses, such as an IPv6 host with temporary addresses, may send some probes of a trace from another of its addresses, and routers that balance load then send those probes down another path.
+
+If no source address is found or a socket cannot be bound, the trace runs with that socket unbound and the [debug log](#debug-log) says so. The address is not looked up again during a run: if it is removed from the host while `via` runs (a temporary address that expires), sends fail and are counted as not sent until `via` is restarted. On Windows the sockets are not bound.
 
 ---
 
@@ -395,6 +403,9 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 `--debug-log <file>` appends timestamped lines to a file, in the TUI and in report mode. Each line is tagged with the target's address, so one file holds every target of a run. Without the flag nothing is written.
 
 ```
+2026-11-25T04:38:43.101Z [192.0.2.9] icmp socket (ip4:icmp): bound to source address 198.51.100.77
+2026-11-25T04:38:43.102Z [192.0.2.9] udp send socket (ip4:udp): bound to source address 198.51.100.77
+2026-11-25T04:38:43.102Z [192.0.2.9] echo socket (ip4:icmp): bound to source address 198.51.100.77
 2026-11-25T04:38:44.123Z [192.0.2.9] send failed: icmp-ttl to 192.0.2.9 (ttl 3): no buffer space available; logged once for this address
 2026-11-25T04:38:45.201Z [192.0.2.9] round 12: probes not sent: icmp-ttl 0 timed out, 3 failed, 0 skipped
 2026-11-25T04:38:46.214Z [192.0.2.9] round 12: took 1.214s; sent icmp-ttl=8 udp-ttl=24 icmp-echo=8; replies icmp-ttl=8 udp-ttl=21 icmp-echo=8; no reply from 1 of 8 hops probed
@@ -404,6 +415,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 2026-11-25T04:39:05.330Z [192.0.2.9] round 31: alert cleared: Sustained loss to destination: 45.0% (hop 8 affected)
 ```
 
+- **Source address**, at the start of each target's trace: one line for each socket that sends probes (`icmp socket`, `udp send socket` or `tcp send socket`, `echo socket`) with the source address it is bound to. A socket that could not be bound has one line that says why (`no source address was found at startup`, `binding to source address <address> failed: <error>`, an IPv6 link-local source address, or Windows) and ends `the socket is not bound and the kernel chooses the source address of each probe`. See [Source address](#source-address).
 - **Send failures**: each address a send failed for (once per address, with the error) and, for each round, the probes that could not be sent.
 - **Round line**, one per completed round: the time since the previous round closed, the probes sent in the round by type, the replies counted in the round by type, and how many of the hops probed answered none of their TTL-limited probes. A round in which every probed hop is silent reads `no reply from 8 of 8 hops probed`. A reply is counted in the round in which it arrives, as it is for loss.
 - **Snapshot**, one line per hop in the hop table, every 10 rounds (`snapshot`) and once at exit (`final`): the hop's addresses, its loss exactly as the views show it (`12.3%`, `85.7%?`, `~0%†`) with its kind, and the counts behind it as `sent/lost` over completed rounds: TTL-limited probes by type, direct echoes (`echo`), the echoes that count toward the verdict (`echo-counted`, which leaves out a node that ignores ping) and the rate-limit verdict. A hop beyond the destination's TTL has the same fields and ends with `beyond=yes`. The views and exports leave those hops out. They are in the table because the first round probes every TTL before the destination's distance is known, and because a path that gets shorter leaves its old rows behind; echoes are not sent to them. The round line's totals include their probes. A `snapshot` set holds the figures its round closed with and is written when the next round closes, so its timestamp is one round later than its `round=`. The log of a run always ends with a `final` set. A run that ends on a multiple of 10 rounds has no `snapshot` set for its last round: the `final` set stands for it and includes any reply that arrived after the round closed. A run that is killed, or whose round loop stalls, right after a multiple of 10 rounds and before the next round closes has no hop lines for that round: its `snapshot` set was still waiting to be written. That set is missing by design, and the round lines up to that round are in the log.

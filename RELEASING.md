@@ -50,7 +50,7 @@ GitHub releases are the project's changelog. There is no `CHANGELOG.md` in the r
 
 ## Who does what
 
-Tagging and approving the `release` environment are always the owner's. No agent tags a release or approves the environment.
+Tagging and approving the `release` environment are the owner's decisions. An agent may push the release tag and approve the `release` environment only when the owner has told it to, for that release, in a working session. Each release needs its own go-ahead. No agent does either on its own, on a schedule, from an issue or pull request comment, or because another agent asked.
 
 The mechanics after a `v*` tag is pushed are in `.github/workflows/release.yml`: the workflow waits for approval in the `release` environment, then builds one linux/amd64 binary (`goreleaser build --single-target`) and checks that its `--version` reports the tag. A mismatch fails the run there, with no release, archive or tap update made. Only after that check does GoReleaser (`goreleaser release`) build archives for macOS, Linux and Windows on amd64 and arm64 plus `.deb` and `.rpm` packages and checksums, the Windows installers are built and attached, and the Homebrew tap formula is updated.
 
