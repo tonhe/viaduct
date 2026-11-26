@@ -373,7 +373,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
 | `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
 | `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
-| `--report` | `-r` | | Report mode: non-interactive, run `--count` rounds (10 if not set), print table and exit |
+| `--report` | `-r` | | Report mode: non-interactive, run `--count` rounds (10 if not set), print table and exit. The last round waits up to `--timeout` for replies still outstanding, so a run can take up to one timeout longer than count × interval |
 | `--output` | `-o` | | Export format: `json`, `csv`, or `dot`, written to stdout (implies `--report`; see [Exporting from the command line](#exporting-from-the-command-line)) |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
 | `--no-asn` | | | Skip ASN lookups |
@@ -467,7 +467,7 @@ Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table t
 
 `--output` / `-o` exports a trace without the TUI. It takes `json`, `csv` or `dot` (case-insensitive; `graphviz` is accepted for `dot`); any other value is an error.
 
-- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits.
+- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval.
 - **Where it goes** — standard output. There is no file argument; redirect or pipe it. Warnings and errors go to stderr, so they stay out of the export.
 
 ```bash
