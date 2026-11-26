@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -113,7 +114,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		AlertLoss:      12.5,
 		AlertLatency:   "150ms",
 		AlertRounds:    7,
-		ExportFormat:   "", // Save does not write ExportFormat
+		ExportFormat:   "csv",
 		IPFamily:       "4",
 	}
 
@@ -142,6 +143,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		{"AlertLoss", got.AlertLoss, want.AlertLoss},
 		{"AlertLatency", got.AlertLatency, want.AlertLatency},
 		{"AlertRounds", got.AlertRounds, want.AlertRounds},
+		{"ExportFormat", got.ExportFormat, want.ExportFormat},
 		{"IPFamily", got.IPFamily, want.IPFamily},
 	}
 
@@ -149,6 +151,107 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		t.Run(f.name, func(t *testing.T) {
 			if f.got != f.exp {
 				t.Errorf("got %v, want %v", f.got, f.exp)
+			}
+		})
+	}
+}
+
+// TestSaveLoad_WholeStruct sets every Config field to a value that differs
+// from both its zero value and its default, saves, loads, and compares the
+// whole struct. A field that Save does not write comes back as its default
+// and fails the comparison, and a field added to Config without a value here
+// fails the non-default check.
+func TestSaveLoad_WholeStruct(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG override not applicable on Windows")
+	}
+
+	setXDGTempDir(t)
+
+	want := Config{
+		Theme:        "tokyo-night",
+		Protocol:     "tcp",
+		MaxHops:      12,
+		Interval:     "250ms",
+		Paths:        9,
+		DisplayMode:  "variability",
+		DNSLookups:   false,
+		ASNLookups:   false,
+		AlertEnabled: false,
+		AlertLoss:    33.5,
+		AlertLatency: "75ms",
+		AlertRounds:  11,
+		ExportFormat: "dot",
+		IPFamily:     "6",
+	}
+
+	// Every field must differ from its default, or a dropped key would go
+	// unnoticed because Load fills it from Default().
+	wv := reflect.ValueOf(want)
+	dv := reflect.ValueOf(*Default())
+	for i := 0; i < wv.NumField(); i++ {
+		name := wv.Type().Field(i).Name
+		if reflect.DeepEqual(wv.Field(i).Interface(), dv.Field(i).Interface()) {
+			t.Fatalf("fixture field %s equals its default %v; pick a non-default value", name, dv.Field(i).Interface())
+		}
+	}
+
+	if err := Save(&want); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	gv := reflect.ValueOf(*got)
+	for i := 0; i < wv.NumField(); i++ {
+		name := wv.Type().Field(i).Name
+		if !reflect.DeepEqual(gv.Field(i).Interface(), wv.Field(i).Interface()) {
+			t.Errorf("%s: got %v, want %v", name, gv.Field(i).Interface(), wv.Field(i).Interface())
+		}
+	}
+}
+
+// TestSave_EmptyExportFormatWritesJSON checks that an unset ExportFormat is
+// saved as "json", the format the TUI export key uses when it is unset, and
+// that existing values are written as given.
+func TestSave_EmptyExportFormatWritesJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG override not applicable on Windows")
+	}
+
+	cases := []struct{ in, want string }{
+		{"", "json"},
+		{"json", "json"},
+		{"csv", "csv"},
+		{"dot", "dot"},
+	}
+	for _, tc := range cases {
+		t.Run("in="+tc.in, func(t *testing.T) {
+			cfgPath := setXDGTempDir(t)
+
+			cfg := Default()
+			cfg.ExportFormat = tc.in
+			if err := Save(cfg); err != nil {
+				t.Fatalf("Save() error: %v", err)
+			}
+
+			data, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatalf("read saved file: %v", err)
+			}
+			line := `export_format = "` + tc.want + `"`
+			if !strings.Contains(string(data), line) {
+				t.Errorf("saved file missing %s:\n%s", line, data)
+			}
+
+			got, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if got.ExportFormat != tc.want {
+				t.Errorf("ExportFormat round-trip: got %q, want %q", got.ExportFormat, tc.want)
 			}
 		})
 	}
