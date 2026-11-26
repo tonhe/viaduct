@@ -44,7 +44,7 @@ type Config struct {
 	EchoID           int           // ICMP echo-probe ID; 0 = derive random (single-tracer library use)
 	EchoBudget       int           // max echo probes per round; 0 = 64
 	Protocol         ProbeProtocol // probe protocol (icmp, udp, tcp)
-	SourceIP         net.IP        // local source IP (needed for TCP checksum)
+	SourceIP         net.IP        // local source IP: the probe sockets are bound to it (source_bind.go); also in the UDP and TCP checksums
 	TargetIP         net.IP        // destination IP (needed for TCP checksum)
 	OnProtocolSwitch func(string)  // called when auto mode switches protocol
 	IPVersion        int           // 4 or 6 — required, no default
@@ -374,8 +374,10 @@ func (t *Tracer) SetOnRoundEnd(f func()) { t.OnRoundEnd = f }
 // It runs continuously (like mtr) until the context is cancelled.
 // The protocol is determined by cfg.Protocol (ICMP, UDP, or TCP).
 func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
-	// ICMP listen socket — receives responses for all protocol modes
-	conn, err := icmp.ListenPacket(ListenerNet(t.cfg.IPVersion), RawListenAddr(t.cfg.IPVersion))
+	// ICMP listen socket — receives responses for all protocol modes, and
+	// sends the ICMP TTL probes. Bound to the trace's source address
+	// (source_bind.go); the replies it reads are addressed to that address.
+	conn, err := bindToSource(t, "icmp socket", icmp.ListenPacket)(ListenerNet(t.cfg.IPVersion), RawListenAddr(t.cfg.IPVersion))
 	if err != nil {
 		return fmt.Errorf("raw socket permission denied: %w", err)
 	}
@@ -474,7 +476,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 			if proto.Name() == "tcp" {
 				rawProto = TransportListenerNet(t.cfg.IPVersion, "tcp")
 			}
-			rawConn, err := net.ListenPacket(rawProto, RawListenAddr(t.cfg.IPVersion))
+			rawConn, err := bindToSource(t, proto.Name()+" send socket", net.ListenPacket)(rawProto, RawListenAddr(t.cfg.IPVersion))
 			if err != nil {
 				return fmt.Errorf("raw %s socket: %w", proto.Name(), err)
 			}
@@ -754,7 +756,7 @@ func (t *Tracer) echoSender(shared probeSender, production bool) (probeSender, f
 
 // openEchoSocket is the production newEchoSender.
 func (t *Tracer) openEchoSocket() (probeSender, func(), error) {
-	conn, err := openEchoConn(t.cfg.IPVersion, t.debugf)
+	conn, err := openEchoConn(t.cfg.IPVersion, bindToSource(t, "echo socket", net.ListenPacket), t.debugf)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -768,10 +770,13 @@ func (t *Tracer) openEchoSocket() (probeSender, func(), error) {
 // family, whichever socket the request left on. The listener's socket gets its
 // copy regardless, so this one is told to take as little as the platform
 // allows (see quiet).
-func openEchoConn(ipVersion int, debugf func(format string, args ...any)) (*echoConn, error) {
+//
+// listen opens the socket: net.ListenPacket, which the tracer wraps so that
+// the socket is bound to the trace's source address (source_bind.go).
+func openEchoConn(ipVersion int, listen func(network, address string) (net.PacketConn, error), debugf func(format string, args ...any)) (*echoConn, error) {
 	// The same socket icmp.ListenPacket opens for the listener, held as the
 	// net.PacketConn it is so the receive buffer can be set.
-	pc, err := net.ListenPacket(ListenerNet(ipVersion), RawListenAddr(ipVersion))
+	pc, err := listen(ListenerNet(ipVersion), RawListenAddr(ipVersion))
 	if err != nil {
 		return nil, err
 	}

@@ -10,10 +10,14 @@ import (
 // Who computes the checksum of an IPv6 UDP or TCP probe (viaduct#171).
 //
 // The checksum covers a pseudo-header that holds the packet's source address.
-// The raw send socket is not bound, so the kernel picks the source address of
-// every packet, and on a host with several global addresses it does not always
-// pick the one found at startup (Config.SourceIP). A checksum computed here
-// over that address is then wrong, and the probe is dropped on the path.
+// When the raw send socket is not bound, the kernel picks the source address
+// of every packet, and on a host with several global addresses it does not
+// always pick the one found at startup (Config.SourceIP). A checksum computed
+// here over that address is then wrong, and the probe is dropped on the path.
+//
+// The send socket is now opened bound to Config.SourceIP (source_bind.go,
+// viaduct#234), but is unbound when there is no such address or the bind
+// fails, so what follows still applies to every send socket.
 //
 // So the kernel is asked to fill the checksum (IPV6_CHECKSUM): it sums the
 // pseudo-header of the address it really sends from. The probe is built with

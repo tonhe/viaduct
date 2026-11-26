@@ -169,7 +169,7 @@ func TestOpenEchoConn_TakesAsLittleAsThePlatformAllows(t *testing.T) {
 			defer witness.Close()
 
 			var sink logSink
-			conn, err := openEchoConn(fam.v, sink.logf)
+			conn, err := openEchoConn(fam.v, net.ListenPacket, sink.logf)
 			if err != nil {
 				t.Fatalf("openEchoConn: %v", err)
 			}
