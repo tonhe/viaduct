@@ -386,12 +386,20 @@ func TestRun_IPv6ProbeChecksumValidForKernelSource(t *testing.T) {
 			if err := <-done; err != nil {
 				skipUnlessRequired(t, "Run could not open its sockets: %v", err)
 			}
-			close(results)
-
+			// Run can return while its TCP listener is still sending on
+			// results (viaduct#219): stop it and drain the channel without
+			// closing it.
+			cancel()
 			answered := 0
-			for r := range results {
-				if r.ProbeType == tc.want && r.IsTarget {
-					answered++
+		drain:
+			for {
+				select {
+				case r := <-results:
+					if r.ProbeType == tc.want && r.IsTarget {
+						answered++
+					}
+				default:
+					break drain
 				}
 			}
 			// 2 rounds of 2 flows at one hop.
