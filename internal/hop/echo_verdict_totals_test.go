@@ -8,6 +8,32 @@ import (
 // The exports carry the echo totals the hop's verdict and headline used, and
 // say which nodes are left out of them (viaduct#147).
 
+// LossSnapshot reads from one state what the separate accessors read one by one.
+func TestHop_LossSnapshotMatchesAccessors(t *testing.T) {
+	a, b := net.ParseIP(silentNodeA), net.ParseIP(silentNodeB)
+	h := NewHop(6)
+	for round := 0; round < 40; round++ {
+		runECMPRound(h, round, func(ip string) bool { return ip == silentNodeA })
+	}
+	snap := h.LossSnapshot()
+	pct, kind := h.Loss()
+	if snap.Loss != pct || snap.Kind != kind {
+		t.Errorf("snapshot loss = %v %v, Loss = %v %v", snap.Loss, snap.Kind, pct, kind)
+	}
+	if snap.RateLimit != h.RateLimitState() {
+		t.Errorf("snapshot verdict = %v, RateLimitState = %v", snap.RateLimit, h.RateLimitState())
+	}
+	if s, r := h.VerdictEchoTotals(); snap.EchoSent != s || snap.EchoReceived != r {
+		t.Errorf("snapshot echo totals = %d, %d; VerdictEchoTotals = %d, %d", snap.EchoSent, snap.EchoReceived, s, r)
+	}
+	if snap.EchoIgnoredIPs[a.String()] != h.EchoIgnored(a) || snap.EchoIgnoredIPs[b.String()] != h.EchoIgnored(b) {
+		t.Errorf("snapshot ignored = %v, want a=%v b=%v", snap.EchoIgnoredIPs, h.EchoIgnored(a), h.EchoIgnored(b))
+	}
+	if !snap.EchoIgnoredIPs[b.String()] {
+		t.Error("fixture: the silent node is not marked ignored")
+	}
+}
+
 func TestHop_VerdictEchoTotalsAndEchoIgnored(t *testing.T) {
 	a, b := net.ParseIP(silentNodeA), net.ParseIP(silentNodeB)
 

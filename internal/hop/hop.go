@@ -439,6 +439,10 @@ const (
 func (h *Hop) Loss() (pct float64, kind LossKind) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.lossLocked()
+}
+
+func (h *Hop) lossLocked() (pct float64, kind LossKind) {
 	verdict := h.rateLimitStateLocked()
 	if verdict == RateLimitYes {
 		sent, received := h.echoTotalsLocked()
@@ -556,6 +560,49 @@ func (h *Hop) EchoIgnored(ip net.IP) bool {
 		}
 	}
 	return ignores && othersAnswer
+}
+
+// LossSnapshot is a hop's loss figures read together under one lock, so they
+// agree with each other even while probes are being recorded.
+type LossSnapshot struct {
+	Loss           float64
+	Kind           LossKind
+	RateLimit      RateLimitState
+	EchoSent       int // the totals the verdict and headline were made from
+	EchoReceived   int
+	EchoIgnoredIPs map[string]bool // keyed by net.IP.String()
+}
+
+// LossSnapshot returns the hop's headline loss, its kind, its rate-limit
+// verdict, the echo totals they were made from (see VerdictEchoTotals) and the
+// nodes left out of those totals (see EchoIgnored), all from one state.
+func (h *Hop) LossSnapshot() LossSnapshot {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var snap LossSnapshot
+	snap.Loss, snap.Kind = h.lossLocked()
+	snap.RateLimit = h.rateLimitStateLocked()
+	snap.EchoSent, snap.EchoReceived = h.echoTotalsLocked()
+	if snap.EchoSent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined {
+		snap.EchoSent, snap.EchoReceived = h.heldEchoSent, h.heldEchoRecvd
+	}
+	snap.EchoIgnoredIPs = make(map[string]bool)
+	for i, n := range h.Nodes {
+		if n.IP == nil {
+			continue
+		}
+		s := n.EchoStats()
+		if s.Received != 0 || s.Sent < echoSilentAfter {
+			continue
+		}
+		for j, o := range h.Nodes {
+			if i != j && o.EchoStats().Received > 0 {
+				snap.EchoIgnoredIPs[n.IP.String()] = true
+				break
+			}
+		}
+	}
+	return snap
 }
 
 // String names the kind as the JSON export does (loss_kind).

@@ -45,11 +45,12 @@ type Report struct {
 //
 // EchoSent and EchoReceived are the echo totals the verdict and the headline
 // were made from: the direct echoes to the hop's nodes, without the nodes
-// marked EchoIgnored and without the echoes a node ignored before it first
-// answered. They are not the sum of the nodes' raw echo counts. While a hop
-// keeps an earlier verdict because its totals fell below 20 samples, they are
-// the totals that verdict was made from. A rate-limited HeadlineLoss is
-// (EchoSent - EchoReceived) / EchoSent.
+// marked EchoIgnored and, for a node that was left out and then started
+// answering, without the echoes it ignored before it first answered. They are
+// not the sum of the nodes' raw echo counts. While a hop keeps an earlier
+// verdict because its totals fell below 20 samples, they are the totals that
+// verdict was made from. A rate-limited HeadlineLoss is
+// (EchoSent - EchoReceived) / EchoSent * 100.
 type Hop struct {
 	TTL            int     `json:"ttl"`
 	Nodes          []Node  `json:"nodes,omitempty"`
@@ -165,7 +166,10 @@ func BuildReport(version string, target string, targetIP net.IP,
 		// A hop that never answered has no nodes, and still reports what was
 		// sent to it: its probes are in the report's total.
 		probesSent, probesRecvd := h.ProbeCounts()
-		headline, lossKind := h.Loss()
+		// One locked read, so the headline, verdict, echo totals and
+		// echo_ignored flags agree even during a live export.
+		snap := h.LossSnapshot()
+		headline, lossKind := snap.Loss, snap.Kind
 		eh := Hop{
 			TTL:            ttl,
 			Loss:           h.LossPercent(),
@@ -176,7 +180,7 @@ func BuildReport(version string, target string, targetIP net.IP,
 			ProbesSent:     probesSent,
 			ProbesReceived: probesRecvd,
 		}
-		eh.EchoSent, eh.EchoReceived = h.VerdictEchoTotals()
+		eh.EchoSent, eh.EchoReceived = snap.EchoSent, snap.EchoReceived
 
 		for _, node := range h.GetNodes() {
 			ip := node.GetIP()
@@ -209,8 +213,8 @@ func BuildReport(version string, target string, targetIP net.IP,
 				Echo:    ProbeCount{Sent: echo.Sent, Received: echo.Received},
 			}
 			// The verdict is the hop's (see hop.Hop.RateLimitState).
-			en.RateLimited = rateLimitName(h.RateLimitState())
-			en.EchoIgnored = h.EchoIgnored(ip)
+			en.RateLimited = rateLimitName(snap.RateLimit)
+			en.EchoIgnored = snap.EchoIgnoredIPs[ip.String()]
 
 			if en.Hostname == "" && resolver != nil {
 				if name, ok := resolver.Lookup(ip); ok {
