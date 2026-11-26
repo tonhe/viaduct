@@ -49,8 +49,9 @@ type Report struct {
 // answering, without the echoes it ignored before it first answered. They are
 // not the sum of the nodes' raw echo counts. While a hop keeps an earlier
 // verdict because its totals fell below 20 samples, they are the totals that
-// verdict was made from. A rate-limited HeadlineLoss is
-// (EchoSent - EchoReceived) / EchoSent * 100.
+// verdict was made from, VerdictHeld is true, and VerdictProbesSent and
+// VerdictProbesReceived are the TTL-probe counts it was made from. A
+// rate-limited HeadlineLoss is (EchoSent - EchoReceived) / EchoSent * 100.
 type Hop struct {
 	TTL            int     `json:"ttl"`
 	Nodes          []Node  `json:"nodes,omitempty"`
@@ -63,6 +64,17 @@ type Hop struct {
 	ProbesReceived int     `json:"probes_received"`
 	EchoSent       int     `json:"echo_sent"`
 	EchoReceived   int     `json:"echo_received"`
+
+	// VerdictHeld is true while the hop holds an earlier verdict: its echo
+	// totals fell below 20 samples after it had one. VerdictProbesSent and
+	// VerdictProbesReceived are the TTL-probe counts the verdict was made
+	// from: the counts of the moment a held verdict was taken, and otherwise
+	// equal to ProbesSent and ProbesReceived. The nodes' RateLimited verdict
+	// is the rate-limit test on VerdictProbesSent, VerdictProbesReceived,
+	// EchoSent and EchoReceived, held or not.
+	VerdictHeld           bool `json:"verdict_held"`
+	VerdictProbesSent     int  `json:"verdict_probes_sent"`
+	VerdictProbesReceived int  `json:"verdict_probes_received"`
 }
 
 // Node represents a unique responder at a given TTL.
@@ -181,6 +193,8 @@ func BuildReport(version string, target string, targetIP net.IP,
 			ProbesReceived: probesRecvd,
 		}
 		eh.EchoSent, eh.EchoReceived = snap.EchoSent, snap.EchoReceived
+		eh.VerdictHeld = snap.VerdictHeld
+		eh.VerdictProbesSent, eh.VerdictProbesReceived = snap.VerdictProbesSent, snap.VerdictProbesReceived
 
 		for _, node := range h.GetNodes() {
 			ip := node.GetIP()

@@ -24,6 +24,11 @@ var csvHeader = []string{
 	// hop_echo_sent and hop_echo_received are those totals, the ones the
 	// verdict and the headline were made from, repeated on each node's row.
 	"echo_ignored", "hop_echo_sent", "hop_echo_received",
+	// verdict_held is true while the hop holds an earlier verdict, and
+	// verdict_probes_sent and verdict_probes_received are the TTL-probe counts
+	// the verdict was made from. They are the hop's, repeated on each node's
+	// row like the hop's echo totals.
+	"verdict_held", "verdict_probes_sent", "verdict_probes_received",
 	// error is the last column: the message for a target that could not be
 	// traced, empty on every row of a target that was.
 	"error",
@@ -38,6 +43,9 @@ const (
 	csvColLossKind = 18
 	csvColHopEchoS = 27
 	csvColHopEchoR = 28
+	csvColHeld     = 29
+	csvColVerdictS = 30
+	csvColVerdictR = 31
 )
 
 // csvColError is the position in csvHeader of the error column.
@@ -82,6 +90,9 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 				row[csvColLossKind] = csvLossKind(h)
 				row[csvColHopEchoS] = fmt.Sprintf("%d", h.EchoSent)
 				row[csvColHopEchoR] = fmt.Sprintf("%d", h.EchoReceived)
+				row[csvColHeld] = fmt.Sprintf("%t", h.VerdictHeld)
+				row[csvColVerdictS] = fmt.Sprintf("%d", h.VerdictProbesSent)
+				row[csvColVerdictR] = fmt.Sprintf("%d", h.VerdictProbesReceived)
 			}
 			if withTarget {
 				row = append([]string{r.Target}, row...)
@@ -128,6 +139,9 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 				fmt.Sprintf("%t", n.EchoIgnored),
 				fmt.Sprintf("%d", h.EchoSent),
 				fmt.Sprintf("%d", h.EchoReceived),
+				fmt.Sprintf("%t", h.VerdictHeld),
+				fmt.Sprintf("%d", h.VerdictProbesSent),
+				fmt.Sprintf("%d", h.VerdictProbesReceived),
 				"", // error
 			}
 			if withTarget {

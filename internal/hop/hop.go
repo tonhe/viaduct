@@ -47,11 +47,14 @@ type Hop struct {
 	// echo loss that went with it. Once a hop has had a verdict it keeps one:
 	// while its echo totals are below the samples a verdict needs, these stand
 	// in (see holdVerdictLocked). Undetermined until the first verdict.
-	// heldEchoSent and heldEchoRecvd are the echo totals both were made from.
-	heldVerdict   RateLimitState
-	heldEchoLoss  float64
-	heldEchoSent  int
-	heldEchoRecvd int
+	// heldEchoSent and heldEchoRecvd are the echo totals both were made from,
+	// and heldProbesSent and heldProbesRecvd the TTL-probe counts.
+	heldVerdict     RateLimitState
+	heldEchoLoss    float64
+	heldEchoSent    int
+	heldEchoRecvd   int
+	heldProbesSent  int
+	heldProbesRecvd int
 
 	mu sync.RWMutex
 }
@@ -358,6 +361,46 @@ func (h *Hop) holdVerdictLocked() {
 	h.heldVerdict = verdict
 	h.heldEchoLoss = echoLossPercent(sent, received)
 	h.heldEchoSent, h.heldEchoRecvd = sent, received
+	h.heldProbesSent, h.heldProbesRecvd = h.closedSent, h.closedRecvd
+}
+
+// verdictHeldLocked reports whether the verdict the hop shows is a held one:
+// it has had a verdict, and its echo totals are now below the samples a new
+// one needs.
+func (h *Hop) verdictHeldLocked() bool {
+	sent, _ := h.echoTotalsLocked()
+	return sent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined
+}
+
+// verdictProbeCountsLocked returns the TTL-probe counts the hop's verdict was
+// made from: the held ones while the verdict is held, else the current ones.
+func (h *Hop) verdictProbeCountsLocked() (sent, received int) {
+	if h.verdictHeldLocked() {
+		return h.heldProbesSent, h.heldProbesRecvd
+	}
+	return h.closedSent, h.closedRecvd
+}
+
+// VerdictHeld reports whether the hop is holding an earlier rate-limit
+// verdict: its echo totals fell below the samples a verdict needs after it had
+// one, and the new totals are not yet enough. The verdict it shows was then
+// made from VerdictEchoTotals and VerdictProbeCounts, not from the current
+// counts.
+func (h *Hop) VerdictHeld() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.verdictHeldLocked()
+}
+
+// VerdictProbeCounts returns the TTL-limited probes sent to this TTL, and the
+// replies received, that the hop's rate-limit verdict was made from. While
+// the hop holds an earlier verdict (see VerdictHeld) they are the counts of
+// the moment that verdict was taken; otherwise they equal ProbeCounts. With
+// VerdictEchoTotals they are everything the verdict was computed from.
+func (h *Hop) VerdictProbeCounts() (sent, received int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.verdictProbeCountsLocked()
 }
 
 // beforeEchoAnswerLocked runs before an echo answer from node is recorded.
@@ -571,11 +614,19 @@ type LossSnapshot struct {
 	EchoSent       int // the totals the verdict and headline were made from
 	EchoReceived   int
 	EchoIgnoredIPs map[string]bool // keyed by net.IP.String()
+	// VerdictHeld is true while the hop holds an earlier verdict, and the
+	// VerdictProbes counts are the TTL-probe counts the verdict was made from
+	// (see VerdictHeld and VerdictProbeCounts).
+	VerdictHeld           bool
+	VerdictProbesSent     int
+	VerdictProbesReceived int
 }
 
 // LossSnapshot returns the hop's headline loss, its kind, its rate-limit
-// verdict, the echo totals they were made from (see VerdictEchoTotals) and the
-// nodes left out of those totals (see EchoIgnored), all from one state.
+// verdict, the echo totals they were made from (see VerdictEchoTotals), the
+// nodes left out of those totals (see EchoIgnored), whether the verdict is a
+// held one and the TTL-probe counts it was made from (see VerdictHeld and
+// VerdictProbeCounts), all from one state.
 func (h *Hop) LossSnapshot() LossSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -586,6 +637,8 @@ func (h *Hop) LossSnapshot() LossSnapshot {
 	if snap.EchoSent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined {
 		snap.EchoSent, snap.EchoReceived = h.heldEchoSent, h.heldEchoRecvd
 	}
+	snap.VerdictHeld = h.verdictHeldLocked()
+	snap.VerdictProbesSent, snap.VerdictProbesReceived = h.verdictProbeCountsLocked()
 	snap.EchoIgnoredIPs = make(map[string]bool)
 	for i, n := range h.Nodes {
 		if n.IP == nil {
@@ -693,6 +746,7 @@ func (h *Hop) Reset() {
 	h.heldVerdict = RateLimitUndetermined
 	h.heldEchoLoss = 0
 	h.heldEchoSent, h.heldEchoRecvd = 0, 0
+	h.heldProbesSent, h.heldProbesRecvd = 0, 0
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.
