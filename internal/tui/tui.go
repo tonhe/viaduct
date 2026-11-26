@@ -524,12 +524,9 @@ func (m Model) renderView() string {
 		for ttl := 1; ttl <= hopMaxTTL; ttl++ {
 			h, ok := hopMap[ttl]
 			if !ok || h.GetIP() == nil {
+				// The marker sits in the IP column, like an address.
 				star := starStyle().Render("*")
-				treeGap := ""
-				if s.probeCfg.NumPaths > 1 {
-					treeGap = "     " // 4 chars + 1 space separator
-				}
-				hopLines = append(hopLines, fmt.Sprintf("%s %s%s", dimStyle().Render(fmt.Sprintf("%-3d", ttl)), treeGap, star))
+				hopLines = append(hopLines, fmt.Sprintf("%s %s%s", dimStyle().Render(fmt.Sprintf("%-3d", ttl)), layout.treeGap(), star))
 				continue
 			}
 			if h.IsDivergent() {
@@ -723,17 +720,23 @@ func (m Model) getLayout() columnLayout {
 	ipWidth := computeIPColWidth(hops)
 	layout := columnLayout{ipWidth: ipWidth}
 
-	if s.probeCfg.NumPaths > 1 {
-		layout.showTree = true
-		// The tree column only carries connectors for hops with more than one
-		// node. With none, it is blank and can go when the terminal is narrow.
-		layout.treeOptional = true
-		for _, h := range hops {
-			if h.IsDivergent() {
-				layout.treeOptional = false
-				break
-			}
+	// The tree column carries the connectors of hops with more than one node.
+	// It is a column of the layout, present in the header and in every row,
+	// so a connector never moves the columns after it. It is shown whenever a
+	// hop has more than one node, whatever the flow count: one flow still
+	// meets several nodes at a hop when routers balance per packet, which is
+	// what an ICMP trace sees. With several flows and no such hop yet it is
+	// blank, and can go when the terminal is narrow.
+	divergent := false
+	for _, h := range hops {
+		if h.IsDivergent() {
+			divergent = true
+			break
 		}
+	}
+	if divergent || s.probeCfg.NumPaths > 1 {
+		layout.showTree = true
+		layout.treeOptional = !divergent
 	}
 
 	// Budget-based layout: start with fixed columns (#, IP, Loss%, Avg, Spark),
@@ -743,7 +746,7 @@ func (m Model) getLayout() columnLayout {
 	// Column widths (from renderColumnHeader / renderHopRow):
 	//   # = 3, tree = 4, IP = ipWidth, Hostname = hostnameWidth,
 	//   ASN = asnWidth, Loss% = 8, Rnd = 5, Avg/Best/Wrst/StDev/Last/Delta/GMean/Jttr/Javg = 7,
-	//   Spark = 14, Trend = 9
+	//   Spark = 14, Trend = trendWidth (11)
 	// Parts are joined with " " (1 char per gap), so total separators = numParts - 1.
 	//
 	// Fixed parts: #(3) + IP(ipWidth) + Loss%(8) + Avg(7) + Spark(14) = 5 parts
@@ -788,7 +791,7 @@ func (m Model) getLayout() columnLayout {
 		if tryAdd(7 + 1) {
 			layout.showDelta = true
 		}
-		if tryAdd(9 + 1) {
+		if tryAdd(trendWidth + 1) {
 			layout.showTrend = true
 		}
 		if hasASN && tryAdd(asnShortW+1) {
@@ -857,7 +860,7 @@ func (m Model) getLayout() columnLayout {
 		if tryAdd(7 + 1) {
 			layout.showJavg = true
 		}
-		if tryAdd(9 + 1) {
+		if tryAdd(trendWidth + 1) {
 			layout.showTrend = true
 		}
 		if hasASN && tryAdd(asnShortW+1) {
@@ -922,6 +925,21 @@ func (m Model) getLayout() columnLayout {
 	return layout
 }
 
+// treeGap is the blank a row without columns of its own (a hop that did not
+// answer, the "more paths" note) puts between the hop number and the IP
+// column: the tree column and its separator, or nothing when the layout has
+// no tree column.
+func (l columnLayout) treeGap() string {
+	if l.showTree {
+		return "     " // 4 cells + 1 separator
+	}
+	return ""
+}
+
+// trendWidth is the width of the Trend column: "▲ degrading" and
+// "▼ improving", its longest cells, are 11 cells.
+const trendWidth = 11
+
 // computeWidth returns the exact display width this layout will render,
 // matching the logic in renderColumnHeader (parts joined with " ").
 func (l *columnLayout) computeWidth() int {
@@ -980,7 +998,7 @@ func (l *columnLayout) computeWidth() int {
 		parts++
 	}
 	if l.showTrend {
-		w += 9
+		w += trendWidth
 		parts++
 	}
 	w += parts - 1 // separators from strings.Join(" ")
@@ -1138,7 +1156,7 @@ func (m Model) renderColumnHeader(layout columnLayout) string {
 		parts = append(parts, fmt.Sprintf("%-14s", "Spark"))
 	}
 	if layout.showTrend {
-		parts = append(parts, fmt.Sprintf("%-9s", "Trend"))
+		parts = append(parts, fmt.Sprintf("%-*s", trendWidth, "Trend"))
 	}
 	return strings.Join(parts, " ")
 }
@@ -1298,14 +1316,14 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 			trend := pn.Trend()
 			switch trend {
 			case "degrading":
-				parts = append(parts, trendDegStyle().Render(fmt.Sprintf("%-9s", "▲ "+trend)))
+				parts = append(parts, trendDegStyle().Render(fmt.Sprintf("%-*s", trendWidth, "▲ "+trend)))
 			case "improving":
-				parts = append(parts, trendImpStyle().Render(fmt.Sprintf("%-9s", "▼ "+trend)))
+				parts = append(parts, trendImpStyle().Render(fmt.Sprintf("%-*s", trendWidth, "▼ "+trend)))
 			default:
-				parts = append(parts, dimStyle().Render(fmt.Sprintf("%-9s", "— stable")))
+				parts = append(parts, dimStyle().Render(fmt.Sprintf("%-*s", trendWidth, "— stable")))
 			}
 		} else {
-			parts = append(parts, fmt.Sprintf("%-9s", "-"))
+			parts = append(parts, fmt.Sprintf("%-*s", trendWidth, "-"))
 		}
 	}
 
@@ -1444,14 +1462,14 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 				trend := node.Trend()
 				switch trend {
 				case "degrading":
-					parts = append(parts, trendDegStyle().Render(fmt.Sprintf("%-9s", "▲ "+trend)))
+					parts = append(parts, trendDegStyle().Render(fmt.Sprintf("%-*s", trendWidth, "▲ "+trend)))
 				case "improving":
-					parts = append(parts, trendImpStyle().Render(fmt.Sprintf("%-9s", "▼ "+trend)))
+					parts = append(parts, trendImpStyle().Render(fmt.Sprintf("%-*s", trendWidth, "▼ "+trend)))
 				default:
-					parts = append(parts, dimStyle().Render(fmt.Sprintf("%-9s", "— stable")))
+					parts = append(parts, dimStyle().Render(fmt.Sprintf("%-*s", trendWidth, "— stable")))
 				}
 			} else {
-				parts = append(parts, fmt.Sprintf("%-9s", ""))
+				parts = append(parts, fmt.Sprintf("%-*s", trendWidth, ""))
 			}
 		}
 
@@ -1459,7 +1477,8 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 	}
 
 	if overflow > 0 {
-		lines = append(lines, fmt.Sprintf("     %s",
+		// The note starts in the IP column, under the addresses it stands for.
+		lines = append(lines, fmt.Sprintf("    %s%s", layout.treeGap(),
 			stabStyle().Render(fmt.Sprintf("... +%d more paths", overflow))))
 	}
 
