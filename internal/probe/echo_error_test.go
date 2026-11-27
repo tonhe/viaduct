@@ -92,6 +92,7 @@ func TestListen_ICMPErrorNeverAnswersAnEcho(t *testing.T) {
 			{"Time Exceeded", func(f echoErrorFamily) func([]byte) []byte { return f.exceeded }},
 		} {
 			t.Run(fam.name+"/"+errMsg.name, func(t *testing.T) {
+				t.Parallel()
 				tr := fam.tracer()
 				tr.cfg.EchoID = 0xE00E
 				target := tr.cfg.TargetIP
