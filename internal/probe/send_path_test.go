@@ -87,6 +87,7 @@ func TestSend_WriteDeadlineIsSetBeforeEveryWrite(t *testing.T) {
 	for _, fam := range stallFamilies {
 		for _, p := range stallProtocols {
 			t.Run(fam.name+"/"+p.name, func(t *testing.T) {
+				t.Parallel()
 				cfg, target := stallCfg(fam.v, fam.source, fam.target, p.proto)
 				cfg.MaxRounds = rounds
 				snd := newStallSender(nil) // every write succeeds
@@ -392,6 +393,7 @@ func TestRun_ReportsProbesSentByType(t *testing.T) {
 			{"udp, every send fails", stallProtocols[1].proto, &errSender{}, 0, 0},
 		} {
 			t.Run(fam.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
 				cfg, target := stallCfg(fam.v, fam.source, fam.target, tc.proto)
 				cfg.MaxRounds = 1
 				tr := stallTracer(cfg, target, tc.snd)
@@ -419,6 +421,7 @@ func TestRun_StalledEchoIsNotCountedAndDoesNotStopTheTrace(t *testing.T) {
 	const rounds = 4
 	for _, fam := range stallFamilies {
 		t.Run(fam.name, func(t *testing.T) {
+			t.Parallel()
 			cfg, target := stallCfg(fam.v, fam.source, fam.target, stallProtocols[0].proto)
 			cfg.MaxRounds = rounds
 			// Writes to the target go out; writes to the hops block.
