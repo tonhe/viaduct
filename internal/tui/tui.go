@@ -231,6 +231,7 @@ type Model struct {
 	exportStatusMsg  string
 	exportStatusTime time.Time
 	nowFunc          func() time.Time // for test determinism; nil defaults to time.Now
+	asnLookup        func(net.IP) (asn.Info, bool) // test seam; nil = enricher.Lookup
 }
 
 // focused returns the currently focused session. Model always has at least one session.
@@ -690,7 +691,7 @@ func (m Model) asnColumnWidth(full bool) int {
 		if ip == nil {
 			continue
 		}
-		info, ok := m.enricher.Lookup(ip)
+		info, ok := m.lookupASN(ip)
 		if !ok || info.Number == 0 {
 			continue
 		}
@@ -700,8 +701,8 @@ func (m Model) asnColumnWidth(full bool) int {
 		} else {
 			label = asn.FormatASNShort(info.Number)
 		}
-		if len(label) > maxLen {
-			maxLen = len(label)
+		if w := lipgloss.Width(label); w > maxLen {
+			maxLen = w
 		}
 	}
 	if maxLen < min {
@@ -1229,13 +1230,11 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 				hostname = name
 			}
 		}
-		if len(hostname) > layout.hostnameWidth {
-			hostname = hostname[:layout.hostnameWidth]
-		}
+		hostname = truncateCells(hostname, layout.hostnameWidth)
 		if hostname == "" {
 			hostname = "..."
 		}
-		parts = append(parts, hostStyle().Render(fmt.Sprintf("%-*s", layout.hostnameWidth, hostname)))
+		parts = append(parts, hostStyle().Render(padCell(hostname, layout.hostnameWidth)))
 	}
 
 	if layout.showASN {
@@ -1249,7 +1248,7 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 	// RTT stats are hop-level, taken from the TTL-limited probes. Echo
 	// replies are kept in the node's EchoStats and do not feed them.
 	if layout.showRnd {
-		parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
+		parts = append(parts, fmt.Sprintf("%-5s", formatRounds(h.Rounds(), 5)))
 	}
 	parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.AvgRTT())))
 	if layout.showBest {
@@ -1381,13 +1380,11 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 					hostname = name
 				}
 			}
-			if len(hostname) > layout.hostnameWidth {
-				hostname = hostname[:layout.hostnameWidth]
-			}
+			hostname = truncateCells(hostname, layout.hostnameWidth)
 			if hostname == "" {
 				hostname = "..."
 			}
-			parts = append(parts, hostStyle().Render(fmt.Sprintf("%-*s", layout.hostnameWidth, hostname)))
+			parts = append(parts, hostStyle().Render(padCell(hostname, layout.hostnameWidth)))
 		}
 
 		if layout.showASN {
@@ -1409,7 +1406,7 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 		// into PathNode stats and needs no separate branch.
 		if layout.showRnd {
 			if i == 0 {
-				parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
+				parts = append(parts, fmt.Sprintf("%-5s", formatRounds(h.Rounds(), 5)))
 			} else {
 				parts = append(parts, fmt.Sprintf("%-5s", "-"))
 			}
@@ -1507,11 +1504,20 @@ func (m Model) prevASNForTTL(ttl int) int {
 		if ip == nil {
 			continue
 		}
-		if info, ok := m.enricher.Lookup(ip); ok && info.Number != 0 {
+		if info, ok := m.lookupASN(ip); ok && info.Number != 0 {
 			return info.Number
 		}
 	}
 	return 0
+}
+
+// lookupASN returns the cached ASN info for ip: from the enricher, or from
+// asnLookup when a test has set it.
+func (m Model) lookupASN(ip net.IP) (asn.Info, bool) {
+	if m.asnLookup != nil {
+		return m.asnLookup(ip)
+	}
+	return m.enricher.Lookup(ip)
 }
 
 // renderASNCell formats the ASN column with boundary highlighting.
@@ -1521,7 +1527,7 @@ func (m Model) renderASNCell(ip net.IP, prevASN int, width int, full bool) strin
 	if m.enricher == nil || ip == nil {
 		return fmt.Sprintf("%-*s", width, "")
 	}
-	info, ok := m.enricher.Lookup(ip)
+	info, ok := m.lookupASN(ip)
 	if !ok {
 		return dimStyle().Render(fmt.Sprintf("%-*s", width, "..."))
 	}
@@ -1534,10 +1540,7 @@ func (m Model) renderASNCell(ip net.IP, prevASN int, width int, full bool) strin
 	if label == "" {
 		return fmt.Sprintf("%-*s", width, "")
 	}
-	if len(label) > width {
-		label = label[:width]
-	}
-	formatted := fmt.Sprintf("%-*s", width, label)
+	formatted := padCell(truncateCells(label, width), width)
 	if info.Number != 0 && info.Number != prevASN {
 		return asnBoundaryStyle().Render(formatted)
 	}

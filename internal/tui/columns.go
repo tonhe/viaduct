@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -400,6 +401,45 @@ func (m Model) paneRowContent(lay paneLayout, inner, ttl int, h *hop.Hop) string
 		fields = append(fields, lossCell)
 	}
 	return padCell(" "+strings.Join(fields, " "), inner)
+}
+
+// truncateCells cuts s to at most n display cells. It never cuts inside a
+// character, so a wide character that would straddle the limit is dropped and
+// the result can be a cell short of n; pad with padCell, which counts cells.
+func truncateCells(s string, n int) string {
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	w := 0
+	for i, r := range s {
+		rw := lipgloss.Width(string(r))
+		if w+rw > n {
+			return s[:i]
+		}
+		w += rw
+	}
+	return s
+}
+
+// formatRounds renders a round count in at most width cells. A count with
+// more digits than that is shown in a short form, rounded down: 123456 in 5
+// cells is "123k", 12345678 is "12M".
+func formatRounds(n, width int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= width {
+		return s
+	}
+	div := 1
+	for _, suffix := range []string{"k", "M", "G", "T", "P", "E"} {
+		div *= 1000
+		if short := strconv.Itoa(n/div) + suffix; len(short) <= width {
+			return short
+		}
+	}
+	if width < 0 {
+		width = 0
+	}
+	return s[:width]
 }
 
 // truncateAddr shortens an address to n columns by cutting out its middle:
