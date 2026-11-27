@@ -518,7 +518,7 @@ Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table t
 
 `--output` / `-o` exports a trace without the TUI. It takes `json`, `csv` or `dot` (case-insensitive; `graphviz` is accepted for `dot`); any other value is an error.
 
-- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval.
+- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval. If the export cannot be written (a full disk, a closed pipe), `via` reports the write error and exits non-zero.
 - **Where it goes** — standard output. There is no file argument; redirect or pipe it. Warnings and errors go to stderr, so they stay out of the export.
 
 ```bash

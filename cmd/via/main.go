@@ -1115,13 +1115,19 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	if outputFmt != "" {
 		versionStr := displayVersion(version) + " (" + buildVersion + ")"
 		report := export.BuildReport(versionStr, target, targetIP, protocolName, table, resolver, enricher, maxTTL)
+		// A report that could not be written (a full disk, a closed pipe)
+		// is a failed run: the caller exits non-zero.
+		var werr error
 		switch outputFmt {
 		case "json":
-			export.WriteJSON(os.Stdout, report)
+			werr = export.WriteJSON(os.Stdout, report)
 		case "csv":
-			export.WriteCSV(os.Stdout, report)
+			werr = export.WriteCSV(os.Stdout, report)
 		case "dot":
-			export.WriteDOT(os.Stdout, report)
+			werr = export.WriteDOT(os.Stdout, report)
+		}
+		if werr != nil {
+			return table, fmt.Errorf("writing the %s report: %w", outputFmt, werr)
 		}
 	} else {
 		printReport(target, targetIP, table, resolver, enricher, table.TargetTTL(), cfg.NumPaths, protocolName)
