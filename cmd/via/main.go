@@ -102,16 +102,22 @@ type lookupFunc func(host string) ([]net.IP, error)
 
 // resolveTargetSpecs resolves every target and selects its IP family
 // independently. Failures land in TargetSpec.Err; they never abort the
-// other targets. Port/ID blocks are assigned by session index.
-func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, base probe.Config, protocolName string, lookup lookupFunc) []tui.TargetSpec {
+// other targets. Port/ID blocks are assigned by session index. familySrc
+// names what forced the family (see familySource) and is used only in error
+// messages.
+func resolveTargetSpecs(targets []string, forceV4, forceV6 bool, familySrc string, hasV4, hasV6 bool, base probe.Config, protocolName string, lookup lookupFunc) []tui.TargetSpec {
 	specs := make([]tui.TargetSpec, len(targets))
 	for i, tgt := range targets {
 		specs[i] = tui.TargetSpec{Name: tgt, ProtocolName: protocolName}
-		// A link-local target is not supported: the trace would be one hop on
-		// the local link. A zoned literal is caught before the lookup, which
-		// returns the address without its zone.
-		if isZonedLinkLocalLiteral(tgt) {
-			specs[i].Err = fmt.Errorf("%s is a link-local address; link-local targets are not supported", tgt)
+		// A zoned literal is refused before the lookup, which would return
+		// the address without its zone. A link-local target is not supported
+		// at all: the trace would be one hop on the local link.
+		if zip, ok := zonedLiteral(tgt); ok {
+			if isLinkLocalV6(zip) {
+				specs[i].Err = fmt.Errorf("%s is a link-local address; link-local targets are not supported", tgt)
+			} else {
+				specs[i].Err = fmt.Errorf("%s is an address with a zone; zoned targets are not supported, give the address without %%zone", tgt)
+			}
 			continue
 		}
 		ips, err := lookup(tgt)
@@ -127,6 +133,13 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 			specs[i].Err = err
 			continue
 		}
+		// The unspecified address (0.0.0.0, ::) and the IPv4 broadcast
+		// address are not destinations either; 0.0.0.0 would trace localhost.
+		ips, err = dropUnspecifiedBroadcast(tgt, ips)
+		if err != nil {
+			specs[i].Err = err
+			continue
+		}
 		// Link-local without a zone, or a name that resolves to it. A name that
 		// also has other addresses uses those.
 		ips, err = dropLinkLocal(tgt, ips)
@@ -138,7 +151,7 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 		// embeds and is traced over IPv4 (To4 below does that). Forcing IPv6
 		// on one is a contradiction, so say so instead of "no AAAA record".
 		if forceV6 && isIPv4MappedLiteral(tgt) {
-			specs[i].Err = fmt.Errorf("%s is an IPv4-mapped address and is traced over IPv4; it cannot be used with -6", tgt)
+			specs[i].Err = fmt.Errorf("%s is an IPv4-mapped address and is traced over IPv4; it cannot be used with %s", tgt, familySrc)
 			continue
 		}
 		var v4, v6 net.IP
@@ -151,7 +164,9 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 		}
 		ver, ip, err := selectFamily(forceV4, forceV6, v4, v6, hasV4, hasV6)
 		if err != nil {
-			specs[i].Err = err
+			// Name the target: in multi-target mode each failure is printed
+			// on its own line.
+			specs[i].Err = fmt.Errorf("%s: %w", tgt, err)
 			continue
 		}
 		// Pre-flight an IPv6 choice: a host can have an IPv6 address and still
@@ -162,7 +177,7 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 			if rerr := routeTo(ip); rerr != nil {
 				switch {
 				case forceV6:
-					specs[i].Err = fmt.Errorf("no IPv6 route to %s (%v); -6 was given, so not falling back to IPv4", ip, rerr)
+					specs[i].Err = fmt.Errorf("no IPv6 route to %s (%v); IPv6 was forced by %s, so not falling back to IPv4", ip, rerr, familySrc)
 					continue
 				case v4 != nil:
 					specs[i].Notice = fmt.Sprintf("no IPv6 route to %s; using IPv4", ip)
@@ -240,15 +255,60 @@ func isLinkLocalV6(ip net.IP) bool {
 	return ip.To4() == nil && ip.IsLinkLocalUnicast()
 }
 
-// isZonedLinkLocalLiteral reports whether s is an IPv6 link-local literal with
-// a zone, such as fe80::1%eth0.
-func isZonedLinkLocalLiteral(s string) bool {
+// zonedLiteral reports whether s is an address literal with a zone, such as
+// fe80::1%eth0 or 2001:db8::1%eth0, and returns the address without it.
+func zonedLiteral(s string) (net.IP, bool) {
 	addr, _, zoned := strings.Cut(s, "%")
 	if !zoned {
-		return false
+		return nil, false
 	}
 	ip := net.ParseIP(addr)
-	return ip != nil && isLinkLocalV6(ip)
+	return ip, ip != nil
+}
+
+// dropUnspecifiedBroadcast removes the unspecified addresses (0.0.0.0, ::) and
+// the IPv4 limited broadcast address (255.255.255.255) from a target's
+// resolved addresses. If nothing else is left, it returns an error naming the
+// target.
+func dropUnspecifiedBroadcast(target string, ips []net.IP) ([]net.IP, error) {
+	kept := make([]net.IP, 0, len(ips))
+	var kind string
+	for _, ip := range ips {
+		switch {
+		case ip.IsUnspecified():
+			kind = "the unspecified address"
+		case ip.Equal(net.IPv4bcast):
+			kind = "the broadcast address"
+		default:
+			kept = append(kept, ip)
+		}
+	}
+	if len(kept) == 0 && len(ips) > 0 {
+		if net.ParseIP(target) != nil {
+			return nil, fmt.Errorf("%s is %s; via traces unicast targets only", target, kind)
+		}
+		return nil, fmt.Errorf("%s resolves only to unspecified or broadcast addresses; via traces unicast targets only", target)
+	}
+	return kept, nil
+}
+
+// familySource names what forced the IP family, for error messages: the -4
+// or -6 flag, or ip_family in the config file. It returns "" when no family
+// was forced.
+func familySource(forceV4, forceV6, fromConfig bool) string {
+	var ver string
+	switch {
+	case forceV4:
+		ver = "4"
+	case forceV6:
+		ver = "6"
+	default:
+		return ""
+	}
+	if fromConfig {
+		return fmt.Sprintf("ip_family = %q in the config file", ver)
+	}
+	return "-" + ver
 }
 
 // dropLinkLocal removes IPv6 link-local addresses (fe80::/10) from a target's
@@ -348,7 +408,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("-4 and -6 are mutually exclusive")
 	}
 
-	// Apply config default if neither flag was set
+	// Apply config default if neither flag was set. familySrc names what
+	// forced the family, so error messages blame the right thing.
+	familySrc := familySource(forceV4, forceV6, false)
 	if !forceV4 && !forceV6 {
 		switch appCfg.IPFamily {
 		case "4":
@@ -356,6 +418,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		case "6":
 			forceV6 = true
 		}
+		familySrc = familySource(forceV4, forceV6, true)
 	}
 
 	// Merge positional args with --targets file.
@@ -486,7 +549,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		MaxRounds:   count,
 		NoDNS:       noDNS,
 		ReportMode:  reportMode,
-		NumPaths: numPaths,
+		NumPaths:    numPaths,
 	}
 
 	// --debug-log: the probe engine's send failures and each target's round
@@ -517,7 +580,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	initPortAllocator(len(targets))
 
 	// Resolve all targets. hasV4/hasV6 probed once before the loop.
-	specs := resolveTargetSpecs(targets, forceV4, forceV6, hasV4, hasV6, baseCfg, protocolName, net.LookupIP)
+	specs := resolveTargetSpecs(targets, forceV4, forceV6, familySrc, hasV4, hasV6, baseCfg, protocolName, net.LookupIP)
 
 	// The base config's protocol object is shared by every spec. Give each
 	// target its own where the protocol keeps per-trace state (auto mode).

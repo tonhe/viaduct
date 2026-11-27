@@ -316,11 +316,11 @@ type stubTracer struct {
 	// capturedCfg records the Config passed at construction (set externally).
 	capturedCfg probe.Config
 
-	results        []probe.Result
-	onRound        probe.RoundMarker
-	onRoundEnd     func()
-	onEchoSent     func(ip net.IP, ttl int)
-	echoSubmitted  [][]probe.EchoTarget // one entry per SubmitEchoTargets call
+	results       []probe.Result
+	onRound       probe.RoundMarker
+	onRoundEnd    func()
+	onEchoSent    func(ip net.IP, ttl int)
+	echoSubmitted [][]probe.EchoTarget // one entry per SubmitEchoTargets call
 }
 
 func (s *stubTracer) SetOnRoundSent(r probe.RoundMarker) { s.onRound = r }
@@ -635,7 +635,7 @@ func baseProbeConfig() probe.Config {
 		NoDNS:       false,
 		ReportMode:  false,
 		NumPaths:    6,
-		IPVersion: 4,
+		IPVersion:   4,
 	}
 	cfg.Protocol, _ = buildProtocol("udp", 0, &cfg.NumPaths, cfg)
 	return cfg
@@ -653,7 +653,7 @@ func TestResolveTargetSpecs_MixedSuccess(t *testing.T) {
 		return nil, fmt.Errorf("unexpected host %q", host)
 	}
 	initPortAllocator(2)
-	specs := resolveTargetSpecs([]string{"v4.example", "bad.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+	specs := resolveTargetSpecs([]string{"v4.example", "bad.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 	if len(specs) != 2 {
 		t.Fatalf("specs = %d, want 2", len(specs))
 	}
@@ -674,7 +674,7 @@ func TestResolveTargetSpecs_PortBlocks(t *testing.T) {
 		return []net.IP{net.ParseIP("192.0.2.10")}, nil
 	}
 	initPortAllocator(2)
-	specs := resolveTargetSpecs([]string{"a.example", "b.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+	specs := resolveTargetSpecs([]string{"a.example", "b.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 	wantBase0, wantID0, _ := sessionPorts(0)
 	wantBase1, wantID1, _ := sessionPorts(1)
 	if specs[1].Cfg.BasePort != wantBase1 {
@@ -711,7 +711,7 @@ func TestResolveTargetSpecs_EmptyAnswer(t *testing.T) {
 
 	specs := resolveTargetSpecs(
 		[]string{"ok.example", "empty.example"},
-		false, false, true, true,
+		false, false, "", true, true,
 		baseProbeConfig(), "udp", lookup,
 	)
 
