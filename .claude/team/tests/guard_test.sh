@@ -183,6 +183,15 @@ expect block dev "git push origin 'refs/heads/*:refs/heads/*'"
 expect block dev "git -c push.default=matching push origin"
 expect block dev "git -c remote.origin.push=HEAD:main push"
 
+# no command-line git configuration and no aliases, for any role
+for role in director dev tester; do
+  expect block "$role" "git -c alias.p=push p origin main"
+  expect block "$role" "git -c remote.origin.mirror=true push origin"
+  expect block "$role" "git config alias.p push"
+  expect block "$role" "git config --global ALIAS.p push"
+  expect allow "$role" "git config user.name"
+done
+
 # settings paths in another letter case (macOS file systems ignore case)
 expect_file block dev "$HOME/.Claude/settings.json"
 expect_file block dev "/tmp/wt/.CLAUDE/Settings.local.json"

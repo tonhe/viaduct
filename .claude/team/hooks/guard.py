@@ -148,6 +148,14 @@ def check_git(role, argv):
     if not sub:
         return
 
+    # Every role: no one-off configuration and no aliases. Either can turn a
+    # harmless-looking command into a push or a merge the checks below miss.
+    before_sub = argv[1:argv.index(sub)]
+    if any(a == "-c" or a == "--config-env" or a.startswith("--config-env=") for a in before_sub):
+        raise Block("the team does not pass git configuration on the command line (-c, --config-env).")
+    if sub == "config" and any(a.lower().startswith("alias.") for a in args):
+        raise Block("the team does not define git aliases: they hide the command from the guard.")
+
     # Every role: the loop owns issue-N branches.
     new_branch = None
     if sub in ("checkout", "switch", "worktree"):
@@ -187,11 +195,6 @@ def check_git(role, argv):
         # destination from configuration the guard does not read.
         if any(a in ("--all", "--branches", "--mirror") for a in args) or any("*" in a for a in push_refs(args)):
             raise Block("the dev role pushes one named branch at a time.")
-        for i, a in enumerate(argv[:-1]):
-            if a == "-c" and re.match(r"^(remote\..*\.push|push\.default)=", argv[i + 1], re.IGNORECASE):
-                raise Block("the dev role pushes one named branch at a time, without push configuration overrides.")
-        if any(a == "--config-env" or a.startswith("--config-env=") for a in argv):
-            raise Block("the dev role pushes one named branch at a time, without push configuration overrides.")
         for a in push_refs(args):
             if MAIN_REF.match(a):
                 raise Block("the dev role does not push to main. Open a pull request.")
