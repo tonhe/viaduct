@@ -258,6 +258,8 @@ The main menu lists Theme, Probe Settings, Display & Enrichment, Alerting, then 
 
 The theme list shows 12 themes at a time and applies each theme as the cursor moves over it, so the whole screen previews it. `Esc` from the list restores the previous theme. Leaving the overlay with unsaved changes asks for confirmation. Saving writes the config file.
 
+Display Mode, under Display & Enrichment, is the `display_mode` setting. It names the view a session opens in: `default`, `health`, `latency` and `variability` open the view of that name, and `probes` opens Probe Detail. Saving with Display Mode changed switches the running view to the one chosen. Saving with it unchanged leaves the view alone, so a view reached with `d` survives a save of some other setting. `d` never changes the setting. The mapping is `viewModeForDisplayMode` in `internal/tui/display_mode.go`; a view added to the `d` cycle needs a value there and in `displayModeOptions`.
+
 ## Themes
 
 61 themes ship in `internal/theme/themes.go`. Each is a name, a slug, a light flag and the sixteen Base16 colors. Solarized Dark is the default.

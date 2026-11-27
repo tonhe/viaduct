@@ -264,6 +264,7 @@ func New(target string, targetIP net.IP, cfg probe.Config, version string, proto
 		dnsEnabled: !cfg.NoDNS,
 		autoScroll: true,
 		config:     appCfg,
+		viewMode:   startViewMode(appCfg),
 	}
 }
 

@@ -463,6 +463,20 @@ warning: config: PingSupplement was removed in v0.3.0 and is ignored
 
 Saving settings from the menu writes only current keys, so the removed key is gone from the file after the next save. `ping_supplement` (also accepted as `PingSupplement`) is the only such key today.
 
+### Starting view (`display_mode`)
+
+`display_mode` in the config file, or **Display Mode** under Display & Enrichment in the settings menu (<kbd>Esc</kbd>), chooses the view `via` opens in:
+
+| `display_mode` | View |
+|----------------|------|
+| `default` | Default |
+| `health` | Health |
+| `latency` | Latency |
+| `variability` | Variability |
+| `probes` | Probe Detail |
+
+Changing Display Mode in the menu and saving switches the running view to the one chosen. Saving other settings with Display Mode left as it was keeps the view you are in. <kbd>d</kbd> still cycles the views and does not change the setting.
+
 ### Exporting from the TUI
 
 Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table to a file.
