@@ -911,6 +911,11 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				// The socket is closed and every further read fails at
+				// once: return, or this loop spins until ctx is cancelled.
+				return
+			}
 			continue // timeout or error, loop back and check ctx
 		}
 
