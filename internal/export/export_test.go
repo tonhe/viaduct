@@ -15,25 +15,25 @@ func buildTestTable() *hop.Table {
 	t := hop.NewTable(30)
 
 	h1 := t.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 6*time.Millisecond, 0, hop.KindPrimary)
+	h1.AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.AddSample(net.ParseIP("192.0.2.1"), 6*time.Millisecond, 0, hop.KindPrimary)
 
 	h2 := t.GetOrCreate(2)
-	h2.AddSample(net.ParseIP("192.168.1.1"), 10*time.Millisecond, 0, hop.KindPrimary)
-	h2.AddSample(net.ParseIP("192.168.1.2"), 12*time.Millisecond, 1, hop.KindPrimary)
+	h2.AddSample(net.ParseIP("198.51.100.1"), 10*time.Millisecond, 0, hop.KindPrimary)
+	h2.AddSample(net.ParseIP("198.51.100.2"), 12*time.Millisecond, 1, hop.KindPrimary)
 
 	// TTL 3 = gap hop (no samples)
 	t.GetOrCreate(3)
 
 	h4 := t.GetOrCreate(4)
-	h4.AddSample(net.ParseIP("8.8.8.8"), 20*time.Millisecond, 0, hop.KindPrimary)
+	h4.AddSample(net.ParseIP("203.0.113.8"), 20*time.Millisecond, 0, hop.KindPrimary)
 
 	return t
 }
 
 func TestBuildReport(t *testing.T) {
 	table := buildTestTable()
-	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
+	r := BuildReport("v0.1.0", "example.com", net.ParseIP("203.0.113.8"),
 		"udp", table, nil, nil, 4)
 
 	if r.Version != "v0.1.0" {
@@ -42,8 +42,8 @@ func TestBuildReport(t *testing.T) {
 	if r.Target != "example.com" {
 		t.Errorf("target = %q, want %q", r.Target, "example.com")
 	}
-	if r.TargetIP != "8.8.8.8" {
-		t.Errorf("targetIP = %q, want %q", r.TargetIP, "8.8.8.8")
+	if r.TargetIP != "203.0.113.8" {
+		t.Errorf("targetIP = %q, want %q", r.TargetIP, "203.0.113.8")
 	}
 	if len(r.Hops) != 4 {
 		t.Fatalf("len(hops) = %d, want 4", len(r.Hops))
@@ -53,8 +53,8 @@ func TestBuildReport(t *testing.T) {
 	if len(r.Hops[0].Nodes) != 1 {
 		t.Errorf("hop 1 nodes = %d, want 1", len(r.Hops[0].Nodes))
 	}
-	if r.Hops[0].Nodes[0].IP != "10.0.0.1" {
-		t.Errorf("hop 1 IP = %q, want %q", r.Hops[0].Nodes[0].IP, "10.0.0.1")
+	if r.Hops[0].Nodes[0].IP != "192.0.2.1" {
+		t.Errorf("hop 1 IP = %q, want %q", r.Hops[0].Nodes[0].IP, "192.0.2.1")
 	}
 
 	// TTL 2: divergent (two nodes)
@@ -71,8 +71,8 @@ func TestBuildReport(t *testing.T) {
 	if len(r.Hops[3].Nodes) != 1 {
 		t.Errorf("hop 4 nodes = %d, want 1", len(r.Hops[3].Nodes))
 	}
-	if r.Hops[3].Nodes[0].IP != "8.8.8.8" {
-		t.Errorf("hop 4 IP = %q, want %q", r.Hops[3].Nodes[0].IP, "8.8.8.8")
+	if r.Hops[3].Nodes[0].IP != "203.0.113.8" {
+		t.Errorf("hop 4 IP = %q, want %q", r.Hops[3].Nodes[0].IP, "203.0.113.8")
 	}
 }
 
@@ -102,7 +102,7 @@ func TestFormatName(t *testing.T) {
 
 func TestWriteJSON(t *testing.T) {
 	table := buildTestTable()
-	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
+	r := BuildReport("v0.1.0", "example.com", net.ParseIP("203.0.113.8"),
 		"udp", table, nil, nil, 4)
 
 	var buf bytes.Buffer
@@ -125,7 +125,7 @@ func TestWriteJSON(t *testing.T) {
 
 func TestWriteCSV(t *testing.T) {
 	table := buildTestTable()
-	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
+	r := BuildReport("v0.1.0", "example.com", net.ParseIP("203.0.113.8"),
 		"udp", table, nil, nil, 4)
 
 	var buf bytes.Buffer
@@ -152,14 +152,14 @@ func TestWriteCSV(t *testing.T) {
 
 func TestWriteDOT(t *testing.T) {
 	table := buildTestTable()
-	r := BuildReport("v0.1.0", "example.com", net.ParseIP("8.8.8.8"),
+	r := BuildReport("v0.1.0", "example.com", net.ParseIP("203.0.113.8"),
 		"udp", table, nil, nil, 4)
 
 	// Set ASN data for clustering test
 	r.Hops[0].Nodes[0].ASN = 64496
 	r.Hops[0].Nodes[0].ASOrg = "Example ISP"
-	r.Hops[3].Nodes[0].ASN = 15169
-	r.Hops[3].Nodes[0].ASOrg = "Google"
+	r.Hops[3].Nodes[0].ASN = 64497
+	r.Hops[3].Nodes[0].ASOrg = "EXAMPLE-NET-2"
 
 	var buf bytes.Buffer
 	if err := WriteDOT(&buf, r); err != nil {
@@ -174,14 +174,14 @@ func TestWriteDOT(t *testing.T) {
 	if !strings.Contains(dot, "cluster_AS64496") {
 		t.Error("DOT output should contain cluster_AS64496")
 	}
-	if !strings.Contains(dot, "cluster_AS15169") {
-		t.Error("DOT output should contain cluster_AS15169")
+	if !strings.Contains(dot, "cluster_AS64497") {
+		t.Error("DOT output should contain cluster_AS64497")
 	}
-	if !strings.Contains(dot, "10.0.0.1") {
-		t.Error("DOT output should contain 10.0.0.1")
+	if !strings.Contains(dot, "192.0.2.1") {
+		t.Error("DOT output should contain 192.0.2.1")
 	}
-	if !strings.Contains(dot, "8.8.8.8") {
-		t.Error("DOT output should contain 8.8.8.8")
+	if !strings.Contains(dot, "203.0.113.8") {
+		t.Error("DOT output should contain 203.0.113.8")
 	}
 	if !strings.Contains(dot, "gap_3") {
 		t.Error("DOT output should contain gap_3 node")
@@ -332,7 +332,7 @@ func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	// TTL 1: real hop with data
 	h1 := table.GetOrCreate(1)
 	h1.MarkRoundSent()
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
 	h1.MarkRoundEnd()
 
 	// TTL 2: hop created in table but never receives any probe replies.
@@ -346,7 +346,7 @@ func TestBuildReport_HopWithNoNodes(t *testing.T) {
 	}
 	// h2 has no AddSample calls → GetIP() returns nil → must be treated as gap.
 
-	r := BuildReport("v0.1.0", "example.com", net.ParseIP("10.0.0.1"),
+	r := BuildReport("v0.1.0", "example.com", net.ParseIP("192.0.2.1"),
 		"udp", table, nil, nil, 2)
 
 	if len(r.Hops) != 2 {
