@@ -166,28 +166,25 @@ func BuildReport(version string, target string, targetIP net.IP,
 
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		h, ok := hopMap[ttl]
-		if ok {
-			sent, _ := h.ProbeCounts()
-			r.Probes += sent // counted whether or not the hop ever answered
-		}
 		if !ok {
 			r.Hops = append(r.Hops, Hop{TTL: ttl})
 			continue
 		}
 
+		// One locked read, so the probe counts, loss, rounds, headline,
+		// verdict, echo totals and echo_ignored flags agree even during a
+		// live export, when a round can close between two reads.
+		snap := h.LossSnapshot()
+		probesSent, probesRecvd := snap.ProbesSent, snap.ProbesReceived
 		// A hop that never answered has no nodes, and still reports what was
 		// sent to it: its probes are in the report's total.
-		probesSent, probesRecvd := h.ProbeCounts()
-		// One locked read, so the headline, verdict, echo totals and
-		// echo_ignored flags agree even during a live export.
-		snap := h.LossSnapshot()
-		headline, lossKind := snap.Loss, snap.Kind
+		r.Probes += probesSent
 		eh := Hop{
 			TTL:            ttl,
-			Loss:           h.LossPercent(),
-			HeadlineLoss:   headline,
-			LossKind:       lossKindName(lossKind),
-			Rounds:         h.Rounds(),
+			Loss:           snap.LossPct,
+			HeadlineLoss:   snap.Loss,
+			LossKind:       lossKindName(snap.Kind),
+			Rounds:         snap.Rounds,
 			Sent:           probesSent,
 			ProbesSent:     probesSent,
 			ProbesReceived: probesRecvd,
@@ -213,7 +210,7 @@ func BuildReport(version string, target string, targetIP net.IP,
 					StDev:  node.StDev(),
 					Jitter: msFromDuration(node.Jitter()),
 				},
-				Loss:      h.LossPercent(),
+				Loss:      snap.LossPct,
 				Sent:      probesSent,
 				Received:  node.GetReceived(),
 				FlowIDs:   node.GetFlowIDs(),

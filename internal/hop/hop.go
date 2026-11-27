@@ -290,6 +290,10 @@ func (h *Hop) StDev() float64 {
 func (h *Hop) LossPercent() float64 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.lossPercentLocked()
+}
+
+func (h *Hop) lossPercentLocked() float64 {
 	if h.closedSent == 0 {
 		return 0
 	}
@@ -620,17 +624,27 @@ type LossSnapshot struct {
 	VerdictHeld           bool
 	VerdictProbesSent     int
 	VerdictProbesReceived int
+	// ProbesSent and ProbesReceived are ProbeCounts, LossPct is LossPercent
+	// and Rounds is Rounds, read with the figures above.
+	ProbesSent     int
+	ProbesReceived int
+	LossPct        float64
+	Rounds         int
 }
 
 // LossSnapshot returns the hop's headline loss, its kind, its rate-limit
 // verdict, the echo totals they were made from (see VerdictEchoTotals), the
 // nodes left out of those totals (see EchoIgnored), whether the verdict is a
 // held one and the TTL-probe counts it was made from (see VerdictHeld and
-// VerdictProbeCounts), all from one state.
+// VerdictProbeCounts), and its probe counts, per-probe loss and rounds (see
+// ProbeCounts, LossPercent and Rounds), all from one state.
 func (h *Hop) LossSnapshot() LossSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	var snap LossSnapshot
+	snap.ProbesSent, snap.ProbesReceived = h.closedSent, h.closedRecvd
+	snap.LossPct = h.lossPercentLocked()
+	snap.Rounds = h.roundsSent
 	snap.Loss, snap.Kind = h.lossLocked()
 	snap.RateLimit = h.rateLimitStateLocked()
 	snap.EchoSent, snap.EchoReceived = h.echoTotalsLocked()
