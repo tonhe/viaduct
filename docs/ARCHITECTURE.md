@@ -35,6 +35,8 @@ internal/
   ecmp/             divergence and convergence analysis over a hop table
   resolve/          reverse DNS worker pool
   asn/              ASN and org lookup over Team Cymru DNS
+  dnstest/          a DNS server on loopback for tests of resolve, asn and
+                    export; no production code imports it
   sysprobe/         does this host have IPv4 / IPv6 transport
   config/           TOML config file: load, save, validate
   theme/            Base16 themes and the sparkline gradient
