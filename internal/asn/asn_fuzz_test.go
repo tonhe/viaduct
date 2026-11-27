@@ -3,8 +3,8 @@ package asn
 import "testing"
 
 func FuzzParseOriginResponse(f *testing.F) {
-	f.Add("13335 | 1.1.1.0/24 | US | arin | 2014-03-28")
-	f.Add("13335 15169 | 1.1.1.0/24 | US | arin | 2014-03-28") // multi
+	f.Add("64496 | 192.0.2.0/24 | US | arin | 2014-03-28")
+	f.Add("64496 64497 | 192.0.2.0/24 | US | arin | 2014-03-28") // multi
 	f.Add("")                                                    // empty
 	f.Add(" | | ")                                               // pipes only
 	f.Add("notanumber | ...")                                    // malformed ASN
@@ -19,7 +19,7 @@ func FuzzParseOriginResponse(f *testing.F) {
 }
 
 func FuzzParseASNameResponse(f *testing.F) {
-	f.Add("13335 | US | arin | 2014-03-28 | CLOUDFLARENET")
+	f.Add("64496 | US | arin | 2014-03-28 | EXAMPLE-NET")
 	f.Add("")
 	f.Add("no pipes at all")
 	f.Add("| | | |")
