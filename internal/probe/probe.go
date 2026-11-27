@@ -416,8 +416,11 @@ func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
 func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- Result) error {
 	proto := t.cfg.Protocol
 
-	// icmpProto is used for the tier-1 ICMP TTL probe every round, regardless
-	// of primary protocol. It shares cfg.ICMPID with the listener demux.
+	// icmpProto builds the tier-1 ICMP TTL probe every round, regardless of
+	// primary protocol. Its ID is cfg.ICMPID when that is set. When it is 0
+	// this object draws its own random ID, which is not the one the listener's
+	// t.icmpProto drew. That is harmless: IdentifyResponse does not consult
+	// the ID, and replies are matched against the probe map.
 	icmpProto := NewICMPProtocol(t.cfg)
 	primaryType := ProbeTypeForProtocolName(proto.Name())
 
@@ -901,11 +904,16 @@ func (t *Tracer) checkAutoFallback() {
 	}
 }
 
-// listen reads ICMP responses and matches them to outstanding probes.
-// It handles responses for all protocol modes:
-//   - ICMP Echo Reply: destination reached (ICMP mode only)
-//   - ICMP Time Exceeded: intermediate hop (all modes) — uses Protocol.IdentifyResponse
-//   - ICMP Destination Unreachable: destination reached (UDP/TCP) — uses Protocol.IdentifyResponse
+// listen reads ICMP messages and matches them to outstanding probes, in
+// every protocol mode:
+//   - Echo Reply: answers a tier-1 ICMP TTL probe or an echo-tier probe. It
+//     is matched on its ID and sequence, and only when it comes from the
+//     address that probe was sent to.
+//   - Time Exceeded: an intermediate hop. The quoted packet is identified by
+//     identifyAny (the primary protocol first, then ICMP) and must be
+//     addressed to the target.
+//   - Destination Unreachable: identified the same way. Whether it means the
+//     destination was reached is the primary protocol's IsDestReachedICMP.
 //
 // conn accepts any icmpPacketConn; in production this is *icmp.PacketConn,
 // and in tests it is a fakeICMPConn driven by channels.
