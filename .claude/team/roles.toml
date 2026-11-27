@@ -1,0 +1,29 @@
+# The viaduct agent team. One [[role]] table per session.
+#
+#   name      session name: the multiplexer label and the --remote-control name
+#   role      director | dev | tester (hooks/guard.py knows these three)
+#   host      linux | mac: which host `start` launches it on
+#   cwd       directory to start in, relative to the repository root
+#   worktree  use in place of cwd: a git worktree, relative to the repository
+#             root. `start` creates it from origin/main when it is missing.
+#
+# The parser in `start` reads only this shape: [[role]] headers and
+# key = "value" lines. No inline tables, no multi-line strings.
+
+[[role]]
+name = "viaduct-director"
+role = "director"
+host = "linux"
+cwd = "."
+
+[[role]]
+name = "viaduct-dev"
+role = "dev"
+host = "linux"
+worktree = "../pub-wt/team-dev"
+
+[[role]]
+name = "viaduct-tester"
+role = "tester"
+host = "mac"
+cwd = "."

@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# Bring up the viaduct agent team on this host. See README.md next to this file.
+#
+#   .claude/team/start                  start this host's roles
+#   .claude/team/start --attach ROLE    ...then attach to that role's session
+#   .claude/team/start --restart        stop this host's roles first
+#   .claude/team/start --stop           stop this host's roles and exit
+#   .claude/team/start --backend tmux   use tmux, not herdr
+#   .claude/team/start --host mac       act as that host (linux or mac)
+#   .claude/team/start --dry-run        print what would be done
+#
+# Idempotent: a session that is already running is left alone.
+# Environment: VIADUCT_TEAM_BACKEND (same as --backend), VIADUCT_HERDR_SESSION
+# (a named herdr session; the default session otherwise).
+#
+# Written for bash 3.2, which is what macOS ships.
+set -u
+
+TEAM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "$TEAM_DIR/../.." && pwd)
+RUN_DIR="$TEAM_DIR/.run"
+
+BACKEND="${VIADUCT_TEAM_BACKEND:-herdr}"
+# The claude binary the sessions run. The tests point this at a stand-in.
+CLAUDE_BIN="${VIADUCT_CLAUDE_BIN:-claude}"
+HOST=""
+ATTACH=""
+RESTART=0
+STOP=0
+DRY=0
+
+usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host) HOST="${2:-}"; shift ;;
+    --host=*) HOST="${1#*=}" ;;
+    --backend) BACKEND="${2:-}"; shift ;;
+    --backend=*) BACKEND="${1#*=}" ;;
+    --attach) ATTACH="${2:-}"; shift ;;
+    --attach=*) ATTACH="${1#*=}" ;;
+    --restart) RESTART=1 ;;
+    --stop) STOP=1 ;;
+    --dry-run) DRY=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "start: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ -z "$HOST" ]; then
+  case "$(uname -s)" in
+    Darwin) HOST=mac ;;
+    *) HOST=linux ;;
+  esac
+fi
+case "$HOST" in
+  linux|mac) ;;
+  *) echo "start: --host must be linux or mac, got '$HOST'" >&2; exit 2 ;;
+esac
+
+if [ ! -r "$TEAM_DIR/backend/$BACKEND.sh" ]; then
+  echo "start: no backend '$BACKEND' (looked for $TEAM_DIR/backend/$BACKEND.sh)" >&2
+  exit 2
+fi
+# shellcheck source=/dev/null
+. "$TEAM_DIR/backend/$BACKEND.sh"
+
+say() { printf '%s\n' "$*"; }
+
+# roles: print one line per role in roles.toml: name|role|host|cwd|worktree
+roles() {
+  awk '
+    function flush() {
+      if (seen) print f["name"] "|" f["role"] "|" f["host"] "|" f["cwd"] "|" f["worktree"]
+      split("", f); seen = 0
+    }
+    /^[ \t]*#/ || /^[ \t]*$/ { next }
+    /^[ \t]*\[\[role\]\][ \t]*$/ { flush(); seen = 1; next }
+    seen && match($0, /^[ \t]*[a-z_]+[ \t]*=[ \t]*"/) {
+      key = $0; sub(/^[ \t]*/, "", key); sub(/[ \t]*=.*/, "", key)
+      val = $0; sub(/^[^"]*"/, "", val); sub(/".*$/, "", val)
+      f[key] = val
+    }
+    END { flush() }
+  ' "$TEAM_DIR/roles.toml"
+}
+
+# abs_path DIR: DIR made absolute against the repository root, without
+# needing it to exist yet.
+abs_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    .) printf '%s\n' "$REPO" ;;
+    *)
+      local parent base
+      parent=$(dirname "$REPO/$1")
+      base=$(basename "$1")
+      if [ -d "$parent" ]; then
+        printf '%s/%s\n' "$(cd "$parent" && pwd)" "$base"
+      else
+        printf '%s\n' "$REPO/$1"
+      fi
+      ;;
+  esac
+}
+
+# write_run_files NAME ROLE: the settings file that loads the guard hook and
+# the script the session's shell runs. Both live in .run/, which is ignored.
+write_run_files() {
+  local name="$1" role="$2"
+  mkdir -p "$RUN_DIR"
+  cat >"$RUN_DIR/$role.settings.json" <<EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{"type": "command", "command": "'$TEAM_DIR/hooks/guard.sh'"}]
+      }
+    ]
+  }
+}
+EOF
+  cat >"$RUN_DIR/$role.sh" <<EOF
+#!/usr/bin/env bash
+# Written by .claude/team/start. Do not edit: it is rewritten on every start.
+export VIADUCT_ROLE='$role'
+export VIADUCT_TEAM_DIR='$TEAM_DIR'
+exec '$CLAUDE_BIN' --dangerously-skip-permissions \\
+  --remote-control '$name' \\
+  --settings '$RUN_DIR/$role.settings.json' \\
+  'You are the viaduct $role. Read $TEAM_DIR/prompts/$role.md, $TEAM_DIR/PROTOCOL.md and $TEAM_DIR/DELEGATIONS.md now. Then read $TEAM_DIR/HANDOFF-$role.md if it exists. Work by them.'
+EOF
+  chmod +x "$RUN_DIR/$role.sh"
+}
+
+command -v "$CLAUDE_BIN" >/dev/null 2>&1 || [ "$DRY" -eq 1 ] || { echo "start: $CLAUDE_BIN is not on PATH" >&2; exit 1; }
+[ -e "$REPO/.git" ] || { echo "start: not a git checkout: $REPO" >&2; exit 1; }
+case "$TEAM_DIR$REPO" in
+  *\'*) echo "start: the repository path contains a single quote, which the launcher cannot quote" >&2; exit 1 ;;
+esac
+if [ "$DRY" -eq 0 ]; then
+  be_check || exit 1
+fi
+
+say "viaduct team on $HOST (backend $BACKEND, repository $REPO)"
+
+attach_name=""
+count=0
+status=0
+while IFS='|' read -r name role host cwd worktree; do
+  [ "$host" = "$HOST" ] || continue
+  count=$((count + 1))
+  if [ -z "$name" ] || [ -z "$role" ]; then
+    echo "start: a role in roles.toml has no name or no role" >&2
+    status=1
+    continue
+  fi
+  if [ ! -r "$TEAM_DIR/prompts/$role.md" ]; then
+    echo "start: no prompt for role '$role' ($TEAM_DIR/prompts/$role.md)" >&2
+    status=1
+    continue
+  fi
+  [ "$role" = "$ATTACH" ] && attach_name="$name"
+
+  if [ "$RESTART" -eq 1 ] || [ "$STOP" -eq 1 ]; then
+    if [ "$DRY" -eq 1 ]; then
+      say "  would stop $name"
+    elif be_exists "$name"; then
+      be_stop "$name" && say "  - $name stopped"
+    fi
+    [ "$STOP" -eq 1 ] && continue
+  fi
+
+  if [ -n "$worktree" ]; then
+    # The parent has to exist for abs_path to resolve "..".
+    [ "$DRY" -eq 1 ] || mkdir -p "$(dirname "$REPO/$worktree")"
+    dir=$(abs_path "$worktree")
+    if [ ! -d "$dir" ]; then
+      if [ "$DRY" -eq 1 ]; then
+        say "  would create worktree $dir from origin/main"
+      else
+        git -C "$REPO" fetch --quiet origin
+        if ! git -C "$REPO" worktree add --detach "$dir" origin/main >/dev/null; then
+          echo "start: could not create the worktree $dir for $name" >&2
+          status=1
+          continue
+        fi
+        say "  + worktree $dir created from origin/main"
+      fi
+    fi
+  else
+    dir=$(abs_path "${cwd:-.}")
+  fi
+
+  if [ "$DRY" -eq 1 ]; then
+    say "  would start $name ($role) in $dir"
+    continue
+  fi
+  if be_exists "$name"; then
+    say "  = $name already running ($role), left alone"
+    continue
+  fi
+  write_run_files "$name" "$role"
+  if be_start "$name" "$dir" "exec '$RUN_DIR/$role.sh'"; then
+    say "  + $name started ($role) in $dir"
+  else
+    echo "start: could not start $name" >&2
+    status=1
+  fi
+done <<EOF
+$(roles)
+EOF
+
+if [ "$count" -eq 0 ]; then
+  say "  no role in roles.toml has host = \"$HOST\""
+fi
+
+if [ -n "$ATTACH" ] && [ "$STOP" -eq 0 ] && [ "$DRY" -eq 0 ]; then
+  if [ -z "$attach_name" ]; then
+    echo "start: no role '$ATTACH' on this host" >&2
+    exit 1
+  fi
+  be_attach "$attach_name"
+fi
+exit "$status"
