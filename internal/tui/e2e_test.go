@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+	"github.com/tonhe/viaduct/internal/hop"
 	"github.com/tonhe/viaduct/internal/probe"
 )
 
@@ -217,12 +218,40 @@ func TestE2E_Framework(t *testing.T) {
 
 // TestE2E_MultiTarget exercises multi-target key bindings end-to-end:
 // focus movement, mark toggle, column-view toggle, pause/reset, and quit.
-// Pass criterion: no panic, second target rendered in output, and focus
-// marker moved after KeyDown.
+// Pass criterion: no panic, second target rendered in output, focus marker
+// moved after KeyDown, and after the reset each hop of both targets counts
+// only the round that came after it.
 func TestE2E_MultiTarget(t *testing.T) {
 	setTestTheme(t)
 	m := multiTestModel(t, withSize(120, 40))
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 40))
+
+	// The two targets that trace (the third failed to start). The model is
+	// passed by value; its sessions are shared, as with the tracer in a run.
+	const hops = 3
+	tables := []*hop.Table{m.sessions[0].table, m.sessions[1].table}
+	// round sends one probe to each hop of both targets and has each answered.
+	// The tracer reports its sends to the table directly; replies and the end
+	// of the round arrive as messages. The sends are recorded first, so the
+	// order is the same on every run.
+	round := func() {
+		for idx, table := range tables {
+			for ttl := 1; ttl <= hops; ttl++ {
+				table.MarkRoundSent(ttl, 1)
+			}
+			for ttl := 1; ttl <= hops; ttl++ {
+				tm.Send(HopUpdateMsg{TargetIdx: idx, Result: probe.Result{
+					TTL: ttl, IP: net.ParseIP(fmt.Sprintf("198.51.100.%d", 10*idx+ttl)),
+					RTT: time.Duration(ttl*10) * time.Millisecond,
+				}})
+			}
+			tm.Send(RoundEndMsg{TargetIdx: idx})
+		}
+	}
+
+	// Two rounds before the reset: counts for 'r' to clear.
+	round()
+	round()
 
 	// Move focus down to second target.
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
@@ -235,6 +264,22 @@ func TestE2E_MultiTarget(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
 	// Reset all sessions.
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+
+	// Messages are handled in order, so once a hop of the last target reads
+	// zero rounds the reset has been handled for both. The next round's sends
+	// must not be recorded before that, or the reset would clear them.
+	lastHop := tables[len(tables)-1].Get(hops)
+	for deadline := time.Now().Add(2 * time.Second); lastHop.Rounds() != 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("2s after 'r', hop %d of the second target still has %d rounds: the reset left the old counts in place",
+				hops, lastHop.Rounds())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// One round after the reset.
+	round()
+
 	// Quit.
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 
@@ -256,5 +301,27 @@ func TestE2E_MultiTarget(t *testing.T) {
 	// Verify paused is true (r key does not clear paused, so the assertion holds after reset).
 	if !got.paused {
 		t.Error("model should be paused after 'p' key")
+	}
+
+	// The counts after the reset are those of the one round that followed it:
+	// what a fresh run of one round reports. Counts left over from the two
+	// rounds before the reset would show as 3 rounds and 3 probes.
+	for idx := range tables {
+		s := got.sessions[idx]
+		if s.probeCount != hops {
+			t.Errorf("target %d: probeCount = %d after the reset, want %d (one answer per hop)", idx, s.probeCount, hops)
+		}
+		for ttl := 1; ttl <= hops; ttl++ {
+			h := s.table.Get(ttl)
+			if h == nil {
+				t.Errorf("target %d: no hop at TTL %d after the reset", idx, ttl)
+				continue
+			}
+			snap := h.LossSnapshot()
+			if snap.Rounds != 1 || snap.ProbesSent != 1 || snap.ProbesReceived != 1 || snap.LossPct != 0 {
+				t.Errorf("target %d TTL %d after the reset: rounds %d, probes %d sent / %d received, loss %.1f%%; want 1, 1 / 1, 0%%",
+					idx, ttl, snap.Rounds, snap.ProbesSent, snap.ProbesReceived, snap.LossPct)
+			}
+		}
 	}
 }

@@ -20,7 +20,7 @@ import (
 func TestRenderHopRateLimitedCell(t *testing.T) {
 	t.Run("RateLimitYes shows ~0%† padded to 8", func(t *testing.T) {
 		// hopsFull() + withRateLimitedHop(3) seeds TTL 3 with 9 icmpTTL sends,
-		// 1 reply (88.9% round loss) and 5 echo sends / 5 echo replies
+		// 1 reply (88.9% round loss) and 20 echo sends / 20 echo replies
 		// (0% echo loss) → RateLimitYes. The dagger asserts the branch fired.
 		m := newTestModel(withSize(120, 24), hopsFull(), withRateLimitedHop(3))
 		plain := stripANSI(m.View())
