@@ -16,7 +16,6 @@ Set Height 750
 Set Padding 15
 Set WindowBar "Colorful"
 Set Theme "Solarized Dark Higher Contrast"
-#Set Theme "Solarized Dark - Patched"
 Set TypingSpeed 60ms
 Set CursorBlink false
 
@@ -24,22 +23,33 @@ Require via
 
 Sleep 500ms
 
-Type "via routerjockey.com"
+# Two targets in one session
+Type "via routerjockey.com one.one.one.one"
 Sleep 500ms
 Enter
 
 # Let the TUI render and hops populate
-Sleep 8s
+Sleep 9s
 
-# Cycle to Health display mode
+# Move focus to the second target and back
+Tab
+Sleep 3s
+Tab
+Sleep 2s
+
+# Column view: the targets side by side
+Type "c"
+Sleep 5s
+Type "c"
+Sleep 2s
+
+# Cycle the display modes: Health, Latency, Variability, Probe Detail
 Type "d"
-Sleep 4s
-
-# Cycle to Latency display mode
+Sleep 3s
 Type "d"
-Sleep 4s
-
-# Cycle to Variability display mode
+Sleep 3s
+Type "d"
+Sleep 3s
 Type "d"
 Sleep 4s
 
