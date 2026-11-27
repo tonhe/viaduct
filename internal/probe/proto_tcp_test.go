@@ -23,8 +23,8 @@ func TestTCPProtocol_Name(t *testing.T) {
 func TestTCPProtocol_BuildProbe(t *testing.T) {
 	p := NewTCPProtocol(443)
 	cfg := DefaultConfig()
-	cfg.SourceIP = net.IPv4(10, 0, 0, 1)
-	cfg.TargetIP = net.IPv4(93, 184, 216, 34)
+	cfg.SourceIP = net.IPv4(192, 0, 2, 1)
+	cfg.TargetIP = net.IPv4(198, 51, 100, 34)
 	flowID := 3
 	ttl := 5
 	seq := 42
@@ -109,8 +109,8 @@ func TestTCPChecksum_RFC1071(t *testing.T) {
 func TestTCPChecksum_ValidatesSelf(t *testing.T) {
 	p := NewTCPProtocol(443)
 	cfg := DefaultConfig()
-	cfg.SourceIP = net.IPv4(10, 0, 0, 1)
-	cfg.TargetIP = net.IPv4(93, 184, 216, 34)
+	cfg.SourceIP = net.IPv4(192, 0, 2, 1)
+	cfg.TargetIP = net.IPv4(198, 51, 100, 34)
 
 	pkt, _, err := p.BuildProbe(0, 5, 1, cfg)
 	if err != nil {
@@ -141,8 +141,8 @@ func TestTCPChecksum_ValidatesSelf(t *testing.T) {
 func TestTCPProtocol_IdentifyResponse(t *testing.T) {
 	p := NewTCPProtocol(443)
 	cfg := DefaultConfig()
-	cfg.SourceIP = net.IPv4(10, 0, 0, 1)
-	cfg.TargetIP = net.IPv4(93, 184, 216, 34)
+	cfg.SourceIP = net.IPv4(192, 0, 2, 1)
+	cfg.TargetIP = net.IPv4(198, 51, 100, 34)
 	flowID := 2
 
 	pkt, wantKey, err := p.BuildProbe(flowID, 4, 1, cfg)
@@ -190,7 +190,7 @@ func TestTCPProtocol_IdentifyResponse_IPv6(t *testing.T) {
 	inner := []byte{
 		0x60, 0, 0, 0, 0, 8, 6, 64,
 		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
 		0xab, 0xcd, 0x01, 0xbb,
 		0, 0, 0, 0,
 	}
@@ -208,7 +208,7 @@ func TestTCPProtocol_BuildProbe_IPv6Checksum(t *testing.T) {
 	cfg := Config{
 		IPVersion: 6,
 		SourceIP:  net.ParseIP("2001:db8::1"),
-		TargetIP:  net.ParseIP("2606:4700::6810:80f0"),
+		TargetIP:  net.ParseIP("2001:db8::6810:80f0"),
 		BasePort:  44000,
 	}
 	pkt, _, err := p.BuildProbe(0, 1, 42, cfg)

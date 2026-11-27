@@ -541,10 +541,8 @@ func TestSubmit_ChannelFull_DoesNotBlock(t *testing.T) {
 	// Fill the channel (capacity 256)
 	filled := 0
 	for i := 0; i < 256; i++ {
-		ip := net.ParseIP(fmt.Sprintf("198.51.100.%d", i%256))
-		// Use unique keys by manipulating cache to avoid dedup interfering
-		key := fmt.Sprintf("10.%d.%d.1", i/256, i%256)
-		ip = net.ParseIP(key)
+		// 256 distinct addresses, so no submit is dropped as a repeat.
+		ip := net.ParseIP(fmt.Sprintf("198.51.100.%d", i))
 		if ip == nil {
 			continue
 		}
@@ -557,7 +555,7 @@ func TestSubmit_ChannelFull_DoesNotBlock(t *testing.T) {
 	done := make(chan bool)
 	go func() {
 		// This IP hasn't been submitted yet; channel is full → should drop
-		newIP := net.ParseIP("10.99.99.99")
+		newIP := net.ParseIP("203.0.113.99")
 		result := r.Submit(newIP)
 		done <- result
 	}()

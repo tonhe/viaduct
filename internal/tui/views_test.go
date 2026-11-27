@@ -66,9 +66,9 @@ func TestViewColumns(t *testing.T) {
 
 func TestComputeDeltasBasic(t *testing.T) {
 	table := hop.NewTable(4)
-	table.GetOrCreate(1).AddSample(net.ParseIP("10.0.0.1"), 1*time.Millisecond, 0, hop.KindPrimary)
-	table.GetOrCreate(2).AddSample(net.ParseIP("10.0.0.2"), 5*time.Millisecond, 0, hop.KindPrimary)
-	table.GetOrCreate(3).AddSample(net.ParseIP("10.0.0.3"), 18*time.Millisecond, 0, hop.KindPrimary)
+	table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 1*time.Millisecond, 0, hop.KindPrimary)
+	table.GetOrCreate(2).AddSample(net.ParseIP("192.0.2.2"), 5*time.Millisecond, 0, hop.KindPrimary)
+	table.GetOrCreate(3).AddSample(net.ParseIP("192.0.2.3"), 18*time.Millisecond, 0, hop.KindPrimary)
 
 	hops := table.Snapshot()
 	hopMap := make(map[int]*hop.Hop, len(hops))
@@ -90,9 +90,9 @@ func TestComputeDeltasBasic(t *testing.T) {
 
 func TestComputeDeltasSkipsTimedOut(t *testing.T) {
 	table := hop.NewTable(4)
-	table.GetOrCreate(1).AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	table.GetOrCreate(1).AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
 	table.GetOrCreate(2) // timed out
-	table.GetOrCreate(3).AddSample(net.ParseIP("10.0.0.3"), 20*time.Millisecond, 0, hop.KindPrimary)
+	table.GetOrCreate(3).AddSample(net.ParseIP("192.0.2.3"), 20*time.Millisecond, 0, hop.KindPrimary)
 
 	hops := table.Snapshot()
 	hopMap := make(map[int]*hop.Hop, len(hops))
