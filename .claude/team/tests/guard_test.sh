@@ -162,7 +162,7 @@ expect block tester "git push origin +v0.3.1"
 
 # GraphQL mutations and aliases are other routes to a merge
 expect block dev "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
-expect allow dev "gh api graphql -f query='query { viewer { login } }'"
+expect block dev "gh api graphql -f query='query { viewer { login } }'"
 for role in director dev tester; do
   expect block "$role" "gh alias set land 'pr merge'"
 done
@@ -172,7 +172,9 @@ expect block dev "gh api /graphql -f query='mutation { x }'"
 expect block dev "gh api graphql -F query=@/tmp/q.graphql"
 expect block dev "gh api graphql --input /tmp/q.json"
 expect block dev "gh api https://api.github.com/graphql -f query='  mutation { x }'"
-expect allow dev "gh api graphql -f query='{ viewer { login } }'"
+expect block dev "gh api graphql -f query='{ viewer { login } }'"
+expect block dev "git -c PUSH.Default=matching push origin"
+expect block dev "git --config-env=push.default=X push origin"
 
 # pushes that name no single branch
 expect block dev "git push --all origin"

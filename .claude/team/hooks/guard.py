@@ -188,8 +188,10 @@ def check_git(role, argv):
         if any(a in ("--all", "--branches", "--mirror") for a in args) or any("*" in a for a in push_refs(args)):
             raise Block("the dev role pushes one named branch at a time.")
         for i, a in enumerate(argv[:-1]):
-            if a == "-c" and re.match(r"^(remote\..*\.push|push\.default)=", argv[i + 1]):
+            if a == "-c" and re.match(r"^(remote\..*\.push|push\.default)=", argv[i + 1], re.IGNORECASE):
                 raise Block("the dev role pushes one named branch at a time, without push configuration overrides.")
+        if any(a == "--config-env" or a.startswith("--config-env=") for a in argv):
+            raise Block("the dev role pushes one named branch at a time, without push configuration overrides.")
         for a in push_refs(args):
             if MAIN_REF.match(a):
                 raise Block("the dev role does not push to main. Open a pull request.")
@@ -306,13 +308,10 @@ def check_gh(role, argv):
     if role == "dev":
         if group == "pr" and verb == "merge":
             raise Block("the dev role does not merge. The director merges under DELEGATIONS.md.")
-        if group == "api" and any(a.rstrip("/").lower().endswith("graphql") for a in args[1:] if not a.startswith("-")):
-            # Allowed only when every query is on the command line and is
-            # plainly a read. A query in a file or on stdin cannot be seen.
-            queries = [a.split("=", 1)[1] for a in args if a.startswith("query=")]
-            readable = queries and not any(a == "--input" or a.startswith("--input=") for a in args)
-            if not readable or not all(re.match(r"^\s*(query\b|\{)", q) for q in queries):
-                raise Block("the dev role sends only GraphQL queries written out on the command line: a mutation can merge, label and set milestones. Use the gh commands.")
+        if group == "api" and any("graphql" in a.lower() for a in args[1:] if not a.startswith("-")):
+            # Telling a query from a mutation means parsing GraphQL and every
+            # way gh takes a field. The dev role does not need the endpoint.
+            raise Block("the dev role does not use the GraphQL API: a mutation can merge, label and set milestones. Use the gh commands or the REST API.")
         if group == "api" and not read:
             if any(re.search(r"/pulls/\d+/merge\b", a) for a in args):
                 raise Block("the dev role does not merge. The director merges under DELEGATIONS.md.")
