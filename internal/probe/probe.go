@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tonhe/viaduct/internal/dest"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -291,11 +292,14 @@ type Tracer struct {
 	cfg           Config
 	target        net.IP
 	pm            *probeMap
-	targetTTL     int32 // atomically set when target is reached; 0 = not yet found
+	targetTTL     int32 // atomic: the highest TTL a round probes; 0 = target not yet found, probe every TTL
 	responseCount int32 // atomic: tracks responses received by listen()
 	OnRound       RoundMarker
 	OnRoundEnd    func() // called at end of each probe round
 	Paused        int32  // atomic: 1 = paused, 0 = running
+
+	// dest corrects targetTTL when each round closes (destination.go).
+	dest dest.Tracker
 
 	// icmpProto is constructed once at Tracer creation and reused across all
 	// listener calls. Constructing it per-packet in identifyAny was wasteful;
@@ -513,6 +517,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		if reached := int(atomic.LoadInt32(&t.targetTTL)); reached > 0 {
 			maxTTL = reached
 		}
+		probedTo := 0 // the highest TTL a probe was written for this round
 
 		for ttl := t.cfg.FirstTTL; ttl <= maxTTL; ttl++ {
 			// Cheap context/pause check per TTL — before tier 1.
@@ -586,6 +591,10 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 				}
 			}
 
+			if icmpSent+primarySent > 0 {
+				probedTo = ttl
+			}
+
 			// One round-sent notification per TTL per round, carrying the
 			// number of probes that went out.
 			if t.OnRound != nil {
@@ -650,6 +659,8 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		if lastRound {
 			t.awaitFinalReplies(ctx)
 		}
+		// The round's replies are in: settle how far the next round probes.
+		t.endDestinationRound(probedTo)
 		if t.OnRoundEnd != nil {
 			t.OnRoundEnd()
 		}
@@ -884,7 +895,7 @@ func (t *Tracer) checkAutoFallback() {
 	}
 	// No responses — fallback to ICMP
 	auto.Fallback()
-	atomic.StoreInt32(&t.targetTTL, 0)
+	t.resetDestination()
 	if t.cfg.OnProtocolSwitch != nil {
 		t.cfg.OnProtocolSwitch("icmp")
 	}
@@ -911,6 +922,11 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				// The socket is closed and every further read fails at
+				// once: return, or this loop spins until ctx is cancelled.
+				return
+			}
 			continue // timeout or error, loop back and check ctx
 		}
 
@@ -1015,6 +1031,7 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 		if isTarget {
 			atomic.CompareAndSwapInt32(&t.targetTTL, 0, int32(rec.ttl))
 		}
+		t.noteDestinationReply(rec, isTarget)
 		rtt := time.Since(rec.sentAt)
 
 		select {

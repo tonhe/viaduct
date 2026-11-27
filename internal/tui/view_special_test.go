@@ -77,10 +77,16 @@ func hopsIPv6Full() testOpt {
 // above echo loss, with at least 20 echo samples.
 //
 // hopsFull() already seeded TTL 3 with one response sample (IP 203.0.113.10).
-// We layer on top: mark that sample as "round received" then add 8 more silent
-// rounds → heavy TTL probe loss. Then add 20 echo probes, all received (0%
-// echo loss), which the classifier reads as rate limiting; the loss cell
-// shows the echo-derived figure, ~0%†.
+// We layer on top: close that as round 1, answered. Then 8 rounds in which the
+// TTL probe goes unanswered and the node answers every direct echo, 20 echoes
+// in all (0% echo loss). The classifier reads that as rate limiting; the loss
+// cell shows the echo-derived figure, ~0%†.
+//
+// The echoes are sent and answered inside their rounds, before each round
+// closes, as in a live trace. Each of those rounds therefore writes an echo
+// cell (▓) to the sparkline, not a drop: docs/UI-DESIGN.md says a drop is
+// written only when no tier reached the hop, so a rate-limited ~0%† never
+// sits beside drop cells.
 //
 // NOTE: callers must apply this AFTER hopsFull() so the sample is already seeded.
 func withRateLimitedHop(ttl int) testOpt {
@@ -89,22 +95,25 @@ func withRateLimitedHop(ttl int) testOpt {
 		// Round 1: mark as sent and received (the sample from hopsFull counts).
 		h.MarkRoundSent()
 		h.MarkRoundEnd() // respondedThisRound is true from hopsFull's AddSample
-		// Rounds 2-9: silent — no response.
+		// Rounds 2-9: no answer to the TTL probe; every echo answered. 20
+		// echoes over 8 rounds: three in each of the first four, two in each
+		// of the rest. The classifier needs 20.
+		pn := h.PrimaryNode()
 		for i := 0; i < 8; i++ {
 			h.MarkRoundSent()
-			h.MarkRoundEnd()
-		}
-		// roundsSent=9, roundsRecvd=1 → 8/9 ≈ 88.9% → displayed as ~89%.
-		// Now drive echo ground-truth on the primary PathNode: 20 sent, 20
-		// received (0% echo loss). TTL probe loss far above echo loss with
-		// enough echo samples (the classifier needs 20) → RateLimitYes.
-		pn := h.PrimaryNode()
-		if pn != nil {
-			for i := 0; i < 20; i++ {
+			echoes := 2
+			if i < 4 {
+				echoes = 3
+			}
+			for j := 0; pn != nil && j < echoes; j++ {
 				pn.MarkEchoSent()
 				pn.AddSample(20*time.Millisecond, 0, hop.KindEcho)
 			}
+			h.MarkRoundEnd()
 		}
+		// roundsSent=9, roundsRecvd=1: TTL-probe loss 8/9 ≈ 88.9%, far above
+		// the echo loss of 0/20 → RateLimitYes. The loss cell shows the echo
+		// figure, ~0%†, not 89%.
 	}
 }
 

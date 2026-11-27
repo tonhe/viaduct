@@ -76,11 +76,33 @@ func sortedASNs[V any](m map[int]V) []int {
 	return keys
 }
 
+// firstErrWriter passes writes to w until one fails. It keeps that error and
+// refuses every write after it, so a writer that prints many lines can ignore
+// the result of each and return err at the end.
+type firstErrWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (f *firstErrWriter) Write(p []byte) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	n, err := f.w.Write(p)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	f.err = err
+	return n, err
+}
+
 // WriteDOT writes the report as a Graphviz DOT directed graph.
 // Nodes are grouped into ASN cluster subgraphs. Gap hops are
 // rendered as dashed circles. Edges connect consecutive TTLs.
 // A node's label carries its hop's headline loss (see formatHeadline).
-func WriteDOT(w io.Writer, r Report) error {
+// It returns the first error of out and writes nothing after it.
+func WriteDOT(out io.Writer, r Report) error {
+	w := &firstErrWriter{w: out}
 	fmt.Fprintf(w, "digraph %s {\n", dotQuote("via → "+r.Target))
 	fmt.Fprintln(w, "  rankdir=TB;")
 	fmt.Fprintln(w, "  node [shape=box, style=filled, fillcolor=\"#e8e8e8\", fontname=\"monospace\", fontsize=10];")
@@ -165,5 +187,5 @@ func WriteDOT(w io.Writer, r Report) error {
 	}
 
 	fmt.Fprintln(w, "}")
-	return nil
+	return w.err
 }

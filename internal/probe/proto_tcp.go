@@ -185,6 +185,7 @@ func (t *Tracer) listenTCP(ctx context.Context, src tcpSegmentSource, pm *probeM
 		stats.matched.Add(1)
 		// Record the target TTL so the sender can cap its range
 		atomic.CompareAndSwapInt32(&t.targetTTL, 0, int32(rec.ttl))
+		t.noteDestinationReply(rec, true)
 
 		rtt := time.Since(rec.sentAt)
 		select {

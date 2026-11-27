@@ -43,6 +43,7 @@ func TestInterleavedRoundSendsICMPAndPrimary(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 	cfg.ICMPID = 0xBEEF // deterministic so we can assert the embedded ID
 
 	target := net.ParseIP("192.0.2.1")
@@ -127,6 +128,7 @@ func TestRoundMarkerReportsProbesSent(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 2
+	cfg.Timeout = shortTestTimeout
 
 	snd := &fakeSender{}
 	tr := newRunTracer(snd, cfg, net.ParseIP("192.0.2.1"))
@@ -160,6 +162,7 @@ func TestRoundMarkerReportsProbesSent_ICMP(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 
 	snd := &fakeSender{}
 	tr := newRunTracer(snd, cfg, net.ParseIP("192.0.2.1"))
@@ -194,6 +197,7 @@ func TestICMPModeSkipsPrimary(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 	cfg.ICMPID = 0xCAFE
 
 	target := net.ParseIP("192.0.2.1")
@@ -686,6 +690,7 @@ func TestTargetDetectionViaICMPTTLProbe(t *testing.T) {
 	cfg2.ProbeDelay = 0
 	cfg2.RoundDelay = 5 * time.Millisecond
 	cfg2.MaxRounds = 1
+	cfg2.Timeout = shortTestTimeout
 	cfg2.ICMPID = 0xBEEF
 	tr2 := newRunTracer(snd, cfg2, target)
 	atomic.StoreInt32(&tr2.targetTTL, 5) // simulate prior detection
@@ -726,6 +731,7 @@ func TestRoundClosesAfterCollectionWindow(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 60 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 
 	snd := &fakeSender{}
 	tr := newRunTracer(snd, cfg, net.ParseIP("192.0.2.1"))

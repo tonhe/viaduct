@@ -547,6 +547,12 @@ func (f *fakeSender) WriteTo(b []byte, _ net.Addr) (int, error) {
 	return len(b), nil
 }
 
+// shortTestTimeout is the Config.Timeout of tests that run a tracer against a
+// sender nobody answers and do not test the wait itself. The last round stays
+// open until its probes are answered or Timeout old (awaitFinalReplies), so
+// with the default of one second each such test would wait a second.
+const shortTestTimeout = 20 * time.Millisecond
+
 // newRunTracer builds a Tracer wired for run() tests.
 // The returned fakeSender can be inspected after run returns.
 func newRunTracer(snd *fakeSender, cfg Config, target net.IP) *Tracer {
@@ -569,6 +575,7 @@ func TestRun_SendsProbesAllTTLs(t *testing.T) {
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.ProbeDelay = 0
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 
 	target := net.ParseIP("192.0.2.1")
 	snd := &fakeSender{}
@@ -649,6 +656,7 @@ func TestRun_OnRoundSentCallback(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 
 	target := net.ParseIP("192.0.2.1")
 	snd := &fakeSender{}
@@ -683,6 +691,7 @@ func TestRun_TargetTTLCapsBounds(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 
 	target := net.ParseIP("192.0.2.1")
 	snd := &fakeSender{}
@@ -908,6 +917,7 @@ func TestRun_NewSenderCleanupCalled(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1
+	cfg.Timeout = shortTestTimeout
 	target := net.ParseIP("192.0.2.1")
 	snd := &fakeSender{}
 	cleaned := false
@@ -936,6 +946,7 @@ func TestRun_OnRoundEndCalled(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 2
+	cfg.Timeout = shortTestTimeout
 
 	target := net.ParseIP("192.0.2.1")
 	snd := &fakeSender{}
