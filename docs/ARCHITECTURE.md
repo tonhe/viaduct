@@ -27,8 +27,11 @@ internal/
     proto_auto.go   AutoSelector: UDP with one-way fallback to ICMP
     checksum6.go    IPV6_CHECKSUM on the raw IPv6 send sockets
     family.go       everything that differs between IPv4 and IPv6
+    destination.go  how far a round probes, from the destination tracker
   hop/              per-TTL and per-responder state: Table, Hop, PathNode,
                     ProbeStats. Loss, rate-limit verdict, sparkline samples
+  dest/             which TTL is the destination's when the target answers at
+                    several: Tracker, used by the tracer and the hop table
   ecmp/             divergence and convergence analysis over a hop table
   resolve/          reverse DNS worker pool
   asn/              ASN and org lookup over Team Cymru DNS
@@ -72,7 +75,7 @@ A tracer holds two raw ICMP sockets, and a third raw socket in UDP or TCP mode:
 
 ### Three tiers per round
 
-A round walks TTL from `--first-ttl` to the highest TTL worth probing (the destination's TTL once it is known, `--max-hops` before that). For each TTL:
+A round walks TTL from `--first-ttl` to the highest TTL worth probing (the destination's TTL once it is known, `--max-hops` before that; see "The destination's TTL"). For each TTL:
 
 - **Tier 1, ICMP TTL probe.** One ICMP Echo Request with the TTL set, in every protocol mode.
 - **Tier 2, primary flows.** With UDP or TCP as the protocol, `--paths` probes that differ only in source port (`BasePort + flow`). UDP's destination port is the base port plus the TTL. TCP sends a SYN to a fixed port. Skipped in ICMP mode, where tier 1 is the probe.
@@ -106,6 +109,20 @@ The ICMP listener handles three message types:
 TCP has a second listener, `listenTCP`. A SYN-ACK, or an RST with ACK, that was sent by the target and matches a probe means the destination was reached. See "TCP replies".
 
 A reply from the target's own address always marks the destination, whatever its ICMP type. Once the destination's TTL is known, later rounds stop there.
+
+### The destination's TTL
+
+The target answers at more than one TTL: at every TTL past its own in round one, a hop earlier for a flow whose load-balanced path is shorter, and now and then for a single probe that took another path. `dest.Tracker` (`internal/dest`) decides which of those TTLs is the destination's. The tracer and the hop table each keep one and feed it the same replies to TTL-limited probes (direct echoes say nothing about distance), so the range the tracer probes and the row the views call the destination follow one rule.
+
+- **Per round**, the candidate is the lowest TTL at which the target answered that lies above every TTL at which a router answered a flow the target answers. A TTL where routers still answer other flows is not the destination's. A flow the target has never answered has no say. Neither has a router that answers the ICMP TTL probe (`Flow.Aux`) once the target has answered a UDP or TCP flow: a UDP or TCP trace ends where its own flows all reach the target, even if ICMP is routed along a longer path. Only replies are evidence. A probe that went unanswered is not: a lost reply, a throttled one and a hop that answers nothing look the same.
+- **First settle.** The first round with a candidate settles the destination on it: the lowest TTL the target answered at beyond the routers. Gaps in the target's replies above it are ignored. A stray reply in round one is left out when routers answer between it and the target's distance; when nothing answers there, the destination settles on the stray and the slow upward move below corrects it.
+- **Moves** need a run of rounds that point the same way. A round with the candidate at the destination's TTL ends a run; a round without a candidate neither counts nor ends it.
+  - Down (the target answers below, no router there): `dest.MoveRounds` (3) rounds, to the highest candidate of the run.
+  - Up on a router's evidence (a router answered a counted flow at the destination's TTL or beyond): 3 such rounds, to the lowest candidate of the run.
+  - Up on silence (the target does not answer at the destination's TTL and does beyond it): `dest.SilentMoveRounds` (24) rounds with one and the same candidate, counted from the last round in which the target answered nearer than it. This is what loss at the destination looks like once the tracer probes beyond it, so it is weak evidence. With the target in place, of the rounds that end such a run or count toward it, "answered at x and nothing nearer" is never likelier than "answered at the destination's TTL" (its share is p/(1+p) for independent loss p and x one hop out), so a run of 24 has a chance of at most (p/(1+p))^23: about 10^-11 at 50% loss, 3 in 10^8 at 90%. `TestLossyDestinationKeepsItsTTL` plays 500,000 rounds of independent and bursty loss up to 90% without a move.
+- **Tracer** (`probe/destination.go`). `Tracer.targetTTL` caps the send loop. The first reply from the target sets it; from then on `endDestinationRound` sets it to the tracker's `Reach` each time a round's collection window ends. `Reach` is the destination's TTL, or the candidate's while a move up is being confirmed. In a round that probed that far and found no candidate it goes up: past a router that answered at or beyond it, otherwise by one, to at most `--max-hops`. A destination that stops answering is therefore looked for further out, one more TTL a round, and the cap returns as soon as the target answers at its TTL. A lossy destination gets these extra probes too: about one TTL in ten rounds at 10% loss with one flow, about three TTLs a round at 90%. The rows they create lie beyond the destination: not shown, not echoed, and counted apart in the debug log's round line.
+- **Hop table.** `Table.NoteReply` is called for every reply the collectors record, and `Table.EndRound` when a round has been closed on every hop (`tui.CloseRound`). `Table.TargetTTL` is the tracker's TTL; before a round with a candidate has closed it is the lowest TTL at which a node is marked as the target. The TUI session keeps a copy (`maxTTLHit`), refreshed on each target reply and each round end; report mode, the exports, the debug log and the alert engine read `Table.TargetTTL`. `Table.ResetAll` (the <kbd>r</kbd> key) keeps the destination's TTL, as the tracer and the session do.
+- **On a move** each hop keeps its own counters, verdict and held verdict; nothing is copied between rows. The alert engine follows the destination and keeps its state: the count of bad rounds and a raised alert carry over to the new hop, whose own figure then decides, and only the affected hop is looked for again (`AlertEngine.ObserveRound`). The debug log has a `destination moved` line.
 
 Each match becomes a `probe.Result` with the TTL, responder address, RTT, flow ID and probe type (`icmp-ttl`, `udp-ttl`, `tcp-ttl`, `icmp-echo`).
 
@@ -142,7 +159,7 @@ With `--debug-log` the tracer writes where replies are read from (on macOS: the 
 
 **The figure shown.** `Hop.Loss` returns the figure every view shows and its kind: echo loss for a rate-limited hop (`~N%†`), TTL-probe loss marked provisional while the verdict is undetermined and there is loss (`N%?`), and plain TTL-probe loss otherwise. `hop.FormatLoss` renders it. Alerting uses `Hop.SettledLoss`, which counts provisional loss as none.
 
-**Hops beyond the destination.** Round one probes every TTL, so the destination is recorded at its own TTL and at every TTL beyond; those entries never update again. `Table.TargetTTL` gives the destination's distance, `Table.EchoNodes` stops there, and views and exports read nothing past it. The debug log's hop lines are the exception: they list those entries, marked `beyond=yes`.
+**Hops beyond the destination.** Round one probes every TTL, so the destination is recorded at its own TTL and at every TTL beyond; those entries update again only while the tracer looks further out for a destination that is not answering. `Table.TargetTTL` gives the destination's distance (see "The destination's TTL"), `Table.EchoNodes` stops there, and views and exports read nothing past it. The debug log's hop lines are the exception: they list those entries, marked `beyond=yes`.
 
 **Sparkline samples.** At each round end a node records one sample: its average RTT that round if a TTL-limited probe was answered, else the echo RTT if an echo was answered, else a "held" marker if the node is rate-limited and wasn't echoed that round, else a drop. The last 28 samples are kept.
 
@@ -159,7 +176,7 @@ Per session, `main.go` starts:
 
 Shared by all sessions: one resolver, one enricher, and one forwarding goroutine for each that turns results into `HostnameMsg` and `ASNMsg`.
 
-The tracer also calls back at three points: probes written for a TTL (straight into the session's `hop.Table`, which is mutex-guarded), an echo sent (`EchoSentMsg`), and round end (`RoundEndMsg`). On `RoundEndMsg` the model closes the round on every hop, hands the tracer the next echo-target set, and updates the alert engine. The alert engine counts consecutive bad rounds, so a round that sent nothing to the destination's hop (paused, or no send succeeded) is skipped: it is neither a bad round nor a good one.
+The tracer also calls back at three points: probes written for a TTL (straight into the session's `hop.Table`, which is mutex-guarded), an echo sent (`EchoSentMsg`), and round end (`RoundEndMsg`). On `RoundEndMsg` the model closes the round on every hop and on the table (which settles the destination's TTL), hands the tracer the next echo-target set, and updates the alert engine. The alert engine counts consecutive bad rounds, so a round that sent nothing to the destination's hop (paused, or no send succeeded) is skipped: it is neither a bad round nor a good one.
 
 Messages that belong to one target carry a `TargetIdx`. Hostname and ASN results are applied to matching addresses in every session, because two targets often share their first hops.
 
@@ -255,7 +272,7 @@ Release builds are made by GoReleaser from a `v*` tag, which sets `main.version`
 
 **macOS does not deliver TCP to raw sockets.** A raw `ip4:tcp` or `ip6:tcp` socket there sends SYNs and receives nothing, so TCP replies are read from BPF (see "TCP replies"). Consequences: replies that come back on another interface than the one that has the startup source address are not seen; an interface change during a run (Wi-Fi to Ethernet, a VPN coming up) leaves the capture on the old interface until restart; and BPF sees a frame before the kernel has checked its TCP checksum, so a reply with a bad checksum is matched on macOS where Linux's IPv6 raw socket (with `IPV6_CHECKSUM`) would not deliver it.
 
-**The destination answers at every TTL past its own.** Views stop at the lowest TTL at which the destination answered, and the sender stops there too.
+**The destination answers at every TTL past its own, and sometimes before it.** Views and the sender stop at the destination's TTL as `dest.Tracker` settles it, not at the lowest TTL the target ever answered at: one reply at a lower TTL used to pin the destination row there for good (viaduct#234). See "The destination's TTL".
 
 **Styled strings and padding.** Pad plain text to its column width first, then apply the style. Padding a string that already contains ANSI escapes miscounts its width. See [UI-DESIGN.md](UI-DESIGN.md).
 

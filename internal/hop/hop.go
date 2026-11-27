@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/tonhe/viaduct/internal/dest"
 )
 
 // Hop holds the state for a single TTL hop.
@@ -768,6 +770,9 @@ type Table struct {
 	maxHops int
 	hops    map[int]*Hop
 	mu      sync.RWMutex
+
+	// dest follows which TTL is the destination's (destination.go).
+	dest dest.Tracker
 }
 
 // NewTable creates a hop table with the given max hop limit.
@@ -830,19 +835,6 @@ func (t *Table) Snapshot() []*Hop {
 	return result
 }
 
-// TargetTTL returns the destination's distance: the lowest TTL at which a
-// node marked as the target has answered, or 0 while it has not.
-func (t *Table) TargetTTL() int {
-	for _, h := range t.Snapshot() {
-		for _, n := range h.GetNodes() {
-			if n.IsTarget() {
-				return h.TTL
-			}
-		}
-	}
-	return 0
-}
-
 // EchoNode is a node to send direct echoes to, and the hop it belongs to.
 type EchoNode struct {
 	IP  net.IP
@@ -878,7 +870,9 @@ func (t *Table) MaxTTLSeen() int {
 	return t.maxTTLSeenLocked()
 }
 
-// ResetAll resets stats on all hops.
+// ResetAll resets stats on all hops. The destination's TTL is kept: a reset
+// clears what was measured, not where the target is, and the tracer keeps
+// probing up to it.
 func (t *Table) ResetAll() {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

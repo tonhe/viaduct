@@ -66,12 +66,12 @@ func (m Model) onHopUpdate(msg HopUpdateMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	s.probeCount++
+	s.table.NoteReply(r.TTL, r.IP, r.FlowID, kind, r.IsTarget)
 	if r.IsTarget {
-		h.MarkTarget(r.IP)
 		s.targetHit = true
-		if s.maxTTLHit == 0 || r.TTL < s.maxTTLHit {
-			s.maxTTLHit = r.TTL
-		}
+		// The destination's TTL is the table's to say (hop.Table.TargetTTL);
+		// maxTTLHit is the session's copy, which the views read.
+		s.maxTTLHit = s.table.TargetTTL()
 	}
 	// Submit IP for reverse DNS (skip for echo: the IP is already known/resolved)
 	if m.dnsEnabled && kind != hop.KindEcho && m.dnsSub != nil {
@@ -139,6 +139,10 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 	}
 	// The TTLs probes were sent to in the round being closed.
 	sentTo := CloseRound(s.table)
+	// The round may have moved the destination (hop.Table.TargetTTL).
+	if ttl := s.table.TargetTTL(); ttl > 0 {
+		s.maxTTLHit = ttl
+	}
 	// Collect {IP, TTL} pairs and submit to the echo sink for next-round echo probing.
 	if s.echoSink != nil {
 		// The nodes of the path, up to and including the destination's hop
