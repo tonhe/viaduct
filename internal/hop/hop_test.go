@@ -19,14 +19,14 @@ func TestNewHop(t *testing.T) {
 
 func TestHopAddSample(t *testing.T) {
 	h := NewHop(1)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip, 20*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip, 15*time.Millisecond, 0, KindPrimary)
 
-	if h.GetIP().String() != "10.0.0.1" {
-		t.Fatalf("expected IP 10.0.0.1, got %s", h.GetIP())
+	if h.GetIP().String() != "192.0.2.1" {
+		t.Fatalf("expected IP 192.0.2.1, got %s", h.GetIP())
 	}
 	if h.AvgRTT() != 15*time.Millisecond {
 		t.Fatalf("expected avg 15ms, got %v", h.AvgRTT())
@@ -48,7 +48,7 @@ func TestHopAddSample(t *testing.T) {
 
 func TestHopLossPercent(t *testing.T) {
 	h := NewHop(1)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 	// 10 rounds sent; 7 had at least one response => 30% loss
 	for i := 0; i < 7; i++ {
 		h.MarkRoundSent()
@@ -74,7 +74,7 @@ func TestHopLossPercentZeroSent(t *testing.T) {
 
 func TestHopSetHostname(t *testing.T) {
 	h := NewHop(1)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 	h.SetHostname("router.local")
 	if h.GetHostname() != "router.local" {
@@ -97,7 +97,7 @@ func TestTableGetOrCreate(t *testing.T) {
 func TestTableSnapshot(t *testing.T) {
 	tbl := NewTable(30)
 	h := tbl.GetOrCreate(1)
-	h.AddSample(net.ParseIP("1.1.1.1"), 5*time.Millisecond, 0, KindPrimary)
+	h.AddSample(net.ParseIP("203.0.113.1"), 5*time.Millisecond, 0, KindPrimary)
 	tbl.MarkRoundSent(1, 1)
 
 	snap := tbl.Snapshot()
@@ -120,7 +120,7 @@ func TestTableMaxTTLReached(t *testing.T) {
 
 func TestHopStDev(t *testing.T) {
 	h := NewHop(1)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 
 	// Samples: 10, 20, 30 ms => mean=20, variance=100/3, stdev≈5.77
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
@@ -136,7 +136,7 @@ func TestHopStDev(t *testing.T) {
 
 func TestHopStDevSingleSample(t *testing.T) {
 	h := NewHop(1)
-	h.AddSample(net.ParseIP("10.0.0.1"), 10*time.Millisecond, 0, KindPrimary)
+	h.AddSample(net.ParseIP("192.0.2.1"), 10*time.Millisecond, 0, KindPrimary)
 	if h.StDev() != 0 {
 		t.Fatalf("single sample stdev should be 0, got %f", h.StDev())
 	}
@@ -151,7 +151,7 @@ func TestHopStDevZeroSamples(t *testing.T) {
 
 func TestHopReset(t *testing.T) {
 	h := NewHop(3)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 	h.MarkRoundSent()
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip, 20*time.Millisecond, 0, KindPrimary)
@@ -187,8 +187,8 @@ func TestHopReset(t *testing.T) {
 
 func TestHopMultipleIPs(t *testing.T) {
 	h := NewHop(4)
-	ip1 := net.ParseIP("10.0.0.1")
-	ip2 := net.ParseIP("10.0.0.2")
+	ip1 := net.ParseIP("192.0.2.1")
+	ip2 := net.ParseIP("192.0.2.2")
 	h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip2, 15*time.Millisecond, 1, KindPrimary)
 	h.AddSample(ip1, 12*time.Millisecond, 0, KindPrimary)
@@ -203,7 +203,7 @@ func TestHopMultipleIPs(t *testing.T) {
 
 func TestHopSingleIP(t *testing.T) {
 	h := NewHop(3)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip, 12*time.Millisecond, 1, KindPrimary)
 	if h.IsDivergent() {
@@ -213,20 +213,20 @@ func TestHopSingleIP(t *testing.T) {
 
 func TestHopPrimaryNode(t *testing.T) {
 	h := NewHop(4)
-	ip1 := net.ParseIP("10.0.0.1")
-	ip2 := net.ParseIP("10.0.0.2")
+	ip1 := net.ParseIP("192.0.2.1")
+	ip2 := net.ParseIP("192.0.2.2")
 	h.AddSample(ip1, 10*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip1, 12*time.Millisecond, 0, KindPrimary)
 	h.AddSample(ip2, 15*time.Millisecond, 1, KindPrimary)
 	primary := h.PrimaryNode()
 	if !primary.IP.Equal(ip1) {
-		t.Fatalf("expected primary 10.0.0.1, got %s", primary.IP)
+		t.Fatalf("expected primary 192.0.2.1, got %s", primary.IP)
 	}
 }
 
 func TestHopMarkRoundEnd(t *testing.T) {
 	h := NewHop(1)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 
 	// MarkRoundEnd should not panic and should advance stability on all nodes
@@ -239,7 +239,7 @@ func TestHopMarkRoundEnd(t *testing.T) {
 
 func TestHopGetNodesIsCopy(t *testing.T) {
 	h := NewHop(1)
-	ip := net.ParseIP("10.0.0.1")
+	ip := net.ParseIP("192.0.2.1")
 	h.AddSample(ip, 10*time.Millisecond, 0, KindPrimary)
 
 	nodes := h.GetNodes()
@@ -252,8 +252,8 @@ func TestHopGetNodesIsCopy(t *testing.T) {
 
 func TestHopLossPercentMultiNode(t *testing.T) {
 	h := NewHop(1)
-	ip1 := net.ParseIP("10.0.0.1")
-	ip2 := net.ParseIP("10.0.0.2")
+	ip1 := net.ParseIP("192.0.2.1")
+	ip2 := net.ParseIP("192.0.2.2")
 	// 10 rounds of 2 probes; both answered in 7 rounds, none in 3 => 6 of 20
 	// probes lost => 30% loss
 	for i := 0; i < 7; i++ {
