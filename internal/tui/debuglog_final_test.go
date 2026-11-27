@@ -49,8 +49,8 @@ func TestDebugLog_RunEndingOnSnapshotRound_WritesFinalOnly(t *testing.T) {
 			if rounds >= 20 {
 				verdict = "no"
 			}
-			want := fmt.Sprintf("[192.0.2.1] final round=%d ttl=3 nodes=192.0.2.3 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0 echo=%d/0 echo-counted=%d/0 rate-limited=%s",
-				rounds, rounds, 2*rounds, rounds, rounds, verdict)
+			want := fmt.Sprintf("[192.0.2.1] final round=%d ttl=3 nodes=192.0.2.3 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0 echo=%d/0 echo-counted=%d/0 rate-limited=%s verdict-held=no verdict-probes=%d/0",
+				rounds, rounds, 2*rounds, rounds, rounds, verdict, 3*rounds)
 			if finals[2] != want {
 				t.Errorf("\n got %s\nwant %s", finals[2], want)
 			}
@@ -99,9 +99,9 @@ func TestDebugLog_ReplyBeforeFinal_FinalShowsNewerFigures(t *testing.T) {
 
 	got := sink.hopLines()
 	want := []string{
-		"[192.0.2.1] final round=10 ttl=1 nodes=192.0.2.1 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/1 echo-counted=10/1 rate-limited=undetermined",
-		"[192.0.2.1] final round=10 ttl=2 nodes=192.0.2.2 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/1 echo-counted=10/1 rate-limited=undetermined",
-		"[192.0.2.1] final round=10 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/0 echo-counted=10/0 rate-limited=undetermined",
+		"[192.0.2.1] final round=10 ttl=1 nodes=192.0.2.1 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/1 echo-counted=10/1 rate-limited=undetermined verdict-held=no verdict-probes=30/0",
+		"[192.0.2.1] final round=10 ttl=2 nodes=192.0.2.2 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/1 echo-counted=10/1 rate-limited=undetermined verdict-held=no verdict-probes=30/0",
+		"[192.0.2.1] final round=10 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/0 echo-counted=10/0 rate-limited=undetermined verdict-held=no verdict-probes=30/0",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d hop lines, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
@@ -132,7 +132,7 @@ func TestDebugLog_SnapshotWrittenWhenTheNextRoundCloses(t *testing.T) {
 	if !strings.HasPrefix(sink.lines[n-1], "[192.0.2.1] round 11: ") {
 		t.Errorf("last line = %s, want round 11's", sink.lines[n-1])
 	}
-	want := "[192.0.2.1] snapshot round=10 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/0 echo-counted=10/0 rate-limited=undetermined"
+	want := "[192.0.2.1] snapshot round=10 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/0 echo-counted=10/0 rate-limited=undetermined verdict-held=no verdict-probes=30/0"
 	if got := sink.lines[n-2]; got != want {
 		t.Errorf("line before round 11's:\n got %s\nwant %s", got, want)
 	}
