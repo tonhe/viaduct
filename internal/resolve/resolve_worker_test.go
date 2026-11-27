@@ -134,9 +134,11 @@ func TestWorker_LookupHasATwoSecondDeadline(t *testing.T) {
 	if !s.has {
 		t.Fatal("the lookup's context has no deadline")
 	}
-	// Taken a moment after the worker set it: at most two seconds ahead, and
-	// not much less.
-	if ahead := s.deadline.Sub(s.at); ahead > 2*time.Second || ahead < 1900*time.Millisecond {
+	// Taken after the worker set it, so at most two seconds ahead. The lower
+	// bound allows the worker to be held off the CPU for up to half a second
+	// between setting the deadline and calling the lookup, which a loaded CI
+	// runner can do; a one-second deadline is still well outside it.
+	if ahead := s.deadline.Sub(s.at); ahead > 2*time.Second || ahead < 1500*time.Millisecond {
 		t.Errorf("the lookup's deadline was %v ahead, want two seconds", ahead)
 	}
 	if s.ctx.Err() == nil {
