@@ -16,8 +16,8 @@ import (
 // tests pin that the result stays readable: no address is cut mid-field, no
 // row overflows, and hops remain distinguishable.
 
-// Full-length IPv6 addresses: 8 groups of 4 hex digits, 39 characters, from
-// the RFC 3849 documentation prefix. Hops 1/2 and 3/4 differ only in the last
+// Full-length IPv6 addresses: 8 groups, 38 characters (the "db8" group has
+// three digits), from the RFC 3849 documentation prefix. Hops 1/2 and 3/4 differ only in the last
 // character, so a prefix-only truncation makes them look identical.
 var longV6Hops = []string{
 	"2001:db8:1111:2222:3333:4444:5555:6661",
@@ -26,7 +26,7 @@ var longV6Hops = []string{
 	"2001:db8:aaaa:bbbb:cccc:dddd:eeee:fff4",
 }
 
-// hopsIPv6Long seeds session idx with four hops whose addresses are 39
+// hopsIPv6Long seeds session idx with four hops whose addresses are 38
 // characters long, one closed round each.
 func hopsIPv6Long(idx int) testOpt {
 	return func(m *Model) {

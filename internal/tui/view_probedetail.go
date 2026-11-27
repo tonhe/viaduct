@@ -176,7 +176,7 @@ func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout,
 		parts = append(parts, countCell(echoStats.Received, echoStats.Sent, h.RateLimitState() == hop.RateLimitUndetermined))
 	}
 	if l.showRnd {
-		parts = append(parts, fmt.Sprintf("%-*d", pdWidthRnd, h.Rounds()))
+		parts = append(parts, fmt.Sprintf("%-*s", pdWidthRnd, formatRounds(h.Rounds(), pdWidthRnd)))
 	}
 	return strings.Join(parts, " ")
 }
