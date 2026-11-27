@@ -154,5 +154,34 @@ expect_file allow dev "/tmp/some-worktree/.claude/team/DELEGATIONS.md"
 expect_file allow dev "$TEAM_DIR/HANDOFF-dev.md"
 expect_file allow tester "/tmp/smoke.sh"
 
+# refspecs: a leading + and any position
+expect block dev "git push origin +HEAD:main"
+expect block dev "git push --repo=origin HEAD:main"
+expect block dev "git push origin fix/a +fix/b:issue-9"
+expect block tester "git push origin +v0.3.1"
+
+# GraphQL mutations and aliases are other routes to a merge
+expect block dev "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
+expect allow dev "gh api graphql -f query='query { viewer { login } }'"
+for role in director dev tester; do
+  expect block "$role" "gh alias set land 'pr merge'"
+done
+
+# Claude settings files: a role must not switch its own guard off
+for role in director dev tester; do
+  expect_file block "$role" "$TEAM_DIR/../settings.local.json"
+  expect_file block "$role" "$TEAM_DIR/../settings.json"
+  expect_file block "$role" "$HOME/.claude/settings.json"
+  expect_file block "$role" "/tmp/some-worktree/.claude/settings.local.json"
+done
+# A checkout under a temp directory is still a repository.
+tmprepo=$(mktemp -d)
+mkdir -p "$tmprepo/.git" "$tmprepo/internal"
+expect_file block director "$tmprepo/internal/hop.go"
+expect_file allow dev "$tmprepo/internal/hop.go"
+rm -rf "$tmprepo"
+expect_file block director "$HOME/.claude/keybindings.json"
+expect_file allow director "$HOME/.claude/projects/x/memory/note.md"
+
 echo "guard tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

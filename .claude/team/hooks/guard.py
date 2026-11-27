@@ -136,6 +136,13 @@ def positionals(args):
     return [a for a in args if not a.startswith("-")]
 
 
+def push_refs(args):
+    """Every word of a `git push` that could be a refspec, without a leading
+    "+". The remote's name is among them: which positional is the remote
+    depends on options, so every one is checked against the patterns."""
+    return [a.lstrip("+") for a in positionals(args)]
+
+
 def check_git(role, argv):
     sub, args = git_sub(argv)
     if not sub:
@@ -154,7 +161,7 @@ def check_git(role, argv):
     if new_branch and LOOP_BRANCH.match(new_branch):
         raise Block("branches named issue-N belong to the nightly loop. Pick another name.")
     if sub == "push":
-        for a in positionals(args)[1:]:
+        for a in push_refs(args):
             if LOOP_BRANCH.match(a):
                 raise Block("issue-N branches belong to the nightly loop. Local roles never push to them.")
 
@@ -167,7 +174,7 @@ def check_git(role, argv):
     if sub == "push":
         if "--tags" in args or "--follow-tags" in args or "--mirror" in args:
             raise Block("pushing tags is a release step. The owner does it, or says so per release.")
-        for a in positionals(args)[1:]:
+        for a in push_refs(args):
             if TAG_REF.match(a):
                 raise Block("pushing a tag is a release step. The owner does it, or says so per release.")
 
@@ -176,7 +183,7 @@ def check_git(role, argv):
     if role == "tester" and sub in GIT_HISTORY:
         raise Block("the tester makes no git writes (git %s). Report results as a PR comment." % sub)
     if role == "dev" and sub == "push":
-        for a in positionals(args)[1:]:
+        for a in push_refs(args):
             if MAIN_REF.match(a):
                 raise Block("the dev role does not push to main. Open a pull request.")
 
@@ -274,6 +281,10 @@ def check_gh(role, argv):
             if OWNER_DECISION.match(body or ""):
                 raise Block('only the owner posts a comment that begins "Owner decision". Draft it in a file for them.')
 
+    # Every role: an alias can hide any other gh command from this check.
+    if group == "alias" and verb in ("set", "import", "delete"):
+        raise Block("gh aliases are not used by the team: they hide the command from the guard.")
+
     # Every role: releases and release approvals are the owner's.
     if group == "release" and not read:
         raise Block("changing a release is the owner's step, or theirs to grant per release.")
@@ -288,6 +299,8 @@ def check_gh(role, argv):
     if role == "dev":
         if group == "pr" and verb == "merge":
             raise Block("the dev role does not merge. The director merges under DELEGATIONS.md.")
+        if group == "api" and "graphql" in args and any(re.search(r"\bmutation\b", a) for a in args):
+            raise Block("the dev role does not send GraphQL mutations: they can merge, label and set milestones. Use the gh commands.")
         if group == "api" and not read:
             if any(re.search(r"/pulls/\d+/merge\b", a) for a in args):
                 raise Block("the dev role does not merge. The director merges under DELEGATIONS.md.")
@@ -312,6 +325,32 @@ def under(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def in_git_checkout(path):
+    """True if path lies inside a git work tree, wherever that tree is."""
+    d = os.path.dirname(path)
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def is_claude_config(path):
+    """True for the files that configure a Claude Code session: settings and
+    hooks. A role that could write them could switch this guard off."""
+    parts = path.split(os.sep)
+    if ".claude" not in parts:
+        return False
+    after = parts[len(parts) - 1 - parts[::-1].index(".claude") + 1:]
+    if not after:
+        return False
+    if len(after) == 1 and after[0].endswith(".json"):
+        return True
+    return after[0] in ("hooks", "plugins", "agents", "commands", "skills")
+
+
 def check_file(role, path, team_dir):
     if not path:
         return
@@ -320,12 +359,18 @@ def check_file(role, path, team_dir):
         for name in TEAM_FIXED:
             if under(path, os.path.join(team_dir, name)):
                 raise Block("the running team's own files change by a pull request the owner merges, not in place (%s)." % name)
+    if is_claude_config(path):
+        raise Block("no role edits Claude Code settings, hooks or plugins. Ask the owner.")
     if role == "director":
-        allowed = [tempfile.gettempdir(), "/tmp", "/private/tmp", os.path.expanduser("~/.claude")]
-        if os.environ.get("TMPDIR"):
-            allowed.append(os.environ["TMPDIR"])
         if team_dir and path == os.path.realpath(os.path.join(team_dir, "HANDOFF-director.md")):
             return
+        # A file in a checkout is a repository file even when the checkout
+        # sits under a temp directory.
+        if in_git_checkout(path):
+            raise Block("the director does not write code or repository files. It may write its handoff and scratch files.")
+        allowed = [tempfile.gettempdir(), "/tmp", "/private/tmp", os.path.expanduser("~/.claude/projects")]
+        if os.environ.get("TMPDIR"):
+            allowed.append(os.environ["TMPDIR"])
         if any(under(path, a) for a in allowed):
             return
         raise Block("the director does not write code or repository files. It may write its handoff and scratch files.")
