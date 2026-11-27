@@ -29,6 +29,7 @@ OWNER_DECISION = re.compile(r"^\s*owner decision", re.IGNORECASE)
 TEAM_FIXED = ("hooks", "backend", ".run", "start", "roles.toml", "DELEGATIONS.md", "PROTOCOL.md", "prompts")
 
 GIT_HISTORY = {"commit", "push", "merge", "rebase", "cherry-pick", "revert", "am"}
+GIT_GLOBAL_OK = {"--no-pager", "-p", "--paginate", "-P", "--no-optional-locks", "--version", "--help", "-h"}
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 
 GH_READ_VERBS = {"view", "list", "status", "diff", "checks", "watch", "download", "ls"}
@@ -150,9 +151,19 @@ def check_git(role, argv):
     # harmless-looking command into a push or a merge the checks below miss.
     # -C (a directory) is the only global option that starts with -c or -C
     # and is allowed, so any other word starting with -c is configuration.
-    for a in global_opts:
-        if a.startswith("-c") or a == "--config-env" or a.startswith("--config-env="):
-            raise Block("the team does not pass git configuration on the command line (-c, --config-env).")
+    # The options before the subcommand are held to a short known list. An
+    # option this parser does not know could take the next word as its value,
+    # and then the word it takes for the subcommand would be the wrong one.
+    i = 0
+    while i < len(global_opts):
+        a = global_opts[i]
+        if a in ("-C", "--git-dir", "--work-tree"):
+            i += 2
+            continue
+        if a in GIT_GLOBAL_OK or a.startswith(("--git-dir=", "--work-tree=")):
+            i += 1
+            continue
+        raise Block("the team uses git with only these options before the subcommand: -C, --git-dir, --work-tree, --no-pager, --paginate, --no-optional-locks (got %s)." % a)
     if not sub:
         return
     if sub == "config" and any(a.lower().startswith("alias.") for a in args):
