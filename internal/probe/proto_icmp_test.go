@@ -1,7 +1,6 @@
 package probe
 
 import (
-	"encoding/binary"
 	"testing"
 
 	"golang.org/x/net/icmp"
@@ -184,18 +183,4 @@ func TestICMPProtocol_RandomIDWhenUnset(t *testing.T) {
 	if p.sessionID < 1 || p.sessionID > 65534 {
 		t.Fatalf("sessionID = %d, want 1..65534", p.sessionID)
 	}
-}
-
-// helper to build a fake ICMP Echo Request for IdentifyResponse tests
-func buildFakeInnerICMP(id, seq int) []byte {
-	// 20-byte IP header + 8-byte ICMP header
-	buf := make([]byte, 28)
-	buf[0] = 0x45 // IPv4, IHL=5
-	buf[9] = 1    // ICMP
-	// ICMP type = 8 (Echo)
-	buf[20] = 8
-	buf[21] = 0
-	binary.BigEndian.PutUint16(buf[24:26], uint16(id))
-	binary.BigEndian.PutUint16(buf[26:28], uint16(seq))
-	return buf
 }

@@ -39,29 +39,6 @@ func buildV4InnerForProto(proto byte, srcPort, dstPort uint16) []byte {
 	return pkt
 }
 
-// buildV6InnerForProto builds a 48-byte IPv6 inner header (40 base + 8 transport).
-func buildV6InnerForProto(proto byte, srcPort, dstPort uint16) []byte {
-	pkt := make([]byte, 48)
-	pkt[0] = 0x60 // IPv6
-	pkt[6] = proto
-	// src: 2001:db8::1
-	pkt[8] = 0x20
-	pkt[9] = 0x01
-	pkt[10] = 0x0d
-	pkt[11] = 0xb8
-	pkt[23] = 0x01
-	// dst: 2001:db8::100
-	pkt[24] = 0x20
-	pkt[25] = 0x01
-	pkt[26] = 0x0d
-	pkt[27] = 0xb8
-	pkt[38] = 0x01
-	pkt[39] = 0x00
-	binary.BigEndian.PutUint16(pkt[40:42], srcPort)
-	binary.BigEndian.PutUint16(pkt[42:44], dstPort)
-	return pkt
-}
-
 // --- UDP IdentifyResponse with wrong protocol (TCP inner) ---
 
 func TestUDPIdentifyResponse_WrongProto_TCP(t *testing.T) {
