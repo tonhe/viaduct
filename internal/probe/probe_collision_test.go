@@ -887,7 +887,6 @@ func TestListenTCP_ViaFakeConn_MatchesSYNACK(t *testing.T) {
 }
 
 func TestListenTCP_ViaFakeConn_RejectsNonSYNACK(t *testing.T) {
-	t.Parallel()
 	// ACK-only response should be ignored (parseTCPResponse returns nil key).
 	ack := buildFakeTCPPacket(443, 44000, 0x10) // ACK only
 
@@ -916,7 +915,6 @@ func TestListenTCP_ViaFakeConn_RejectsNonSYNACK(t *testing.T) {
 }
 
 func TestListenTCP_ViaFakeConn_NoMatchInProbeMap(t *testing.T) {
-	t.Parallel()
 	// SYN-ACK received but no matching probe key in probeMap.
 	synack := buildFakeTCPPacket(443, 44001, 0x12) // port 44001, no entry in pm
 

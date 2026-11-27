@@ -35,7 +35,6 @@ func TestRun_EchoTierSendsOnItsOwnSocket(t *testing.T) {
 	for _, fam := range stallFamilies {
 		for _, p := range stallProtocols {
 			t.Run(fam.name+"/"+p.name, func(t *testing.T) {
-				t.Parallel()
 				cfg, target := stallCfg(fam.v, fam.source, fam.target, p.proto)
 				cfg.MaxRounds = rounds
 				probeSock := newStallSender(nil)
@@ -159,7 +158,6 @@ func TestRun_EchoSocketStallDoesNotStallTheProbeSocket(t *testing.T) {
 	for _, fam := range stallFamilies {
 		for _, p := range stallProtocols {
 			t.Run(fam.name+"/"+p.name, func(t *testing.T) {
-				t.Parallel()
 				cfg, target := stallCfg(fam.v, fam.source, fam.target, p.proto)
 				cfg.MaxRounds = rounds
 				var sink logSink

@@ -132,7 +132,6 @@ func TestListen_EchoReplyFromWrongSenderIsDropped(t *testing.T) {
 
 	t.Run("ICMP TTL tier", func(t *testing.T) {
 
-		t.Parallel()
 		tr := newListenTracer()
 		id := tr.cfg.Protocol.(*ICMPProtocol).sessionID
 		key := probeKey{SrcPort: id, DstPort: 5}
@@ -153,7 +152,6 @@ func TestListen_EchoReplyFromWrongSenderIsDropped(t *testing.T) {
 
 	t.Run("echo tier", func(t *testing.T) {
 
-		t.Parallel()
 		tr := newListenTracer()
 		tr.cfg.EchoID = 0xE00E
 		key := probeKey{SrcPort: tr.cfg.EchoID, DstPort: 9}

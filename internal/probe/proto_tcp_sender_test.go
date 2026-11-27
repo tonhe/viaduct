@@ -58,7 +58,6 @@ func TestListenTCP_SenderMustBeTheTarget(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			synack := buildFakeTCPPacket(443, 44000, 0x12)
 			binary.BigEndian.PutUint32(synack[8:12], 102) // acknowledges sequence 101
 
