@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -65,8 +66,9 @@ func TestDisplayModes_OneForEveryView(t *testing.T) {
 	}
 }
 
-// newWithDisplayMode builds a model the way cmd/via does, with the given
-// display_mode in its config.
+// newWithDisplayMode builds a one-target model with the given display_mode in
+// its config. (cmd/via calls NewMulti, which builds on New; see
+// TestNewMulti_OpensTheConfiguredView.)
 func newWithDisplayMode(mode string) Model {
 	appCfg := config.Default()
 	appCfg.DisplayMode = mode
@@ -98,6 +100,29 @@ func TestNew_OpensTheConfiguredView(t *testing.T) {
 				t.Errorf("display_mode = %q: the status bar does not offer %q", mode, hint)
 			}
 		})
+	}
+}
+
+// cmd/via builds its model with NewMulti, for one target or several. The
+// configured view opens there too, whatever the number of targets and whether
+// or not one of them failed to start.
+func TestNewMulti_OpensTheConfiguredView(t *testing.T) {
+	cfg := probe.DefaultConfig()
+	cfg.IPVersion = 4
+	one := []TargetSpec{{Name: "a.example", IP: net.ParseIP("192.0.2.1"), Cfg: cfg, ProtocolName: "udp"}}
+	three := append(append([]TargetSpec(nil), one...),
+		TargetSpec{Name: "b.example", IP: net.ParseIP("192.0.2.2"), Cfg: cfg, ProtocolName: "udp"},
+		TargetSpec{Name: "bad.example", Cfg: cfg, ProtocolName: "udp", Err: errors.New("cannot resolve host")},
+	)
+	for mode, want := range wantViewForDisplayMode {
+		for _, specs := range [][]TargetSpec{one, three} {
+			appCfg := config.Default()
+			appCfg.DisplayMode = mode
+			m := NewMulti(specs, "0.0.0-test", true, 5, 0, 3, true, appCfg)
+			if m.viewMode != want {
+				t.Errorf("display_mode = %q, %d targets: opens in the %v view, want %v", mode, len(specs), m.viewMode, want)
+			}
+		}
 	}
 }
 
