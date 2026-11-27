@@ -1,6 +1,6 @@
 # Contributing
 
-The rules for changing this repository are in [CLAUDE.md](CLAUDE.md). They apply to people and to the automated agents alike: tests with every change, coverage floors that only go up, the IPv6-protected paths, and the commit message prefixes. Read it before opening a pull request.
+The rules for changing this repository are in [CLAUDE.md](CLAUDE.md). They apply to people and to the automated agents alike: tests with every change, coverage floors that only go up, a live check for socket code, an owner's decision for behaviour changes, and the commit message prefixes. Read it before opening a pull request.
 
 ## Build and test
 
