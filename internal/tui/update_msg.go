@@ -26,6 +26,7 @@ func (m Model) sessionAt(idx int) *TargetSession {
 func (m Model) onSettingsSaved(msg SettingsSavedMsg) (Model, tea.Cmd) {
 	m.showSettings = false
 	m.settings = nil
+	m.viewMode = viewModeAfterSave(m.viewMode, m.config.DisplayMode, msg.Config.DisplayMode)
 	*m.config = *msg.Config
 	_ = config.Save(m.config)
 	return m, nil
