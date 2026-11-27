@@ -87,6 +87,7 @@ func TestEchoInvariant2_PerTracerTargets(t *testing.T) {
 		c.ProbeDelay = 0
 		c.RoundDelay = 5 * time.Millisecond
 		c.MaxRounds = 2 // rounds 0 and 1; echoes fire on round 1
+		c.Timeout = shortTestTimeout
 		c.EchoID = echoID
 		c.EchoBudget = 8
 		return c
@@ -361,6 +362,7 @@ func TestEchoNotSentInFirstRound(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 1 // only round 0 runs
+	cfg.Timeout = shortTestTimeout
 	cfg.EchoID = 0xF00F
 	cfg.EchoBudget = 4
 
