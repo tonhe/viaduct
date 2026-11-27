@@ -167,6 +167,24 @@ for role in director dev tester; do
   expect block "$role" "gh alias set land 'pr merge'"
 done
 
+# GraphQL the guard cannot read is refused for dev
+expect block dev "gh api /graphql -f query='mutation { x }'"
+expect block dev "gh api graphql -F query=@/tmp/q.graphql"
+expect block dev "gh api graphql --input /tmp/q.json"
+expect block dev "gh api https://api.github.com/graphql -f query='  mutation { x }'"
+expect allow dev "gh api graphql -f query='{ viewer { login } }'"
+
+# pushes that name no single branch
+expect block dev "git push --all origin"
+expect block dev "git push --mirror"
+expect block dev "git push origin 'refs/heads/*:refs/heads/*'"
+expect block dev "git -c push.default=matching push origin"
+expect block dev "git -c remote.origin.push=HEAD:main push"
+
+# settings paths in another letter case (macOS file systems ignore case)
+expect_file block dev "$HOME/.Claude/settings.json"
+expect_file block dev "/tmp/wt/.CLAUDE/Settings.local.json"
+
 # Claude settings files: a role must not switch its own guard off
 for role in director dev tester; do
   expect_file block "$role" "$TEAM_DIR/../settings.local.json"

@@ -183,6 +183,13 @@ def check_git(role, argv):
     if role == "tester" and sub in GIT_HISTORY:
         raise Block("the tester makes no git writes (git %s). Report results as a PR comment." % sub)
     if role == "dev" and sub == "push":
+        # Forms that push more than the one branch named, or take the
+        # destination from configuration the guard does not read.
+        if any(a in ("--all", "--branches", "--mirror") for a in args) or any("*" in a for a in push_refs(args)):
+            raise Block("the dev role pushes one named branch at a time.")
+        for i, a in enumerate(argv[:-1]):
+            if a == "-c" and re.match(r"^(remote\..*\.push|push\.default)=", argv[i + 1]):
+                raise Block("the dev role pushes one named branch at a time, without push configuration overrides.")
         for a in push_refs(args):
             if MAIN_REF.match(a):
                 raise Block("the dev role does not push to main. Open a pull request.")
@@ -299,8 +306,13 @@ def check_gh(role, argv):
     if role == "dev":
         if group == "pr" and verb == "merge":
             raise Block("the dev role does not merge. The director merges under DELEGATIONS.md.")
-        if group == "api" and "graphql" in args and any(re.search(r"\bmutation\b", a) for a in args):
-            raise Block("the dev role does not send GraphQL mutations: they can merge, label and set milestones. Use the gh commands.")
+        if group == "api" and any(a.rstrip("/").lower().endswith("graphql") for a in args[1:] if not a.startswith("-")):
+            # Allowed only when every query is on the command line and is
+            # plainly a read. A query in a file or on stdin cannot be seen.
+            queries = [a.split("=", 1)[1] for a in args if a.startswith("query=")]
+            readable = queries and not any(a == "--input" or a.startswith("--input=") for a in args)
+            if not readable or not all(re.match(r"^\s*(query\b|\{)", q) for q in queries):
+                raise Block("the dev role sends only GraphQL queries written out on the command line: a mutation can merge, label and set milestones. Use the gh commands.")
         if group == "api" and not read:
             if any(re.search(r"/pulls/\d+/merge\b", a) for a in args):
                 raise Block("the dev role does not merge. The director merges under DELEGATIONS.md.")
@@ -340,15 +352,17 @@ def in_git_checkout(path):
 def is_claude_config(path):
     """True for the files that configure a Claude Code session: settings and
     hooks. A role that could write them could switch this guard off."""
-    parts = path.split(os.sep)
-    if ".claude" not in parts:
-        return False
-    after = parts[len(parts) - 1 - parts[::-1].index(".claude") + 1:]
-    if not after:
-        return False
-    if len(after) == 1 and after[0].endswith(".json"):
-        return True
-    return after[0] in ("hooks", "plugins", "agents", "commands", "skills")
+    # Compared without case: macOS file systems usually ignore it.
+    parts = [p.casefold() for p in path.split(os.sep)]
+    for i, part in enumerate(parts):
+        if part != ".claude":
+            continue
+        after = parts[i + 1:]
+        if len(after) == 1 and after[0].endswith(".json"):
+            return True
+        if after and after[0] in ("hooks", "plugins", "agents", "commands", "skills"):
+            return True
+    return False
 
 
 def check_file(role, path, team_dir):
