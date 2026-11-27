@@ -187,6 +187,8 @@ expect block dev "git -c remote.origin.push=HEAD:main push"
 for role in director dev tester; do
   expect block "$role" "git -c alias.p=push p origin main"
   expect block "$role" "git -c remote.origin.mirror=true push origin"
+  expect block "$role" "git -C p -c alias.p=push p origin main"
+  expect block "$role" "git -calias.p=push p origin main"
   expect block "$role" "git config alias.p push"
   expect block "$role" "git config --global ALIAS.p push"
   expect allow "$role" "git config user.name"

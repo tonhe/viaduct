@@ -119,7 +119,7 @@ def commands_in(cmd, depth=0):
 
 
 def git_sub(argv):
-    """Return (subcommand, its args) of a git command line."""
+    """Return (subcommand, its args, the global options before it)."""
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -128,8 +128,8 @@ def git_sub(argv):
         elif a.startswith("-"):
             i += 1
         else:
-            return a, argv[i + 1:]
-    return "", []
+            return a, argv[i + 1:], argv[1:i]
+    return "", [], argv[1:]
 
 
 def positionals(args):
@@ -144,15 +144,17 @@ def push_refs(args):
 
 
 def check_git(role, argv):
-    sub, args = git_sub(argv)
-    if not sub:
-        return
+    sub, args, global_opts = git_sub(argv)
 
     # Every role: no one-off configuration and no aliases. Either can turn a
     # harmless-looking command into a push or a merge the checks below miss.
-    before_sub = argv[1:argv.index(sub)]
-    if any(a == "-c" or a == "--config-env" or a.startswith("--config-env=") for a in before_sub):
-        raise Block("the team does not pass git configuration on the command line (-c, --config-env).")
+    # -C (a directory) is the only global option that starts with -c or -C
+    # and is allowed, so any other word starting with -c is configuration.
+    for a in global_opts:
+        if a.startswith("-c") or a == "--config-env" or a.startswith("--config-env="):
+            raise Block("the team does not pass git configuration on the command line (-c, --config-env).")
+    if not sub:
+        return
     if sub == "config" and any(a.lower().startswith("alias.") for a in args):
         raise Block("the team does not define git aliases: they hide the command from the guard.")
 
