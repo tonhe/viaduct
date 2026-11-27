@@ -131,6 +131,7 @@ func TestListen_EchoReplyFromWrongSenderIsDropped(t *testing.T) {
 	stranger := "203.0.113.99"
 
 	t.Run("ICMP TTL tier", func(t *testing.T) {
+
 		tr := newListenTracer()
 		id := tr.cfg.Protocol.(*ICMPProtocol).sessionID
 		key := probeKey{SrcPort: id, DstPort: 5}
@@ -150,6 +151,7 @@ func TestListen_EchoReplyFromWrongSenderIsDropped(t *testing.T) {
 	})
 
 	t.Run("echo tier", func(t *testing.T) {
+
 		tr := newListenTracer()
 		tr.cfg.EchoID = 0xE00E
 		key := probeKey{SrcPort: tr.cfg.EchoID, DstPort: 9}
@@ -175,7 +177,10 @@ func TestRun_RecordsProbeDestinations(t *testing.T) {
 	cfg.ProbeDelay = 0
 	cfg.RoundDelay = 5 * time.Millisecond
 	cfg.MaxRounds = 2
-	cfg.Timeout = time.Hour // keep records from being swept
+	// Long next to the run (two 5 ms rounds), so the records read below are
+	// not swept first; short, so the last round does not stay open for long
+	// waiting for replies that never come.
+	cfg.Timeout = 100 * time.Millisecond
 	target := net.ParseIP("192.0.2.1")
 	hop := net.ParseIP("192.0.2.10")
 
