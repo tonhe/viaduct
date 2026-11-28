@@ -14,7 +14,7 @@ Your role is the value of `VIADUCT_ROLE`. The session name does not decide it.
 
 `hooks/guard.sh` blocks the "does not" column. It catches mistakes. It does not make a blocked action acceptable by another route: if the guard stops you, do not look for a way around it. Say what you needed and who can do it.
 
-The guard reads a comment, review or description before `gh` posts it. A body it cannot read is blocked: standard input (a pipe, a redirect, a heredoc), a variable or a command substitution, and a file that does not exist yet or that the same command writes. Write the body to a file in an earlier step, with the Write tool, then pass that file's full path with `--body-file`, or `-F body=@PATH` for `gh api`.
+The guard reads a comment, review or description before `gh` posts it. A body it cannot read is blocked: standard input (a pipe, a redirect, a heredoc), a variable or a command substitution, and a file that does not exist yet or that the same command writes. Write the body to a file in an earlier step, with the Write tool, then pass that file's full path with `--body-file`, or `-F body=@PATH` for `gh api`. Run that `gh` command on its own: with a body file, the guard also blocks a `>` redirection and any other command in the same call except `cd` and `gh` commands that write nothing locally.
 
 ## Approvals
 
