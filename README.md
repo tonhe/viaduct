@@ -114,6 +114,8 @@ via -r google.com
 
 **Auto mode** starts with UDP for ECMP discovery. If no responses are received after 3 rounds (~3 seconds), it automatically falls back to ICMP. The TUI header updates to reflect the active protocol.
 
+**What the flow count can miss.** A router that balances by port sends each flow to a next hop by what is in effect an even, independent draw, so a small number of flows can all land on the same one. With the default of 6 flows, a hop with two equal-cost next hops shows only one of them in about 1 run in 64, with every probe answered and nothing in the output to say a path went unseen. More flows lower the odds: about 1 in 256 with `--paths 8`, 1 in 4096 with `--paths 12`. With more than two next hops the chance of missing one is higher.
+
 **TCP mode by platform.** The destination's SYN-ACK or RST is what marks it as reached, and where `via` reads it differs:
 
 | Platform | TCP replies are read from | Status |
