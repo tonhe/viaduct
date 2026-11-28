@@ -235,11 +235,11 @@ With more than one target and column view off, a panel sits between the separato
 
 ```
 ╭ example.com ───────────────────╮ ╭ example.net ───────────────────╮
-│  # IP                Avg  Loss │ │  # IP                Avg  Loss │
-│  1 192.0.2.1         0.5    0% │ │  1 192.0.2.1         0.5    0% │
-│  2 198.51.100.5      8.2    0% │ │  2 198.51.100.77     9.1    0% │
-│  3 203.0.113.10     12.4    0% │ │  3 *                           │
-│  4 203.0.113.99     12.1   10% │ │                                │
+│  # IP              Avg    Loss │ │  # IP              Avg    Loss │
+│  1 192.0.2.1       0.5    0.0% │ │  1 192.0.2.1       0.5    0.0% │
+│  2 198.51.100.5    8.2    0.0% │ │  2 198.51.100.7    9.1   2.5%? │
+│  3 203.0.113.10   12.4    ~0%† │ │  3 *                           │
+│  4 203.0.113.99   12.1   10.0% │ │                                │
 ╰────────────────────────────────╯ ╰────────────────────────────────╯
 ```
 
@@ -249,7 +249,8 @@ With more than one target and column view off, a panel sits between the separato
 - Targets that failed at setup get no pane.
 - The focused pane has a `Base0D` border and a bold `Base0D` label. Other panes have a dim border.
 - The label sits one space after the corner, so it lines up with the pane's content column.
-- Pane columns fill the pane by priority: `#` (2) and `IP` (at least 9) always, then `Avg` (6), then `Loss` (5), then a wider `IP` (up to 15, or up to the longest address the pane shows when that is longer), then `Host` with whatever is left if that is at least 8.
+- Pane columns fill the pane by priority: `#` (2) and `IP` (at least 9) always, then `Avg` (6), then `Loss` (7), then a wider `IP` (up to 15, or up to the longest address the pane shows when that is longer), then `Host` with whatever is left if that is at least 8. A pane at the 34-column minimum has 12 columns for `IP`, and a longer address is cut in the middle.
+- `Loss` is the hop's loss as the hop table writes it (`hop.FormatLoss`), `~N%†` and `N%?` included, right-aligned. The `#` header is right-aligned over the hop numbers.
 - All panes share one row grid. A pane's rows past its own destination are blank.
 
 ## Settings overlay
