@@ -842,7 +842,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 		fmt.Fprintf(os.Stderr, "error: %s: %v\n", sp.Name, err)
 		r := export.Report{
 			Version:   versionStr,
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			Target:    sp.Name,
 			Protocol:  protocolName,
 			Hops:      []export.Hop{},
