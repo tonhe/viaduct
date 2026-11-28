@@ -78,6 +78,79 @@ func TestHopReset_BetweenRoundsDropsNothing(t *testing.T) {
 	}
 }
 
+func TestHopReset_LateEchoReplyAfterDrainIsDropped(t *testing.T) {
+	// #120: the echo for the round open at the reset was sent to a node Reset
+	// then cleared, so its send was counted nowhere. Its reply, slower than
+	// the round delay, arrives after the drain has ended and the next round's
+	// TTL reply has recreated the node. Counting it would put a reply in the
+	// echo totals without its send.
+	for _, endDrain := range []string{"MarkRoundEnd", "MarkRoundSentProbes"} {
+		t.Run(endDrain, func(t *testing.T) {
+			h := NewHop(2)
+			h.MarkRoundSentProbes(1)
+			reply(h, 1)
+			h.MarkRoundEnd()
+			h.MarkRoundSentProbes(1)
+			h.Reset()
+			if endDrain == "MarkRoundEnd" {
+				h.MarkRoundEnd()
+			}
+			h.MarkRoundSentProbes(1)
+			if !h.AddSample(pauseResetIP, time.Millisecond, 0, KindPrimary) {
+				t.Fatal("TTL reply to the round sent after the reset was dropped")
+			}
+			if h.AddSample(pauseResetIP, 900*time.Millisecond, 0, KindEcho) {
+				t.Error("late echo reply to a send before the reset was recorded")
+			}
+			assertEchoReceivedLESent(t, h)
+
+			// An echo sent after the reset is answered and counted.
+			h.GetNodes()[0].MarkEchoSent()
+			if !h.AddSample(pauseResetIP, time.Millisecond, 0, KindEcho) {
+				t.Error("echo reply to a send after the reset was dropped")
+			}
+			st := h.GetNodes()[0].EchoStats()
+			if st.Sent != 1 || st.Received != 1 {
+				t.Errorf("EchoStats = %d sent, %d received, want 1, 1", st.Sent, st.Received)
+			}
+			// A duplicate reply has no send outstanding.
+			if h.AddSample(pauseResetIP, time.Millisecond, 0, KindEcho) {
+				t.Error("second echo reply to one send was recorded")
+			}
+			assertEchoReceivedLESent(t, h)
+			h.MarkRoundEnd()
+			if s, r := h.VerdictEchoTotals(); s != 1 || r != 1 {
+				t.Errorf("VerdictEchoTotals = %d, %d, want 1, 1", s, r)
+			}
+		})
+	}
+}
+
+func TestHopAddSample_EchoReplyNeedsOutstandingSend(t *testing.T) {
+	h := NewHop(2)
+	if h.AddSample(pauseResetIP, time.Millisecond, 0, KindEcho) {
+		t.Error("echo reply from an unknown node was recorded")
+	}
+	if got := len(h.GetNodes()); got != 0 {
+		t.Errorf("nodes = %d, want 0 (an echo reply must not create a node)", got)
+	}
+	h.MarkRoundSentProbes(1)
+	h.AddSample(pauseResetIP, time.Millisecond, 0, KindPrimary)
+	if h.AddSample(pauseResetIP, time.Millisecond, 0, KindEcho) {
+		t.Error("echo reply from a known node with no echo sent was recorded")
+	}
+	assertEchoReceivedLESent(t, h)
+}
+
+func assertEchoReceivedLESent(t *testing.T, h *Hop) {
+	t.Helper()
+	for _, n := range h.GetNodes() {
+		if st := n.EchoStats(); st.Received > st.Sent {
+			t.Errorf("node %s: EchoStats received %d > sent %d", n.GetIP(), st.Received, st.Sent)
+		}
+	}
+}
+
 func TestHopReset_NewRoundEndsDrain(t *testing.T) {
 	// The round end reaches the hop through the UI, the next round's sends do
 	// not; if the next round is marked first, its replies must count.

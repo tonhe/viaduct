@@ -612,11 +612,22 @@ func TestOnHopUpdate_OutOfRangeTargetIdx(t *testing.T) {
 //   - ProbeUDPTTL    → node.PrimaryStats().Received
 //   - ProbeICMPTTL   → node.ICMPTTLStats().Received
 func TestOnHopUpdateRoutesProbeKind(t *testing.T) {
+	// An echo reply counts only against an echo sent to a known node (see
+	// hop.Hop.AddSample), so the node is created by a TTL reply and the echo
+	// send recorded before the echo reply arrives.
 	t.Run("ProbeICMPEcho lands in EchoStats only", func(t *testing.T) {
 		m := newTestModel()
+		ip := net.ParseIP("192.0.2.2")
+		m, _ = m.onHopUpdate(HopUpdateMsg{Result: probe.Result{
+			TTL:       2,
+			IP:        ip,
+			RTT:       10 * time.Millisecond,
+			ProbeType: probe.ProbeICMPTTL,
+		}})
+		m, _ = m.onEchoSent(EchoSentMsg{TTL: 2, IP: ip})
 		msg := HopUpdateMsg{Result: probe.Result{
 			TTL:       2,
-			IP:        net.ParseIP("192.0.2.2"),
+			IP:        ip,
 			RTT:       10 * time.Millisecond,
 			ProbeType: probe.ProbeICMPEcho,
 		}}
@@ -636,8 +647,24 @@ func TestOnHopUpdateRoutesProbeKind(t *testing.T) {
 		if got := n.PrimaryStats().Received; got != 0 {
 			t.Errorf("PrimaryStats.Received = %d, want 0 (echo must not land in primary)", got)
 		}
-		if got := n.ICMPTTLStats().Received; got != 0 {
-			t.Errorf("ICMPTTLStats.Received = %d, want 0 (echo must not land in icmpttl)", got)
+		if got := n.ICMPTTLStats().Received; got != 1 {
+			t.Errorf("ICMPTTLStats.Received = %d, want 1 (only the TTL reply, echo must not land in icmpttl)", got)
+		}
+	})
+
+	t.Run("ProbeICMPEcho with no send outstanding is dropped", func(t *testing.T) {
+		m := newTestModel()
+		msg := HopUpdateMsg{Result: probe.Result{
+			TTL:       2,
+			IP:        net.ParseIP("192.0.2.2"),
+			RTT:       10 * time.Millisecond,
+			ProbeType: probe.ProbeICMPEcho,
+		}}
+		m2, _ := m.onHopUpdate(msg)
+		for _, h := range m2.sessions[0].table.Snapshot() {
+			if n := len(h.GetNodes()); n != 0 {
+				t.Errorf("hop %d has %d nodes, want 0 (an echo reply must not create a node)", h.TTL, n)
+			}
 		}
 	})
 

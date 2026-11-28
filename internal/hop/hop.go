@@ -68,7 +68,15 @@ func NewHop(ttl int) *Hop {
 
 // AddSample records an RTT measurement from the given IP with a flow
 // identifier. It reports whether the sample was recorded: a reply that
-// arrives while the round open at a Reset drains is dropped (see Reset).
+// arrives while the round open at a Reset drains is dropped (see Reset), and
+// so is an echo reply from a node with no echo send outstanding.
+//
+// Echo sends are counted on the node (PathNode.MarkEchoSent), and Reset
+// clears the nodes, so an echo sent before a Reset is on no node afterwards.
+// Its reply can arrive after the drain has ended, slower than the round
+// delay; counting it would put a reply in the echo totals without its send.
+// An echo reply therefore needs a node with more echoes sent than answered,
+// and never creates a node.
 func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -83,6 +91,14 @@ func (h *Hop) AddSample(ip net.IP, rtt time.Duration, flowID int, kind ProbeKind
 		if n.IP.Equal(ip) {
 			node = n
 			break
+		}
+	}
+	if kind == KindEcho {
+		if node == nil {
+			return false
+		}
+		if st := node.EchoStats(); st.Received >= st.Sent {
+			return false
 		}
 	}
 	if node == nil {
