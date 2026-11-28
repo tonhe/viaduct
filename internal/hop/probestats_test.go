@@ -5,23 +5,22 @@ import (
 	"time"
 )
 
-func TestProbeStatsTTLKindRoundLoss(t *testing.T) {
+// For the TTL kinds a round end counts nothing: the rounds a node was known
+// are not probes sent to it (viaduct#154). Replies are counted as they come.
+func TestProbeStatsTTLKindRoundEndCountsNothing(t *testing.T) {
 	var s ProbeStats
 	// 4 rounds; replies in rounds 1, 2, 4.
 	for round := 1; round <= 4; round++ {
 		if round != 3 {
 			s.addReply(10 * time.Millisecond)
 		}
-		s.markRoundEnd(true)
+		s.markRoundEnd()
 	}
-	if s.Sent != 4 {
-		t.Errorf("Sent = %d, want 4 (rounds)", s.Sent)
+	if s.Sent != 0 {
+		t.Errorf("Sent = %d, want 0: a round end is not a send", s.Sent)
 	}
-	if s.RecvRounds != 3 {
-		t.Errorf("RecvRounds = %d, want 3", s.RecvRounds)
-	}
-	if got := s.RoundLossPercent(); got != 25.0 {
-		t.Errorf("RoundLossPercent = %v, want 25", got)
+	if s.Received != 3 {
+		t.Errorf("Received = %d, want 3", s.Received)
 	}
 }
 
@@ -33,7 +32,7 @@ func TestProbeStatsEchoKindProbeLoss(t *testing.T) {
 	s.addReply(5 * time.Millisecond)
 	s.addReply(6 * time.Millisecond)
 	s.addReply(7 * time.Millisecond)
-	s.markRoundEnd(false) // echo: round end must NOT touch Sent
+	s.markRoundEnd() // a round end must not touch Sent
 	if s.Sent != 4 {
 		t.Errorf("Sent = %d, want 4 (sends)", s.Sent)
 	}
@@ -66,7 +65,7 @@ func TestProbeStatsRTTTracking(t *testing.T) {
 
 func TestProbeStatsZeroDivision(t *testing.T) {
 	var s ProbeStats
-	if s.RoundLossPercent() != 0 || s.ProbeLossPercent() != 0 || s.AvgRTT() != 0 {
+	if s.ProbeLossPercent() != 0 || s.AvgRTT() != 0 {
 		t.Error("zero-value ProbeStats must report zeros, not NaN/panic")
 	}
 }

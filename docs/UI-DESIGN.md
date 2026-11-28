@@ -206,8 +206,19 @@ A count that does not fit its 9 cells in full has each number shortened to thous
 - A count cell is a dim `—` when no probe of that type was sent.
 - The Echo count is dim while the hop has no verdict: until it first has the 20 echo samples a rate-limit verdict needs, counted over the hop's nodes. Until then the count is still accumulating and must not look like a settled figure. Once the hop has had a verdict the count stays undimmed, also while a held verdict covers fewer than 20 samples.
 - A TTL with no reply is the hop number and `*`.
+- When no probe could be sent in the first rounds, the table has no row (a TTL nothing was sent to gets none) and the notice below is shown where the first row would be.
 - `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column (when there is one), ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle. If it is still too wide then, `Loss%` narrows to 7, the longest figure it shows (`100.0%?`). The four columns are then 40 wide, the narrowest layout there is.
 - In column view `d` does not replace the panes. The panes stay as they are and the header bar names no view.
+
+### When no probe could be sent
+
+A TTL that nothing was sent to gets no row. A trace whose first rounds all failed to send (the socket refuses every write, for example) would show an empty table and no reason. So while the hop table has no row and at least one round has closed, each view says so where its first row would be, in `Base09`:
+
+- The hop table views and Probe Detail: `No probe could be sent in the first 3 rounds. Run with --debug-log FILE to see why.` With `--debug-log` the second sentence is `The debug log says why.` For one round it reads `in the first round`. The line is cut at the terminal width.
+- A column-view pane, in its first row: `No probe sent in 3 rounds` (`in 1 round` for one).
+- The summary printed at exit: the long form, in place of the table.
+
+The notice goes as soon as a probe leaves and the table has a row. A paused trace sends nothing on purpose and its rounds are not counted. `r` starts the count over. The count is `TargetSession.unsentRounds` and the text is `noSendNotice` in `internal/tui/session.go`.
 
 ## Multi-target
 

@@ -290,9 +290,13 @@ func (m Model) renderPane(s *TargetSession, paneWidth, maxTTL int, focused bool)
 	lines := make([]string, 0, maxTTL+3)
 	lines = append(lines, m.paneTopBorder(s, bd, bstyle, paneWidth, focused))
 	lines = append(lines, v+m.paneHeaderContent(lay, inner)+v)
+	// No row because no probe could be sent: the pane's first row says so.
+	notice := s.noSendNotice(true)
 	for ttl := 1; ttl <= maxTTL; ttl++ {
 		var content string
-		if ttl <= sessionMax {
+		if ttl == 1 && notice != "" && sessionMax == 0 {
+			content = amberStyle().Render(padCell(" "+truncateCells(notice, inner-2), inner))
+		} else if ttl <= sessionMax {
 			content = m.paneRowContent(lay, inner, ttl, hops[ttl])
 		} else {
 			content = padCell("", inner) // past this target's depth: blank row

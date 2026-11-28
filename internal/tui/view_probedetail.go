@@ -223,6 +223,11 @@ func (m Model) renderProbeDetailView() []string {
 		}
 	}
 
+	// No row because no probe could be sent: say so, where the rows would be.
+	if notice := s.noSendNotice(false); notice != "" && hopMaxTTL == 0 {
+		lines = append(lines, amberStyle().Render(truncateCells(notice, m.width)))
+	}
+
 	for ttl := 1; ttl <= hopMaxTTL; ttl++ {
 		h, ok := hopMap[ttl]
 		if !ok || h.GetIP() == nil {

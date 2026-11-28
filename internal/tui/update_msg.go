@@ -139,6 +139,11 @@ func (m Model) onRoundEnd(msg RoundEndMsg) (Model, tea.Cmd) {
 	}
 	// The TTLs probes were sent to in the round being closed.
 	sentTo := CloseRound(s.table)
+	// A round that closes with no row in the table sent nothing to any TTL
+	// (noSendNotice). A paused trace sends nothing on purpose.
+	if !m.paused && len(s.table.Snapshot()) == 0 {
+		s.unsentRounds++
+	}
 	// The round may have moved the destination (hop.Table.TargetTTL).
 	if ttl := s.table.TargetTTL(); ttl > 0 {
 		s.maxTTLHit = ttl
