@@ -310,7 +310,7 @@ In report mode (`-r`, or `-o`) with several targets, a target that fails does no
 
 Exports in multi-target mode group all targets: JSON uses a `targets` array, CSV adds a leading `target` column, and DOT produces a single digraph with shared-IP node merging. Report mode (`-r`) prints each target's table in sequence.
 
-Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`.
+Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`. In the table a hostname and an ASN label are cut to 20 characters' width, and a round count past 99999 is shown in thousands or millions, rounded down (`123k`), as in the hop table.
 
 ---
 
