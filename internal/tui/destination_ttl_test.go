@@ -522,12 +522,28 @@ func TestDestination_LossyDestinationKeepsItsRowAndItsAlert(t *testing.T) {
 		if !strings.Contains(l, fmt.Sprintf(" of %d hops probed", dist)) {
 			t.Errorf("round line counts hops beyond the destination among those probed: %q", l)
 		}
-		if strings.Contains(l, " TTLs probed beyond the destination") {
+		// "1 TTL probed", "2 TTLs probed": the noun follows the count
+		// (viaduct#319).
+		if strings.Contains(l, " probed beyond the destination") {
 			apart++
 		}
 	}
 	if apart != beyondProbed {
 		t.Errorf("%d round lines report TTLs probed beyond the destination, want %d", apart, beyondProbed)
+	}
+	one, many := 0, 0
+	for _, l := range s.log.containing(" probed beyond the destination") {
+		switch {
+		case strings.HasSuffix(l, "; 1 TTL probed beyond the destination"):
+			one++
+		case strings.HasSuffix(l, " TTLs probed beyond the destination") && !strings.HasSuffix(l, "; 1 TTLs probed beyond the destination"):
+			many++
+		default:
+			t.Errorf("round line: %q, want it to end \"1 TTL probed beyond the destination\" or \"N TTLs probed beyond the destination\"", l)
+		}
+	}
+	if one == 0 || many == 0 {
+		t.Errorf("fixture: %d lines with one TTL beyond the destination and %d with more, want some of each", one, many)
 	}
 	if moved := s.log.containing("destination moved"); len(moved) != 0 {
 		t.Errorf("debug log: %q, want no move", moved)

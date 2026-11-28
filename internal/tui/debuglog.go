@@ -236,7 +236,11 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 		byType(sum.icmpRecvd, sum.primaryRecvd, sum.echoRecvd),
 		silent, probed, noun)
 	if beyond > 0 {
-		line += fmt.Sprintf("; %d TTLs probed beyond the destination", beyond)
+		ttls := "TTLs"
+		if beyond == 1 {
+			ttls = "TTL"
+		}
+		line += fmt.Sprintf("; %d %s probed beyond the destination", beyond, ttls)
 	}
 	d.printf("%s", line)
 
