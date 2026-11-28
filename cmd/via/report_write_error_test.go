@@ -36,7 +36,7 @@ func TestRunReport_FailsWhenTheExportCannotBeWritten(t *testing.T) {
 			installScript(t, strayScript(rounds))
 			closedStdout(t)
 
-			err := runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, nil), "icmp", true, format)
+			err := runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, nil), "icmp", reportOpts{noASN: true}, format)
 			if err == nil {
 				t.Fatalf("runReport returned nil though the %s report could not be written", format)
 			}
@@ -62,7 +62,7 @@ func TestRunMultiReport_OneTargetFailsWhenTheExportCannotBeWritten(t *testing.T)
 			if specs[0].Err != nil {
 				t.Fatalf("the first spec of mixedSpecs is not a healthy one: %v", specs[0].Err)
 			}
-			if err := runMultiReport(specs, "icmp", true, format); !errors.Is(err, os.ErrClosed) {
+			if err := runMultiReport(specs, "icmp", reportOpts{noASN: true}, format); !errors.Is(err, os.ErrClosed) {
 				t.Errorf("runMultiReport = %v, want an error wrapping %v", err, os.ErrClosed)
 			}
 		})
@@ -79,7 +79,7 @@ func TestRunReport_WritesTheExportAndSucceeds(t *testing.T) {
 			installScript(t, strayScript(rounds))
 			var runErr error
 			out := captureStdout(t, func() {
-				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, nil), "icmp", true, format)
+				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, nil), "icmp", reportOpts{noASN: true}, format)
 			})
 			if runErr != nil {
 				t.Fatalf("runReport: %v", runErr)

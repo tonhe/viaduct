@@ -231,7 +231,7 @@ func TestRunReport_StrayReplyDoesNotPinTheDestination(t *testing.T) {
 			sink := &lineSink{}
 			var runErr error
 			out := captureStdout(t, func() {
-				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, sink), "icmp", true, format)
+				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, sink), "icmp", reportOpts{noASN: true}, format)
 			})
 			if runErr != nil {
 				t.Fatalf("runReport: %v", runErr)
@@ -318,7 +318,7 @@ func TestRunReport_LostReplyInRoundOneDoesNotMoveTheDestination(t *testing.T) {
 			sink := &lineSink{}
 			var runErr error
 			out := captureStdout(t, func() {
-				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, sink), "icmp", true, format)
+				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("icmp", rounds, sink), "icmp", reportOpts{noASN: true}, format)
 			})
 			if runErr != nil {
 				t.Fatalf("runReport: %v", runErr)
@@ -360,7 +360,7 @@ func TestRunReport_UnequalPathLengths(t *testing.T) {
 			sink := &lineSink{}
 			var runErr error
 			out := captureStdout(t, func() {
-				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("udp", rounds, sink), "udp", true, format)
+				runErr = runReport("target.example", net.ParseIP(scriptTarget), scriptCfg("udp", rounds, sink), "udp", reportOpts{noASN: true}, format)
 			})
 			if runErr != nil {
 				t.Fatalf("runReport: %v", runErr)

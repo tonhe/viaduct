@@ -54,7 +54,7 @@ func TestReportCallers_SameTraceSameHops(t *testing.T) {
 
 	installScript(t, strayScript(rounds))
 	single := captureStdout(t, func() {
-		if err := runReport("target.example", target, scriptCfg("icmp", rounds, nil), "icmp", true, "json"); err != nil {
+		if err := runReport("target.example", target, scriptCfg("icmp", rounds, nil), "icmp", reportOpts{noASN: true}, "json"); err != nil {
 			t.Errorf("runReport: %v", err)
 		}
 	})
@@ -66,7 +66,7 @@ func TestReportCallers_SameTraceSameHops(t *testing.T) {
 		{Name: "other.example", IP: target, Cfg: scriptCfg("icmp", rounds, nil), ProtocolName: "icmp"},
 	}
 	multi := captureStdout(t, func() {
-		if err := runMultiReport(specs, "icmp", true, "json"); err != nil {
+		if err := runMultiReport(specs, "icmp", reportOpts{noASN: true}, "json"); err != nil {
 			t.Errorf("runMultiReport: %v", err)
 		}
 	})
@@ -98,7 +98,7 @@ func TestReportCallers_TracerError(t *testing.T) {
 	var err error
 	tableReturned := false
 	out := captureStdout(t, func() {
-		tbl, e := runReportInner("192.0.2.4", target, cfg, "icmp", true, "json")
+		tbl, e := runReportInner("192.0.2.4", target, cfg, "icmp", reportOpts{noASN: true}, "json")
 		tableReturned, err = tbl != nil, e
 	})
 	if !errors.Is(err, boom) || !strings.HasPrefix(err.Error(), "tracer error: ") {
@@ -118,7 +118,7 @@ func TestReportCallers_TracerError(t *testing.T) {
 		{Name: "198.51.100.4", IP: net.ParseIP("198.51.100.4").To4(), Cfg: cfg, ProtocolName: "icmp"},
 	}
 	var multiErr error
-	multi := captureStdout(t, func() { multiErr = runMultiReport(specs, "icmp", true, "json") })
+	multi := captureStdout(t, func() { multiErr = runMultiReport(specs, "icmp", reportOpts{noASN: true}, "json") })
 	if multiErr == nil {
 		t.Error("runMultiReport returned no error with every target failed")
 	}

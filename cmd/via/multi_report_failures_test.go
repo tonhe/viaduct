@@ -28,7 +28,7 @@ func mixedSpecs() []tui.TargetSpec {
 func TestRunMultiReport_JSONKeepsFailedTargetsAndFails(t *testing.T) {
 	installStubTracer(t, buildV4Results(), nil)
 	var runErr error
-	out := captureStdout(t, func() { runErr = runMultiReport(mixedSpecs(), "icmp", true, "json") })
+	out := captureStdout(t, func() { runErr = runMultiReport(mixedSpecs(), "icmp", reportOpts{noASN: true}, "json") })
 
 	if runErr == nil {
 		t.Error("runMultiReport returned nil with a failed target; the command must exit non-zero")
@@ -56,7 +56,7 @@ func TestRunMultiReport_AllFailedIsAnEmptyListNotNull(t *testing.T) {
 	specs := mixedSpecs()[1:]
 	specs = append(specs, tui.TargetSpec{Name: "worse.example", Err: errors.New("resolve worse.example: no such host")})
 	var runErr error
-	out := captureStdout(t, func() { runErr = runMultiReport(specs, "icmp", true, "json") })
+	out := captureStdout(t, func() { runErr = runMultiReport(specs, "icmp", reportOpts{noASN: true}, "json") })
 	if runErr == nil {
 		t.Error("runMultiReport returned nil when every target failed")
 	}
@@ -72,7 +72,7 @@ func TestRunMultiReport_AllFailedIsAnEmptyListNotNull(t *testing.T) {
 func TestRunMultiReport_TextModeFailsAndStillReportsTheRest(t *testing.T) {
 	installStubTracer(t, buildV4Results(), nil)
 	var runErr error
-	out := captureStdout(t, func() { runErr = runMultiReport(mixedSpecs(), "icmp", true, "") })
+	out := captureStdout(t, func() { runErr = runMultiReport(mixedSpecs(), "icmp", reportOpts{noASN: true}, "") })
 	if runErr == nil {
 		t.Error("runMultiReport returned nil with a failed target in text mode")
 	}
@@ -87,7 +87,7 @@ func TestRunMultiReport_AllHealthySucceeds(t *testing.T) {
 	specs = append(specs, specs[0])
 	specs[1].Name = "also-good.example"
 	var runErr error
-	captureStdout(t, func() { runErr = runMultiReport(specs, "icmp", true, "json") })
+	captureStdout(t, func() { runErr = runMultiReport(specs, "icmp", reportOpts{noASN: true}, "json") })
 	if runErr != nil {
 		t.Errorf("runMultiReport = %v with two healthy targets, want nil", runErr)
 	}

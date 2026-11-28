@@ -491,7 +491,7 @@ func TestRunReport_HappyPath(t *testing.T) {
 	t.Run("printReport_stdout", func(t *testing.T) {
 		installStubTracer(t, buildV4Results(), nil)
 		out := captureStdout(t, func() {
-			if err := runReport(target, targetIP, cfg, "icmp", true, ""); err != nil {
+			if err := runReport(target, targetIP, cfg, "icmp", reportOpts{noASN: true}, ""); err != nil {
 				t.Fatalf("runReport returned error: %v", err)
 			}
 		})
@@ -514,7 +514,7 @@ func TestRunReport_HappyPath(t *testing.T) {
 	t.Run("json_export", func(t *testing.T) {
 		installStubTracer(t, buildV4Results(), nil)
 		out := captureStdout(t, func() {
-			if err := runReport(target, targetIP, cfg, "icmp", true, "json"); err != nil {
+			if err := runReport(target, targetIP, cfg, "icmp", reportOpts{noASN: true}, "json"); err != nil {
 				t.Fatalf("runReport returned error: %v", err)
 			}
 		})
@@ -534,7 +534,7 @@ func TestRunReport_HappyPath(t *testing.T) {
 	t.Run("csv_export", func(t *testing.T) {
 		installStubTracer(t, buildV4Results(), nil)
 		out := captureStdout(t, func() {
-			if err := runReport(target, targetIP, cfg, "icmp", true, "csv"); err != nil {
+			if err := runReport(target, targetIP, cfg, "icmp", reportOpts{noASN: true}, "csv"); err != nil {
 				t.Fatalf("runReport returned error: %v", err)
 			}
 		})
@@ -557,7 +557,7 @@ func TestRunReport_HappyPath(t *testing.T) {
 	t.Run("dot_export", func(t *testing.T) {
 		installStubTracer(t, buildV4Results(), nil)
 		out := captureStdout(t, func() {
-			if err := runReport(target, targetIP, cfg, "icmp", true, "dot"); err != nil {
+			if err := runReport(target, targetIP, cfg, "icmp", reportOpts{noASN: true}, "dot"); err != nil {
 				t.Fatalf("runReport returned error: %v", err)
 			}
 		})
@@ -592,7 +592,7 @@ func TestRunReport_IPv6(t *testing.T) {
 	cfg.Protocol = probe.NewICMPProtocol(cfg)
 
 	out := captureStdout(t, func() {
-		if err := runReport(target, targetIP, cfg, "icmp", true, ""); err != nil {
+		if err := runReport(target, targetIP, cfg, "icmp", reportOpts{noASN: true}, ""); err != nil {
 			t.Fatalf("runReport returned error: %v", err)
 		}
 	})
@@ -857,7 +857,7 @@ func TestRunReport_EchoWiring(t *testing.T) {
 	// runReportInner returns the table directly — no test-only hook needed.
 	var capturedTable *hop.Table
 	_ = captureStdout(t, func() {
-		tbl, err := runReportInner(target, targetIP, cfg, "icmp", true, "")
+		tbl, err := runReportInner(target, targetIP, cfg, "icmp", reportOpts{noASN: true}, "")
 		if err != nil {
 			t.Fatalf("runReportInner returned error: %v", err)
 		}

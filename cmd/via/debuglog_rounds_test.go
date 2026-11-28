@@ -65,7 +65,7 @@ func TestReportMode_DebugLogRoundRecords(t *testing.T) {
 				{Name: "198.51.100.4", IP: net.ParseIP("198.51.100.4").To4(), Cfg: cfg, ProtocolName: "icmp"},
 			}
 			captureStdout(t, func() {
-				if err := runMultiReport(specs, "icmp", true, tc.outputFmt); err != nil {
+				if err := runMultiReport(specs, "icmp", reportOpts{noASN: true}, tc.outputFmt); err != nil {
 					t.Errorf("runMultiReport: %v", err)
 				}
 			})
@@ -89,12 +89,12 @@ func TestReportMode_DebugLogRoundRecords(t *testing.T) {
 
 // Without --debug-log there is no recorder.
 func TestNewReportDebug_OffWithoutDebugLog(t *testing.T) {
-	if d := newReportDebug(net.ParseIP("192.0.2.4"), reportDebugCfg(nil)); d != nil {
+	if d := newReportDebug(net.ParseIP("192.0.2.4"), reportDebugCfg(nil), reportOpts{}); d != nil {
 		t.Errorf("recorder without a debug log = %v, want nil", d)
 	}
 	// A config with no protocol set must not panic.
 	sink := &roundLogSink{}
-	if d := newReportDebug(net.ParseIP("192.0.2.4"), probe.Config{Debugf: sink.logf}); d == nil {
+	if d := newReportDebug(net.ParseIP("192.0.2.4"), probe.Config{Debugf: sink.logf}, reportOpts{}); d == nil {
 		t.Error("no recorder with a debug log")
 	}
 }

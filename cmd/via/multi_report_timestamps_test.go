@@ -20,7 +20,7 @@ func TestRunMultiReport_JSONTimestampsAreAllUTC(t *testing.T) {
 	}
 
 	installStubTracer(t, buildV4Results(), nil)
-	out := captureStdout(t, func() { runMultiReport(mixedSpecs(), "icmp", true, "json") })
+	out := captureStdout(t, func() { runMultiReport(mixedSpecs(), "icmp", reportOpts{noASN: true}, "json") })
 
 	var doc struct {
 		Timestamp string `json:"timestamp"`
