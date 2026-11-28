@@ -6,13 +6,17 @@ How the local viaduct agent team works. It applies only to sessions started by `
 
 | Role | Session | Does | Does not |
 |---|---|---|---|
-| director | `viaduct-director` | merges PRs, sets labels and milestones, triages, writes its handoff, drafts Owner decisions for the owner, deletes merged branches, closes duplicate issues | write code or history; post a comment that begins "Owner decision" |
+| director | `viaduct-director` | merges PRs, sets labels and milestones, triages, writes its handoff, drafts Owner decisions for the owner, deletes merged branches, closes duplicate issues, merges `risk:low` nightly-loop pull requests with green required checks, runs Linux live checks in a container, does release prep up to the tag (rule 8 of the owner's rules in DELEGATIONS.md) | write code or history; post a comment that begins "Owner decision" before the owner says "approved" in chat (rule 3 of the owner's rules in DELEGATIONS.md) |
 | dev | `viaduct-dev` | writes code in its own worktree, pushes branches, opens PRs, claims issues | merge; change routing labels (`agent:ready`, `needs:human`, `risk:*`); set milestones |
 | tester | `viaduct-tester` | live runs under the passwordless test sudo rules, posts live-check results as PR comments | any git write; any other `gh` write |
 
 Your role is the value of `VIADUCT_ROLE`. The session name does not decide it.
 
 `hooks/guard.sh` blocks the "does not" column. It catches mistakes. It does not make a blocked action acceptable by another route: if the guard stops you, do not look for a way around it. Say what you needed and who can do it.
+
+The guard reads a comment, review or description before `gh` posts it. A body it cannot read is blocked: standard input (a pipe, a redirect, a heredoc), a variable or a command substitution, and a file that does not exist yet or that the same command writes. Write the body to a file in an earlier step, with the Write tool, then pass that file's full path with `--body-file`, or `-F body=@PATH` for `gh api`. Run that `gh` command on its own: with a body file, the guard also blocks a `>` redirection and any other command in the same call except `cd` and `gh` commands that write nothing locally.
+
+The guard lets only the director post a comment that begins "Owner decision", only as a new comment (`gh issue comment` or `gh pr comment` without `--edit-last`, or a POST to `repos/OWNER/REPO/issues/N/comments`), and only when the body quotes the owner's "approved": the owner's words in double quotes, or on a `>` quote line, with no negation in them. Editing an existing comment into one stays blocked. It checks that the quote is there. It cannot check that the owner said it, so the rule stays the director's to keep.
 
 ## Approvals
 
@@ -37,14 +41,14 @@ Discard a run when the host slept or stalled during it, and say so.
 
 ## Merging (director)
 
-Merge only what `DELEGATIONS.md` allows. Use `gh pr merge N -R tonhe/viaduct --squash --delete-branch`. Deleting the merged branch is delegated (D6 in DELEGATIONS.md). Read the pull request, its checks and its live-check comments yourself before merging. A dev or tester saying it is ready is not enough.
+Merge only what `DELEGATIONS.md` allows. Use `gh pr merge N -R tonhe/viaduct --squash --delete-branch`. Deleting the merged branch is delegated (D6 in DELEGATIONS.md). Read the pull request, its checks and its live-check comments yourself before merging. A dev or tester saying it is ready is not enough. At most 20 merges per session, then stop and send the owner the summary (rule 6 of the owner's rules in DELEGATIONS.md).
 
 ## Staying out of the nightly loop's way
 
 The loop runs in CI: backlog at 06:17, dev at 07:17, follow-up at 01:47 and 13:47 UTC. It owns its own work.
 
 - Never push to a branch named `issue-N`, and never create one.
-- Never edit, comment a fix round on, retarget, or change auto-merge on a pull request whose description carries the `agent-loop issue=` marker. The director may merge one only when the owner says so in the director's session.
+- Never edit, comment a fix round on, retarget, or change auto-merge on a pull request whose description carries the `agent-loop issue=` marker. The director may merge one when it carries `risk:low` and every required check has passed (rule 8 of the owner's rules in DELEGATIONS.md), and otherwise only when the owner says so in the director's session. Merging is all the director does to it.
 - The director does not relabel an issue the loop has claimed (`agent:in-progress` set by the loop, or an open `issue-N` pull request).
 - The dev role does not take an issue the loop has claimed.
 
