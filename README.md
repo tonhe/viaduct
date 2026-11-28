@@ -64,7 +64,7 @@ make install    # builds and copies to ~/bin/
 > sudo setcap cap_net_raw+ep $(which via)
 > ```
 
-`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead.
+`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead. A flag error (`--no-paths` with another `--paths` value, an unknown `--output` format or protocol) is reported before that, without `sudo`.
 
 ---
 
@@ -113,6 +113,8 @@ via -r google.com
 | Auto | `-P auto` | Yes → No on fallback | Per active protocol | Unknown networks |
 
 **Auto mode** starts with UDP for ECMP discovery. If no responses are received after 3 rounds (~3 seconds), it automatically falls back to ICMP. The TUI header updates to reflect the active protocol.
+
+**What the flow count can miss.** A router that balances by port sends each flow to a next hop by what is in effect an even, independent draw, so a small number of flows can all land on the same one. With the default of 6 flows, a hop with two equal-cost next hops shows only one of them in about 1 run in 64, with every probe answered and nothing in the output to say a path went unseen. More flows lower the odds: about 1 in 256 with `--paths 8`, 1 in 4096 with `--paths 12`. With more than two next hops the chance of missing one is higher.
 
 **TCP mode by platform.** The destination's SYN-ACK or RST is what marks it as reached, and where `via` reads it differs:
 
@@ -170,7 +172,7 @@ Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` an
 
 The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come from direct echo probes rather than TTL Exceeded replies. No configuration needed — it just works.
 
-**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. A probe that could not be sent (the socket refused the write, or did not take it within 100 ms) is not counted as sent and not counted as lost; a round in which nothing could be sent to a hop is not a round for that hop and does not count toward alerting. `Rnd` is the number of rounds; past 99999 the hop table shows it in thousands or millions, rounded down (`123k`, `12M`).
+**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. A probe that could not be sent (the socket refused the write, or did not take it within 100 ms) is not counted as sent and not counted as lost; a round in which nothing could be sent to a hop is not a round for that hop and does not count toward alerting. `Rnd` is the number of rounds; past 99999 the hop table shows it in thousands or millions, rounded down (`123k`, `12M`). Probe Detail's `received/sent` counts are shortened the same way when they do not fit their column (`12k/123k`).
 
 **When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way, because a host throttles the Port Unreachable errors it sends in answer to UDP probes just as a router throttles Time Exceeded.
 
@@ -310,7 +312,7 @@ In report mode (`-r`, or `-o`) with several targets, a target that fails does no
 
 Exports in multi-target mode group all targets: JSON uses a `targets` array, CSV adds a leading `target` column, and DOT produces a single digraph with shared-IP node merging. Report mode (`-r`) prints each target's table in sequence.
 
-Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`.
+Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`. In the table a hostname and an ASN label are cut to 20 characters' width, and a round count past 99999 is shown in thousands or millions, rounded down (`123k`), as in the hop table.
 
 ---
 
@@ -399,11 +401,11 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--count` | `-c` | 0 | Number of probe rounds (0 = infinite; report mode runs 10 when this is not set) |
 | `--first-ttl` | `-f` | 1 | Starting TTL |
 | `--psize` | `-s` | 64 | Payload size in bytes |
-| `--paths` | | 6 | Number of ECMP flows to probe |
-| `--no-paths` | | | Disable ECMP, single-path mode |
+| `--paths` | | 6 | Number of ECMP flows to probe, 1 to 32. A value outside that range is clamped with a warning |
+| `--no-paths` | | | Disable ECMP, single-path mode. The same as `--paths 1`; an error with any other `--paths` value |
 | `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
 | `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
-| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
+| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total). A target given twice is traced once; names are compared without regard to case |
 | `--report` | `-r` | | Report mode: non-interactive, run `--count` rounds (10 if not set), print table and exit. The last round waits up to `--timeout` for replies still outstanding, so a run can take up to one timeout longer than count × interval |
 | `--output` | `-o` | | Export format: `json`, `csv`, or `dot`, written to stdout (implies `--report`; see [Exporting from the command line](#exporting-from-the-command-line)) |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
@@ -518,7 +520,7 @@ Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table t
 
 `--output` / `-o` exports a trace without the TUI. It takes `json`, `csv` or `dot` (case-insensitive; `graphviz` is accepted for `dot`); any other value is an error.
 
-- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval.
+- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval. If the export cannot be written (a full disk, a closed pipe), `via` reports the write error and exits non-zero.
 - **Where it goes** — standard output. There is no file argument; redirect or pipe it. Warnings and errors go to stderr, so they stay out of the export.
 
 ```bash

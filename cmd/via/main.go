@@ -57,6 +57,13 @@ var _ tracerIface = (*probe.Tracer)(nil)
 var _ probe.RoundTypeMarker = (*hop.Table)(nil)
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(exitStatus(err))
+	}
+}
+
+// newRootCmd builds the via command with all its flags.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:     "via [target ...]",
 		Short:   "A modern traceroute tool with real-time TUI",
@@ -76,7 +83,7 @@ func main() {
 	rootCmd.Flags().BoolP("report", "r", false, "report mode: run --count rounds (default 10), print table, exit")
 	rootCmd.Flags().BoolP("no-dns", "n", false, "skip reverse DNS lookups")
 	rootCmd.Flags().Int("paths", 6, "number of ECMP flow variations (1 = disable multipath)")
-	rootCmd.Flags().Bool("no-paths", false, "disable ECMP multipath (shorthand for --paths 1)")
+	rootCmd.Flags().Bool("no-paths", false, "disable ECMP multipath (shorthand for --paths 1; an error with any other --paths value)")
 	rootCmd.Flags().StringP("protocol", "P", "udp", "probe protocol: udp, icmp, tcp, auto")
 	rootCmd.Flags().IntP("port", "p", 0, "destination port override (default: protocol-specific)")
 	rootCmd.Flags().BoolP("ipv4", "4", false, "force IPv4")
@@ -91,9 +98,7 @@ func main() {
 	rootCmd.Flags().String("targets", "", "file containing one target per line (combined with positional args)")
 	rootCmd.Flags().String("debug-log", "", "append diagnostics to this file: send failures, a line per round, per-hop loss snapshots, alerts")
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(exitStatus(err))
-	}
+	return rootCmd
 }
 
 // lookupFunc is a pluggable DNS resolver function, injectable for tests.
@@ -212,6 +217,46 @@ func resolveNumPaths(flagPaths int, pathsChanged, noPaths bool, configPaths int)
 	default:
 		return configPaths, nil
 	}
+}
+
+// checkFlags reports the flag errors that can be told from the command line
+// alone: --no-paths with a contradicting --paths, an unknown --output format,
+// an unknown protocol. configProtocol is the protocol the config file names,
+// used when -P was not given. runTrace checks each of these again where it
+// uses the value; this runs first so that they are reported before anything
+// that needs privileges.
+func checkFlags(cmd *cobra.Command, configProtocol string) error {
+	flagPaths, _ := cmd.Flags().GetInt("paths")
+	noPaths, _ := cmd.Flags().GetBool("no-paths")
+	if _, err := resolveNumPaths(flagPaths, cmd.Flags().Changed("paths"), noPaths, 1); err != nil {
+		return err
+	}
+	if outputFmt, _ := cmd.Flags().GetString("output"); outputFmt != "" {
+		if _, err := export.FormatName(outputFmt); err != nil {
+			return err
+		}
+	}
+	protocolName, _ := cmd.Flags().GetString("protocol")
+	if !cmd.Flags().Changed("protocol") {
+		protocolName = configProtocol
+	}
+	n := 1
+	if _, err := buildProtocol(protocolName, 0, &n, probe.Config{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// pathsClampWarning returns the warning for a flow count outside 1 to
+// maxNumPaths, which is clamped, or "" when the count is in range.
+func pathsClampWarning(numPaths int) string {
+	switch {
+	case numPaths > maxNumPaths:
+		return fmt.Sprintf("Warning: --paths %d exceeds maximum %d, clamping", numPaths, maxNumPaths)
+	case numPaths < 1:
+		return fmt.Sprintf("Warning: --paths %d is below 1, using 1 (single path)", numPaths)
+	}
+	return ""
 }
 
 // routeTo reports whether this host has a route to ip. It connects a UDP
@@ -435,6 +480,13 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Flag errors that need no socket and no lookup are reported here, before
+	// the capability check: an unprivileged run must not be sent through sudo
+	// only to be told its flags contradict each other.
+	if err := checkFlags(cmd, appCfg.Protocol); err != nil {
+		return err
+	}
+
 	// Capability check — probe raw socket. sysprobe has already probed family
 	// availability; we open a test socket here to catch transient failures and
 	// trigger sudo re-exec if CAP_NET_RAW is missing. We pick IPv4 by default
@@ -527,9 +579,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// --paths 100 host1 host2 would let session 0's flow IDs spill into session 1's
 	// port block, causing cross-target reply misattribution.
 	if clamped, changed := clampNumPaths(numPaths); changed {
-		if numPaths > maxNumPaths {
-			fmt.Fprintf(os.Stderr, "Warning: --paths %d exceeds maximum %d, clamping\n", numPaths, maxNumPaths)
-		}
+		fmt.Fprintln(os.Stderr, pathsClampWarning(numPaths))
 		numPaths = clamped
 	}
 
@@ -1115,13 +1165,19 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	if outputFmt != "" {
 		versionStr := displayVersion(version) + " (" + buildVersion + ")"
 		report := export.BuildReport(versionStr, target, targetIP, protocolName, table, resolver, enricher, maxTTL)
+		// A report that could not be written (a full disk, a closed pipe)
+		// is a failed run: the caller exits non-zero.
+		var werr error
 		switch outputFmt {
 		case "json":
-			export.WriteJSON(os.Stdout, report)
+			werr = export.WriteJSON(os.Stdout, report)
 		case "csv":
-			export.WriteCSV(os.Stdout, report)
+			werr = export.WriteCSV(os.Stdout, report)
 		case "dot":
-			export.WriteDOT(os.Stdout, report)
+			werr = export.WriteDOT(os.Stdout, report)
+		}
+		if werr != nil {
+			return table, fmt.Errorf("writing the %s report: %w", outputFmt, werr)
 		}
 	} else {
 		printReport(target, targetIP, table, resolver, enricher, table.TargetTTL(), cfg.NumPaths, protocolName)

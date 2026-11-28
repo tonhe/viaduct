@@ -1687,27 +1687,23 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 						hostname = name
 					}
 				}
-				if len(hostname) > 20 {
-					hostname = hostname[:20]
-				}
+				hostname = summaryCell(hostname, summaryHostCut, summaryHostWidth)
 
 				asnLabel := ""
 				currentASN := 0
 				if m.enricher != nil {
-					if info, ok := m.enricher.Lookup(ip); ok {
+					if info, ok := m.lookupASN(ip); ok {
 						currentASN = info.Number
 						asnLabel = asn.FormatASN(info.Number, info.Org)
 					}
 				}
-				if len(asnLabel) > 20 {
-					asnLabel = asnLabel[:20]
-				}
+				asnLabel = summaryCell(asnLabel, summaryASNWidth, summaryASNWidth)
 
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
 					lossStr = hopLossStr
-					sntStr = fmt.Sprintf("%d", sent)
+					sntStr = formatRounds(sent, summaryRndWidth)
 				}
 
 				avg := float64(node.AvgRTT().Microseconds()) / 1000.0
@@ -1718,7 +1714,7 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
-				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %-22s %-20s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
+				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %s %s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -1746,24 +1742,20 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 					hostname = name
 				}
 			}
-			if len(hostname) > 20 {
-				hostname = hostname[:20]
-			}
+			hostname = summaryCell(hostname, summaryHostCut, summaryHostWidth)
 
 			asnLabel := ""
 			currentASN := 0
 			if m.enricher != nil {
-				if info, ok := m.enricher.Lookup(ip); ok {
+				if info, ok := m.lookupASN(ip); ok {
 					currentASN = info.Number
 					asnLabel = asn.FormatASN(info.Number, info.Org)
 				}
 			}
-			if len(asnLabel) > 20 {
-				asnLabel = asnLabel[:20]
-			}
+			asnLabel = summaryCell(asnLabel, summaryASNWidth, summaryASNWidth)
 
 			lossStr := hopLossStr
-			sent := h.Rounds()
+			sent := formatRounds(h.Rounds(), summaryRndWidth)
 			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
 			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0
 			maxRTT := float64(h.GetMaxRTT().Microseconds()) / 1000.0
@@ -1778,7 +1770,7 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 					flows = hop.FormatFlowIDs(nodes[0].GetFlowIDs())
 					stab = fmt.Sprintf("%.0f%%", nodes[0].StabilityPercent())
 				}
-				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %-22s %-20s %-8s %-5d %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
+				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %s %s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -1794,7 +1786,7 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 					stab,
 				))
 			} else {
-				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %-22s %-20s %-8s %-5d %-7s %-7s %-7s %-7s %-7s\n",
+				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %s %s %-8s %-5s %-7s %-7s %-7s %-7s %-7s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -1816,6 +1808,21 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 	_ = prevASN // FinalSummary is plain text, no boundary highlighting
 
 	return b.String()
+}
+
+// Widths of the exit summary's Hostname, ASN and Rnd columns. A hostname is
+// cut to summaryHostCut cells and leaves two blank before the ASN column.
+const (
+	summaryHostCut   = 20
+	summaryHostWidth = 22
+	summaryASNWidth  = 20
+	summaryRndWidth  = 5
+)
+
+// summaryCell cuts s to at most cut display cells, never inside a character,
+// and pads it to width cells.
+func summaryCell(s string, cut, width int) string {
+	return padCell(truncateCells(s, cut), width)
 }
 
 // maxScrollOffset returns the maximum valid scroll offset for the current state.
