@@ -184,11 +184,16 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 		}
 		return s + fmt.Sprintf(" icmp-echo=%d", echo)
 	}
-	line := fmt.Sprintf("round %d: took %v; sent %s; replies %s; no reply from %d of %d hops probed",
+	// "1 hop probed": the noun follows the count.
+	noun := "hops"
+	if probed == 1 {
+		noun = "hop"
+	}
+	line := fmt.Sprintf("round %d: took %v; sent %s; replies %s; no reply from %d of %d %s probed",
 		d.rounds, took.Round(time.Millisecond),
 		byType(sum.icmpSent, sum.primarySent, sum.echoSent),
 		byType(sum.icmpRecvd, sum.primaryRecvd, sum.echoRecvd),
-		silent, probed)
+		silent, probed, noun)
 	if beyond > 0 {
 		line += fmt.Sprintf("; %d TTLs probed beyond the destination", beyond)
 	}

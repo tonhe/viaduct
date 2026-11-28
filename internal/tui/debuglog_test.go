@@ -79,8 +79,32 @@ func TestDebugLog_RoundLine_ICMPPrimary(t *testing.T) {
 	m.SetDebugLog(sink.logf)
 	m.sessions[0].table.MarkRoundSentByType(1, 1, 0)
 	m, _ = m.onRoundEnd(RoundEndMsg{})
-	if len(sink.lines) != 1 || !strings.Contains(sink.lines[0], "; sent icmp-ttl=1 icmp-echo=0; replies icmp-ttl=0 icmp-echo=0; no reply from 1 of 1 hops probed") {
+	if len(sink.lines) != 1 || !strings.Contains(sink.lines[0], "; sent icmp-ttl=1 icmp-echo=0; replies icmp-ttl=0 icmp-echo=0; no reply from 1 of 1 hop probed") {
 		t.Errorf("got %q", sink.lines)
+	}
+}
+
+// The round line's noun follows the count: "1 hop probed", "2 hops probed"
+// and "0 hops probed" (viaduct#196).
+func TestDebugLog_RoundLine_HopOrHops(t *testing.T) {
+	for _, tc := range []struct {
+		probed int
+		want   string
+	}{
+		{0, "no reply from 0 of 0 hops probed"},
+		{1, "no reply from 1 of 1 hop probed"},
+		{2, "no reply from 2 of 2 hops probed"},
+	} {
+		sink := &debugSink{}
+		m := newTestModel()
+		m.SetDebugLog(sink.logf)
+		for ttl := 1; ttl <= tc.probed; ttl++ {
+			m.sessions[0].table.MarkRoundSentByType(ttl, 1, 0)
+		}
+		m, _ = m.onRoundEnd(RoundEndMsg{})
+		if len(sink.lines) != 1 || !strings.HasSuffix(sink.lines[0], tc.want) {
+			t.Errorf("%d hops probed: got %q, want a line ending %q", tc.probed, sink.lines, tc.want)
+		}
 	}
 }
 
