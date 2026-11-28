@@ -397,8 +397,10 @@ def writes_nothing_local(argv):
         args = args[2:] if args[0] in ("-R", "--repo") else args[1:]
     if not args or args[0] not in GH_NO_LOCAL_WRITE:
         return False
+    # Any later word, not only the next one: a flag can sit between the
+    # group and the verb (gh pr --repo x checkout 5).
     barred = GH_NO_LOCAL_WRITE[args[0]]
-    return not (barred and len(args) > 1 and args[1] in barred)
+    return not (barred and any(a in barred for a in args[1:]))
 
 
 def read_body_file(word, path, ctx):
@@ -415,6 +417,10 @@ def read_body_file(word, path, ctx):
         full = os.path.join(ctx.cwd, full)
     # The guard reads the file now and gh reads it later. Anything else in
     # the same call could change it in between, under this name or another.
+    # Inside $'...' a backslash escapes a quote, which the splitting above
+    # does not follow, so a command could hide in what looks like a string.
+    if "$'" in ctx.command or '$"' in ctx.command:
+        raise Block("this command posts a body from a file and also holds a $'...' or $\"...\" string, which the guard cannot follow." + BODY_HELP + " Run the gh command on its own.")
     if has_output_redirect(ctx.command):
         raise Block("this command posts a body from a file and also redirects output to a file, so it may write the body first." + BODY_HELP + " Run the gh command on its own, with no > redirection.")
     for other in ctx.commands:

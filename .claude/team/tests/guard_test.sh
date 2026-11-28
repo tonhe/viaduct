@@ -346,6 +346,14 @@ for role in director dev tester; do
   expect block "$role" "gh run download 5 -D $od && gh pr comment 12 --body-file $od/plain.md"
   expect block "$role" "(sleep 1; cp $od/decision.md $od/x.md) & gh pr comment 12 --body-file $od/plain.md"
 done
+# $'...' can hide a command from the splitting: with a body file it is refused
+expect block director "x=\$'\\'' ; cp $od/decision.md $od/plain.md ; echo '; gh issue comment 12 --body-file $od/plain.md"
+expect block director "echo \$'a' && gh issue comment 12 --body-file $od/plain.md"
+expect block director "gh issue comment 12 --body-file $od/plain.md --repo \$\"x\""
+# a flag between the group and the verb does not hide the verb
+expect block director "gh pr --repo tonhe/viaduct checkout 5 && gh pr comment 12 --body-file $od/plain.md"
+expect block director "gh pr -R tonhe/viaduct checkout 5; gh pr comment 12 --body-file $od/plain.md"
+expect block director "gh issue -R tonhe/viaduct develop 5 --checkout; gh issue comment 12 --body-file $od/plain.md"
 expect block director "printf x | tee $od/pl\"\"ain.md; gh api -X POST $C/issues/12/comments -F body=@$od/plain.md"
 expect block director "cp $od/decision.json $od/pl*.json; gh api -X PATCH $C/issues/comments/5 --input $od/plain.json"
 # what may share the call: cd to a full path, and gh commands that write nothing here
