@@ -50,7 +50,7 @@ Stops this host's roles. Ask each role to update its handoff first: sessions are
 
 The launcher sets `VIADUCT_ROLE` in the session's environment. The guard reads that, not the session's name. It is loaded through `claude --settings`, from a file the launcher writes into `.run/`, so no settings file in the repository mentions it. A session with no `VIADUCT_ROLE` is never checked.
 
-The guard reads command text. It stops mistakes. It is not a sandbox.
+The guard reads command text. It stops mistakes. It is not a sandbox. It does not see a request made by another program (`curl`, a script file, an MCP tool), and it cannot tell when a file is changed by something the command text does not show.
 
 ## Add a role
 
