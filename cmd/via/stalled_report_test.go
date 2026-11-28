@@ -101,7 +101,7 @@ func TestRunReport_StalledRoundsAreNotSentNotLostNotAnError(t *testing.T) {
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = runReport("192.0.2.3", target, cfg, "udp", true, "json")
+		runErr = runReport("192.0.2.3", target, cfg, "udp", reportOpts{noASN: true}, "json")
 	})
 	// Report mode decides its exit status on errors only; a stall is not one.
 	if runErr != nil {
@@ -151,7 +151,7 @@ func TestRunReport_StalledRounds_TextReportShowsNoLoss(t *testing.T) {
 	cfg.Protocol = probe.NewUDPProtocol(33434)
 
 	out := captureStdout(t, func() {
-		if err := runReport("192.0.2.3", net.IPv4(192, 0, 2, hops), cfg, "udp", true, ""); err != nil {
+		if err := runReport("192.0.2.3", net.IPv4(192, 0, 2, hops), cfg, "udp", reportOpts{noASN: true}, ""); err != nil {
 			t.Errorf("runReport: %v", err)
 		}
 	})

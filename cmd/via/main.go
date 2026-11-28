@@ -603,7 +603,6 @@ func runTrace(cmd *cobra.Command, args []string) error {
 
 	// --debug-log: the probe engine's send failures and each target's round
 	// records (rounds, per-hop snapshots, alerts) go to a file.
-	reportAlert.loss, reportAlert.latency, reportAlert.rounds, reportAlert.off = alertLoss, alertLatency, alertRounds, noAlert
 	debugLogPath, _ := cmd.Flags().GetString("debug-log")
 	closeDebugLog, err := applyDebugLog(&baseCfg, debugLogPath)
 	if err != nil {
@@ -667,7 +666,10 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Stamp echo budget on healthy specs first (mirrors the TUI path below).
 	if reportMode {
 		applyEchoBudget(specs, true)
-		return runMultiReport(specs, protocolName, noASN, outputFmt)
+		return runMultiReport(specs, protocolName, reportOpts{
+			noASN:     noASN,
+			alertLoss: alertLoss, alertLatency: alertLatency, alertRounds: alertRounds, noAlert: noAlert,
+		}, outputFmt)
 	}
 
 	// Check that at least one spec is healthy before starting TUI.
@@ -814,7 +816,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 // emits results. For a single healthy target the output is identical to the
 // pre-multi runReport path. For multiple targets, text mode separates each
 // section with a rule line; structured exports use WriteJSONMulti/etc.
-func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, outputFmt string) error {
+func runMultiReport(specs []tui.TargetSpec, protocolName string, opts reportOpts, outputFmt string) error {
 	// Setup notices (e.g. an IPv4 fallback) go to stderr, so they are seen
 	// without ending up in piped report or export output.
 	for _, sp := range specs {
@@ -827,7 +829,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 		if sp.Err != nil {
 			return sp.Err
 		}
-		return runReport(sp.Name, sp.IP, sp.Cfg, protocolName, noASN, outputFmt)
+		return runReport(sp.Name, sp.IP, sp.Cfg, protocolName, opts, outputFmt)
 	}
 
 	// Multi-target path.
@@ -866,7 +868,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 		}
 		if outputFmt != "" {
 			// Collect into report struct without printing.
-			table, resolver, enricher, maxTTL, runErr := collectReport(sp.IP, sp.Cfg, noASN)
+			table, resolver, enricher, maxTTL, runErr := collectReport(sp.IP, sp.Cfg, opts)
 			if runErr != nil {
 				fail(sp, runErr)
 				continue
@@ -875,7 +877,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 			reports = append(reports, r)
 		} else {
 			// Text mode: run and print inline.
-			if err := runReport(sp.Name, sp.IP, sp.Cfg, protocolName, noASN, ""); err != nil {
+			if err := runReport(sp.Name, sp.IP, sp.Cfg, protocolName, opts, ""); err != nil {
 				fmt.Printf("error: %v\n", err)
 				fail(sp, err)
 			}
@@ -943,7 +945,7 @@ func collectEchoTargets(table *hop.Table) []probe.EchoTarget {
 // enricher that hold its names and AS numbers, and the last TTL a report
 // shows. Single-target report mode (runReportInner) and multi-target report
 // mode (runMultiReport) both collect through it, so a fix here reaches both.
-func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *resolve.Resolver, *asn.Enricher, int, error) {
+func collectReport(targetIP net.IP, cfg probe.Config, opts reportOpts) (*hop.Table, *resolve.Resolver, *asn.Enricher, int, error) {
 	table := hop.NewTable(cfg.MaxHops)
 	tracer := newTracer(targetIP, cfg)
 	tracer.SetOnRoundSent(table)
@@ -975,7 +977,7 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	}
 
 	var enricher *asn.Enricher
-	if !noASN {
+	if !opts.noASN {
 		enricher = asn.New(4)
 		asnResults := make(chan asn.Result, 64)
 		go enricher.Run(ctx, asnResults)
@@ -993,7 +995,7 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	// Echo attribution via shared helper.
 	wireEchoTier(tracer, table)
 
-	debug := newReportDebug(targetIP, cfg)
+	debug := newReportDebug(targetIP, cfg, opts)
 	tracer.SetOnRoundEnd(func() {
 		debug.RoundClosed(table, tui.CloseRound(table))
 		// Recompute the echo-target set from the live table each round; the
@@ -1075,8 +1077,8 @@ func probeKindFor(pt probe.ProbeType) hop.ProbeKind {
 // and returns the fully-populated hop.Table plus any error. It is split out
 // of runReport so callers that need the table directly (e.g. tests) can
 // obtain it without a test-only hook.
-func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, outputFmt string) (*hop.Table, error) {
-	table, resolver, enricher, maxTTL, err := collectReport(targetIP, cfg, noASN)
+func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolName string, opts reportOpts, outputFmt string) (*hop.Table, error) {
+	table, resolver, enricher, maxTTL, err := collectReport(targetIP, cfg, opts)
 	if err != nil {
 		return nil, fmt.Errorf("tracer error: %w", err)
 	}
@@ -1106,8 +1108,8 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 
 // runReport traces one target end-to-end and either prints the plain-text
 // report or emits a structured export.
-func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, outputFmt string) error {
-	_, err := runReportInner(target, targetIP, cfg, protocolName, noASN, outputFmt)
+func runReport(target string, targetIP net.IP, cfg probe.Config, protocolName string, opts reportOpts, outputFmt string) error {
+	_, err := runReportInner(target, targetIP, cfg, protocolName, opts, outputFmt)
 	return err
 }
 

@@ -61,23 +61,27 @@ func applyDebugLog(cfg *probe.Config, path string) (func(), error) {
 	return closeLog, nil
 }
 
-// reportAlert holds the alert thresholds report mode's debug-log recorder
-// uses: the ones the TUI would alert on. run sets it from the flags and the
-// config file. Report mode itself shows no alerts.
-var reportAlert struct {
-	loss    float64
-	latency time.Duration
-	rounds  int
-	off     bool
+// reportOpts are the settings of a report-mode run that are the same for
+// every target and are not part of the probe config.
+type reportOpts struct {
+	// noASN turns ASN lookup off (--no-asn).
+	noASN bool
+	// The alert thresholds the debug log's recorder uses: the ones the TUI
+	// would alert on, from the flags and the config file. Report mode itself
+	// shows no alerts. The zero value raises none.
+	alertLoss    float64
+	alertLatency time.Duration
+	alertRounds  int
+	noAlert      bool
 }
 
 // newReportDebug returns the debug log's round recorder for one report-mode
 // target, or nil without --debug-log.
-func newReportDebug(targetIP net.IP, cfg probe.Config) *tui.RoundDebug {
+func newReportDebug(targetIP net.IP, cfg probe.Config, opts reportOpts) *tui.RoundDebug {
 	protocol := ""
 	if cfg.Protocol != nil {
 		protocol = cfg.Protocol.Name()
 	}
 	return tui.NewReportDebug(cfg.Debugf, targetIP.String(), protocol,
-		reportAlert.loss, reportAlert.latency, reportAlert.rounds, reportAlert.off)
+		opts.alertLoss, opts.alertLatency, opts.alertRounds, opts.noAlert)
 }
