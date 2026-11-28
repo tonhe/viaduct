@@ -1962,7 +1962,7 @@ func (m Model) exportCmd() tea.Cmd {
 			now := time.Now()
 			mr := export.MultiReport{
 				Version:   m.version,
-				Timestamp: now,
+				Timestamp: now.UTC(),
 				Targets:   make([]export.Report, 0, len(snaps)),
 			}
 			for _, snap := range snaps {
