@@ -628,8 +628,10 @@ type LossSnapshot struct {
 	VerdictHeld           bool
 	VerdictProbesSent     int
 	VerdictProbesReceived int
-	// ProbesSent and ProbesReceived are ProbeCounts, LossPct is LossPercent
-	// and Rounds is Rounds, read with the figures above.
+	// ProbesSent and ProbesReceived are ProbeCounts and LossPct is
+	// LossPercent, read with the figures above. Rounds is the rounds those
+	// counts cover: the closed ones. Unlike Hop.Rounds it leaves out a round
+	// still waiting for replies, as the probe counts do.
 	ProbesSent     int
 	ProbesReceived int
 	LossPct        float64
@@ -641,14 +643,15 @@ type LossSnapshot struct {
 // nodes left out of those totals (see EchoIgnored), whether the verdict is a
 // held one and the TTL-probe counts it was made from (see VerdictHeld and
 // VerdictProbeCounts), and its probe counts, per-probe loss and rounds (see
-// ProbeCounts, LossPercent and Rounds), all from one state.
+// ProbeCounts and LossPercent; Rounds is the closed rounds), all from one
+// state.
 func (h *Hop) LossSnapshot() LossSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	var snap LossSnapshot
 	snap.ProbesSent, snap.ProbesReceived = h.closedSent, h.closedRecvd
 	snap.LossPct = h.lossPercentLocked()
-	snap.Rounds = h.roundsSent
+	snap.Rounds = h.closedRounds
 	snap.Loss, snap.Kind = h.lossLocked()
 	if snap.Kind != LossProvisional {
 		snap.SettledLoss = snap.Loss
