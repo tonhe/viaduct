@@ -61,6 +61,15 @@ func zTestVerdict(probesSent, probesReceived, echoSent, echoReceived int) string
 // follow from its own exported counts.
 func checkReproducible(t *testing.T, when string, h Hop) {
 	t.Helper()
+	checkReproducibleRow(t, when, h, false)
+}
+
+// checkReproducibleRow is checkReproducible for any row. destination says the
+// hop is the destination's, judged on the target alone (viaduct#244): its
+// verdict counts are the target's, so they need not equal the hop's current
+// counts, and its measured headline is their loss, not loss_pct.
+func checkReproducibleRow(t *testing.T, when string, h Hop, destination bool) {
+	t.Helper()
 	verdict := consumerVerdict(h)
 	for _, n := range h.Nodes {
 		if n.RateLimited != verdict {
@@ -69,16 +78,20 @@ func checkReproducible(t *testing.T, when string, h Hop) {
 		}
 	}
 	// A hop that is not holding a verdict made it from its current counts.
-	if !h.VerdictHeld && (h.VerdictProbesSent != h.ProbesSent || h.VerdictProbesReceived != h.ProbesReceived) {
+	if !destination && !h.VerdictHeld && (h.VerdictProbesSent != h.ProbesSent || h.VerdictProbesReceived != h.ProbesReceived) {
 		t.Errorf("%s: verdict_held is false, verdict_probes_sent, verdict_probes_received = %d, %d; want the current %d, %d",
 			when, h.VerdictProbesSent, h.VerdictProbesReceived, h.ProbesSent, h.ProbesReceived)
 	}
 	wantKind, wantHeadline := "measured", h.Loss
+	if destination && h.VerdictProbesSent > 0 {
+		lost := math.Max(0, float64(h.VerdictProbesSent-h.VerdictProbesReceived))
+		wantHeadline = lost / float64(h.VerdictProbesSent) * 100
+	}
 	switch {
 	case verdict == "yes":
 		wantKind = "rate_limited"
 		wantHeadline = float64(h.EchoSent-h.EchoReceived) / float64(h.EchoSent) * 100
-	case verdict == "undetermined" && h.Loss > 0 && len(h.Nodes) > 0:
+	case verdict == "undetermined" && wantHeadline > 0 && len(h.Nodes) > 0:
 		wantKind = "provisional"
 	}
 	if h.LossKind != wantKind {

@@ -52,6 +52,13 @@ type Report struct {
 // verdict was made from, VerdictHeld is true, and VerdictProbesSent and
 // VerdictProbesReceived are the TTL-probe counts it was made from. A
 // rate-limited HeadlineLoss is (EchoSent - EchoReceived) / EchoSent * 100.
+//
+// The destination's row is judged on the target alone (hop.Hop.RateLimitState):
+// EchoSent and EchoReceived are the echoes sent to the target and its answers,
+// VerdictProbesSent and VerdictProbesReceived the TTL-limited probes of the
+// types the target has answered at that TTL, and a measured HeadlineLoss is
+// the loss of those probes rather than Loss. A router that answers at the
+// destination's TTL does not dilute the target's figures.
 type Hop struct {
 	TTL            int     `json:"ttl"`
 	Nodes          []Node  `json:"nodes,omitempty"`
@@ -69,7 +76,9 @@ type Hop struct {
 	// totals fell below 20 samples after it had one. VerdictProbesSent and
 	// VerdictProbesReceived are the TTL-probe counts the verdict was made
 	// from: the counts of the moment a held verdict was taken, and otherwise
-	// equal to ProbesSent and ProbesReceived. The nodes' RateLimited verdict
+	// equal to ProbesSent and ProbesReceived, except on the destination's row,
+	// where they are the probes of the types the target answers there. The
+	// nodes' RateLimited verdict
 	// is the rate-limit test on VerdictProbesSent, VerdictProbesReceived,
 	// EchoSent and EchoReceived, held or not.
 	VerdictHeld           bool `json:"verdict_held"`
@@ -106,6 +115,8 @@ type Node struct {
 	// EchoIgnored is true for a node that is left out of its hop's echo
 	// totals: it has answered none of its first 20 echoes while another node
 	// of the hop answers echo. Its Probes.Echo counts are still the raw ones.
+	// It is false on the destination's row, whose totals are the target's
+	// echoes, all of them.
 	EchoIgnored bool `json:"echo_ignored"`
 }
 

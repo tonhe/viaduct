@@ -554,8 +554,8 @@ const (
 
 // MarkTarget records that this node is the trace's target, answering at this
 // TTL. The target can be marked at several TTLs; which of them is the
-// destination's hop is Table.TargetTTL's to say. The mark has no part in the
-// rate-limit verdict, which judges the destination like any other hop.
+// destination's hop is Table.TargetTTL's to say. On that hop the mark picks
+// the node whose counts the verdict is made from (Hop.RateLimitState).
 func (pn *PathNode) MarkTarget() {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
