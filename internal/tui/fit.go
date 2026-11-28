@@ -3,6 +3,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -232,6 +233,7 @@ type keyHint struct {
 func (m Model) viewKeyHints() []keyHint {
 	return []keyHint{
 		{"j/k:scroll", dropHintScroll},
+		{"e:export", dropHintExport},
 		{"p:pause", dropHintPause},
 		{"r:reset", dropHintReset},
 		{"[d] " + m.viewMode.Next().String(), dropHintView},
@@ -260,6 +262,29 @@ func columnKeyHints() []keyHint {
 		{"p:pause", dropHintPause},
 		{"r:reset", dropHintReset},
 	}
+}
+
+// exportNotice is the result of the last export ("Exported to ..." or
+// "Export failed: ..."), for five seconds after it finished, and empty
+// otherwise. Every view shows it on the status bar (viaduct#144).
+func (m Model) exportNotice() string {
+	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
+		return m.exportStatusMsg
+	}
+	return ""
+}
+
+// sessionNotice is what the single-pane views show in the notice slot: the
+// export result while it is fresh, else a recent protocol switch, else the
+// session's setup notice.
+func (m Model) sessionNotice(s *TargetSession) string {
+	if n := m.exportNotice(); n != "" {
+		return n
+	}
+	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
+		return s.switchStatusMsg
+	}
+	return s.notice
 }
 
 // statusParts are the pieces of a status bar, in the order they are shown.

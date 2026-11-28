@@ -125,7 +125,7 @@ via v0.3.0 (build)   Target: example.com (192.0.2.1)    Proto: UDP/ECMP    Probe
 5        203.0.113.99    example.com     AS64511  10.0%    10    12.1    11.9    ████·█████
 
 ! Sustained loss to destination: 10.0% (hop 5 affected, AS64511)
-Tracing... 5 hops    Elapsed: 10s    DNS: on    6 flows    j/k:scroll p:pause r:reset [d] Health q:quit
+Tracing... 5 hops    Elapsed: 10s    DNS: on    6 flows    j/k:scroll e:export p:pause r:reset [d] Health q:quit
 ```
 
 1. **Header bar.** `via <version>`, target name and address, protocol, reply count. The protocol shows `/ECMP` when more than one flow is probed and `Auto → UDP` (or `ICMP`) in auto mode. Outside the default view it ends with `View: <name>`.
@@ -134,7 +134,7 @@ Tracing... 5 hops    Elapsed: 10s    DNS: on    6 flows    j/k:scroll p:pause r:
 4. **Column header.**
 5. **Hop rows**, one per TTL up to the destination. Rows that don't fit scroll.
 6. **Alert bar**, only while an alert is active. With more than one target it is prefixed with the target name.
-7. **Status bar.** Trace state (`Tracing... N hops`, `1 hop` for a one-hop path, or `PAUSED`), elapsed time, DNS on or off, flow count, a notice or transient message, and key hints. N is the destination's distance once it has answered and the highest TTL seen until then. The `[d]` hint names the view the next press switches to. When the bar does not fit, segments are left out in this order: the Probe Detail note, DNS, flows, elapsed, then the key hints one at a time, least used first (`r:reset`, `e:export`, `p:pause`, `space:mark`, `j/k:scroll`, `c:columns`, `[d]`, `↑/↓:target`), then `[scrolled]` and last the notice. The hop count and `q:quit` are always shown. The order is the `drop` constants in `internal/tui/fit.go`.
+7. **Status bar.** Trace state (`Tracing... N hops`, `1 hop` for a one-hop path, or `PAUSED`), elapsed time, DNS on or off, flow count, a notice or transient message, and key hints. Every view, column view included, hints `e:export` and shows the export result (`Exported to ...` or `Export failed: ...`) for five seconds in the notice slot. N is the destination's distance once it has answered and the highest TTL seen until then. The `[d]` hint names the view the next press switches to. When the bar does not fit, segments are left out in this order: the Probe Detail note, DNS, flows, elapsed, then the key hints one at a time, least used first (`r:reset`, `e:export`, `p:pause`, `space:mark`, `j/k:scroll`, `c:columns`, `[d]`, `↑/↓:target`), then `[scrolled]` and last the notice. The hop count and `q:quit` are always shown. The order is the `drop` constants in `internal/tui/fit.go`.
 
 The header, separator and status bar use the bar background. Everything between uses the row background, padded to the full terminal width so no terminal default shows through.
 

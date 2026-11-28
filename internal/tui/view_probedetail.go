@@ -348,13 +348,7 @@ func (m Model) viewProbeDetail() string {
 	}
 	// A setup notice, a protocol switch or an export result, as in the
 	// default view.
-	notice := s.notice
-	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
-		notice = s.switchStatusMsg
-	}
-	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
-		notice = m.exportStatusMsg
-	}
+	notice := m.sessionNotice(s)
 	scrollHint := ""
 	if !m.autoScroll && len(hopLines) > availableRows {
 		scrollHint = "[scrolled] G:bottom g:top"

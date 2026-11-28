@@ -428,6 +428,7 @@ func (m Model) renderView() string {
 			trace:   m.traceStatus(m.focused()),
 			elapsed: fmt.Sprintf("Elapsed: %s", elapsed),
 			dns:     "DNS: " + dnsLabel,
+			notice:  m.exportNotice(),
 			keys:    columnKeyHints(),
 			keyGlue: "  ",
 		})
@@ -622,13 +623,7 @@ func (m Model) renderView() string {
 		flowLabel = fmt.Sprintf("%d flows", s.probeCfg.NumPaths)
 	}
 	// Setup notice (e.g. an IPv4 fallback): stays for the whole trace.
-	notice := s.notice
-	if s.switchStatusMsg != "" && m.now().Sub(s.switchStatusTime) < 5*time.Second {
-		notice = s.switchStatusMsg
-	}
-	if m.exportStatusMsg != "" && m.now().Sub(m.exportStatusTime) < 5*time.Second {
-		notice = m.exportStatusMsg
-	}
+	notice := m.sessionNotice(s)
 	scrollHint := ""
 	if !m.autoScroll && len(hopLines) > availableRows {
 		scrollHint = "[scrolled] G:bottom g:top"
