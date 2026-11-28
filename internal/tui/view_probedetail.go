@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tonhe/viaduct/internal/hop"
+	"github.com/tonhe/viaduct/internal/probe"
 )
 
 // Probe Detail shows, for each hop, what each kind of probe got back.
@@ -365,7 +366,7 @@ func (m Model) viewProbeDetail() string {
 		notice:  notice,
 		keys:    m.viewKeyHints(),
 		scroll:  scrollHint,
-		footer:  "echo cadence: ceil(pairs/budget) rounds",
+		footer:  echoCadenceNote(s),
 		targets: m.targetKeyHints(),
 	})
 	b.WriteString(barBg(statusStyle().Render(status), m.width))
@@ -376,4 +377,20 @@ func (m Model) viewProbeDetail() string {
 	}
 
 	return b.String()
+}
+
+// echoCadenceNote is the Probe Detail status-bar note on how often each node
+// gets a direct echo: "echo every N rounds" when the session's echo budget
+// spreads its echo targets over N > 1 rounds, and empty when every target is
+// echoed every round. The targets are the ones onRoundEnd submits to the
+// tracer, the nodes of hop.Table.EchoNodes.
+func echoCadenceNote(s *TargetSession) string {
+	var targets []probe.EchoTarget
+	for _, n := range s.table.EchoNodes() {
+		targets = append(targets, probe.EchoTarget{IP: n.IP, TTL: n.TTL})
+	}
+	if n := probe.EchoRounds(targets, s.probeCfg.EchoBudget); n > 1 {
+		return fmt.Sprintf("echo every %d rounds", n)
+	}
+	return ""
 }
