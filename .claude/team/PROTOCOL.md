@@ -6,7 +6,7 @@ How the local viaduct agent team works. It applies only to sessions started by `
 
 | Role | Session | Does | Does not |
 |---|---|---|---|
-| director | `viaduct-director` | merges PRs, sets labels and milestones, triages, writes its handoff, drafts Owner decisions for the owner, deletes merged branches, closes duplicate issues | write code or history; post a comment that begins "Owner decision" before the owner says "approved" in chat (rule 3 of the owner's rules in DELEGATIONS.md) |
+| director | `viaduct-director` | merges PRs, sets labels and milestones, triages, writes its handoff, drafts Owner decisions for the owner, deletes merged branches, closes duplicate issues, merges `risk:low` nightly-loop pull requests with green required checks, runs Linux live checks in a container, does release prep up to the tag (rule 8 of the owner's rules in DELEGATIONS.md) | write code or history; post a comment that begins "Owner decision" before the owner says "approved" in chat (rule 3 of the owner's rules in DELEGATIONS.md) |
 | dev | `viaduct-dev` | writes code in its own worktree, pushes branches, opens PRs, claims issues | merge; change routing labels (`agent:ready`, `needs:human`, `risk:*`); set milestones |
 | tester | `viaduct-tester` | live runs under the passwordless test sudo rules, posts live-check results as PR comments | any git write; any other `gh` write |
 
@@ -37,14 +37,14 @@ Discard a run when the host slept or stalled during it, and say so.
 
 ## Merging (director)
 
-Merge only what `DELEGATIONS.md` allows. Use `gh pr merge N -R tonhe/viaduct --squash --delete-branch`. Deleting the merged branch is delegated (D6 in DELEGATIONS.md). Read the pull request, its checks and its live-check comments yourself before merging. A dev or tester saying it is ready is not enough. At most 10 merges per session, then stop and send the owner the summary (rule 6 of the owner's rules in DELEGATIONS.md).
+Merge only what `DELEGATIONS.md` allows. Use `gh pr merge N -R tonhe/viaduct --squash --delete-branch`. Deleting the merged branch is delegated (D6 in DELEGATIONS.md). Read the pull request, its checks and its live-check comments yourself before merging. A dev or tester saying it is ready is not enough. At most 20 merges per session, then stop and send the owner the summary (rule 6 of the owner's rules in DELEGATIONS.md).
 
 ## Staying out of the nightly loop's way
 
 The loop runs in CI: backlog at 06:17, dev at 07:17, follow-up at 01:47 and 13:47 UTC. It owns its own work.
 
 - Never push to a branch named `issue-N`, and never create one.
-- Never edit, comment a fix round on, retarget, or change auto-merge on a pull request whose description carries the `agent-loop issue=` marker. The director may merge one only when the owner says so in the director's session.
+- Never edit, comment a fix round on, retarget, or change auto-merge on a pull request whose description carries the `agent-loop issue=` marker. The director may merge one when it carries `risk:low` and every required check has passed (rule 8 of the owner's rules in DELEGATIONS.md), and otherwise only when the owner says so in the director's session. Merging is all the director does to it.
 - The director does not relabel an issue the loop has claimed (`agent:in-progress` set by the loop, or an open `issue-N` pull request).
 - The dev role does not take an issue the loop has claimed.
 
