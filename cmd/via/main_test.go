@@ -733,7 +733,8 @@ func TestResolveTargetSpecs_EmptyAnswer(t *testing.T) {
 // is Undetermined. The rendering must come from the hop table alone.
 
 // seedHopRateLimit populates an already-created hop with per-kind samples
-// that drive the hop's RateLimitState.
+// that drive the hop's RateLimitState. Sends and answers are interleaved
+// round by round: an answer arrives before the next round's echo is sent.
 func seedHopRateLimit(t *testing.T, tbl *hop.Table, ttl int, ip net.IP, ttlRounds, ttlRecv, echoSent, echoRecv int) *hop.Hop {
 	t.Helper()
 	h := tbl.GetOrCreate(ttl)
@@ -744,17 +745,26 @@ func seedHopRateLimit(t *testing.T, tbl *hop.Table, ttl int, ip net.IP, ttlRound
 	if pn == nil {
 		t.Fatalf("PrimaryNode nil after seeding sample at ttl %d", ttl)
 	}
-	for i := 0; i < ttlRounds; i++ {
-		if i < ttlRecv {
-			pn.AddSample(time.Millisecond, 0, hop.KindICMPTTL)
+	// Round by round, as a session runs: the round's TTL probe and its
+	// answer, then the round's echo and its answer. The first ttlRecv TTL
+	// probes and the first echoRecv echoes are the answered ones.
+	rounds := ttlRounds
+	if echoSent > rounds {
+		rounds = echoSent
+	}
+	for i := 0; i < rounds; i++ {
+		if i < ttlRounds {
+			if i < ttlRecv {
+				pn.AddSample(time.Millisecond, 0, hop.KindICMPTTL)
+			}
+			pn.MarkProbeRoundEnd()
 		}
-		pn.MarkProbeRoundEnd()
-	}
-	for i := 0; i < echoSent; i++ {
-		pn.MarkEchoSent()
-	}
-	for i := 0; i < echoRecv; i++ {
-		pn.AddSample(time.Millisecond, 0, hop.KindEcho)
+		if i < echoSent {
+			pn.MarkEchoSent()
+			if i < echoRecv {
+				pn.AddSample(time.Millisecond, 0, hop.KindEcho)
+			}
+		}
 	}
 	h.MarkRoundSent()
 	return h
