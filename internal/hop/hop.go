@@ -614,8 +614,10 @@ func (h *Hop) EchoIgnored(ip net.IP) bool {
 // LossSnapshot is a hop's loss figures read together under one lock, so they
 // agree with each other even while probes are being recorded.
 type LossSnapshot struct {
-	Loss           float64
-	Kind           LossKind
+	Loss float64
+	Kind LossKind
+	// SettledLoss is SettledLoss: Loss, with provisional loss counted as none.
+	SettledLoss    float64
 	RateLimit      RateLimitState
 	EchoSent       int // the totals the verdict and headline were made from
 	EchoReceived   int
@@ -634,8 +636,8 @@ type LossSnapshot struct {
 	Rounds         int
 }
 
-// LossSnapshot returns the hop's headline loss, its kind, its rate-limit
-// verdict, the echo totals they were made from (see VerdictEchoTotals), the
+// LossSnapshot returns the hop's headline loss, its kind, its settled loss
+// (see SettledLoss), its rate-limit verdict, the echo totals they were made from (see VerdictEchoTotals), the
 // nodes left out of those totals (see EchoIgnored), whether the verdict is a
 // held one and the TTL-probe counts it was made from (see VerdictHeld and
 // VerdictProbeCounts), and its probe counts, per-probe loss and rounds (see
@@ -648,6 +650,9 @@ func (h *Hop) LossSnapshot() LossSnapshot {
 	snap.LossPct = h.lossPercentLocked()
 	snap.Rounds = h.roundsSent
 	snap.Loss, snap.Kind = h.lossLocked()
+	if snap.Kind != LossProvisional {
+		snap.SettledLoss = snap.Loss
+	}
 	snap.RateLimit = h.rateLimitStateLocked()
 	snap.EchoSent, snap.EchoReceived = h.echoTotalsLocked()
 	if snap.EchoSent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined {

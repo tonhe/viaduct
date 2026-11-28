@@ -102,8 +102,21 @@ func lossStyleFor(loss float64) lipgloss.Style {
 // and loss whose cause is not yet known as "N%?", dimmed, so it is not read
 // as a measurement of the path.
 func lossCell(h *hop.Hop) string {
+	return lossCellWidth(h, widthLossCell)
+}
+
+// widthLossCell is the width of the Loss% cell. minWidthLossCell is the
+// longest figure hop.FormatLoss returns ("100.0%?"), the narrowest the cell
+// can be without cutting one.
+const (
+	widthLossCell    = 8
+	minWidthLossCell = 7
+)
+
+// lossCellWidth is lossCell padded to width columns in place of the usual 8.
+func lossCellWidth(h *hop.Hop, width int) string {
 	loss, kind := h.Loss()
-	plain := padCell(hop.FormatLoss(loss, kind), 8)
+	plain := padCell(hop.FormatLoss(loss, kind), width)
 	switch kind {
 	case hop.LossRateLimited:
 		return rateLimitStyle().Render(plain)

@@ -26,10 +26,10 @@ import (
 // Column widths for the probe detail view.
 const (
 	pdWidthTTL   = 3
-	pdWidthIP    = 17 // v4 default; widens for v6 via computeIPColWidth
-	pdWidthLoss  = 8  // same cell as the main table's Loss% column
-	pdWidthShare = 12 // "% of replies"
-	pdWidthCount = 9  // "received/sent" for one probe type
+	pdWidthIP    = 17            // v4 default; widens for v6 via computeIPColWidth
+	pdWidthLoss  = widthLossCell // same cell as the main table's Loss% column
+	pdWidthShare = 12            // "% of replies"
+	pdWidthCount = 9             // "received/sent" for one probe type
 	pdWidthRnd   = 5
 
 	pdShareHeader = "% of replies"
@@ -38,9 +38,12 @@ const (
 // pdLayout says which Probe Detail columns are shown and how wide the address
 // column is. The hop number, address, loss and share are always shown; the
 // count columns and Rnd are dropped, least important first, on a terminal too
-// narrow for them, and then the address is shortened.
+// narrow for them, and then the address is shortened. Last, the loss column
+// gives up its spare cell: that is what fits the four columns into the
+// 40-column minimum layout.
 type pdLayout struct {
 	ipw         int
+	lossw       int
 	showICMP    bool
 	showPrimary bool
 	showEcho    bool
@@ -48,7 +51,7 @@ type pdLayout struct {
 }
 
 func (l pdLayout) width() int {
-	w := pdWidthTTL + 1 + l.ipw + 1 + pdWidthLoss + 1 + pdWidthShare
+	w := pdWidthTTL + 1 + l.ipw + 1 + l.lossw + 1 + pdWidthShare
 	for _, c := range []struct {
 		show bool
 		w    int
@@ -69,7 +72,7 @@ func computePDLayout(width, ipNeeded int, hasPrimary bool) pdLayout {
 	if ipNeeded < pdWidthIP {
 		ipNeeded = pdWidthIP
 	}
-	l := pdLayout{ipw: ipNeeded, showICMP: true, showPrimary: hasPrimary, showEcho: true, showRnd: true}
+	l := pdLayout{ipw: ipNeeded, lossw: pdWidthLoss, showICMP: true, showPrimary: hasPrimary, showEcho: true, showRnd: true}
 	if width <= 0 {
 		return l
 	}
@@ -84,6 +87,9 @@ func computePDLayout(width, ipNeeded int, hasPrimary bool) pdLayout {
 		if l.ipw < minIPColWidth {
 			l.ipw = minIPColWidth
 		}
+	}
+	if l.width() > width {
+		l.lossw = minWidthLossCell
 	}
 	return l
 }
@@ -128,7 +134,7 @@ func (m Model) renderProbeDetailHeader(l pdLayout, primaryColName string) string
 	parts := []string{
 		fmt.Sprintf("%-*s", pdWidthTTL, "#"),
 		fmt.Sprintf("%-*s", l.ipw, "IP"),
-		fmt.Sprintf("%-*s", pdWidthLoss, "Loss%"),
+		fmt.Sprintf("%-*s", l.lossw, "Loss%"),
 		fmt.Sprintf("%-*s", pdWidthShare, pdShareHeader),
 	}
 	if l.showICMP {
@@ -168,9 +174,9 @@ func (m Model) renderProbeDetailHopRow(h *hop.Hop, pn *hop.PathNode, l pdLayout,
 	}
 	icmpStats, primaryStats, echoStats := pn.ICMPTTLStats(), pn.PrimaryStats(), pn.EchoStats()
 
-	lossC := dimStyle().Render(padCell("-", pdWidthLoss))
+	lossC := dimStyle().Render(padCell("-", l.lossw))
 	if first {
-		lossC = lossCell(h)
+		lossC = lossCellWidth(h, l.lossw)
 	}
 	parts := []string{
 		dimStyle().Render(fmt.Sprintf("%-*d", pdWidthTTL, h.TTL)),

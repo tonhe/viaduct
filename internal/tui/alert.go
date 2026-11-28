@@ -215,9 +215,10 @@ func (e *AlertEngine) FindAffectedHop(hopMap map[int]*hop.Hop, maxTTL int, delta
 	destHop := hopMap[destTTL]
 	destNode := destHop.PrimaryNode()
 
-	// Loss alert: walk backward, find first hop with loss within 2% of destination
-	if e.lossThreshold > 0 && destHop.SettledLoss() > e.lossThreshold {
-		destLoss := destHop.SettledLoss()
+	// Loss alert: walk backward, find first hop with loss within 2% of destination.
+	// Each hop's loss is read once, from one snapshot: a round that ends
+	// while this runs cannot give two figures for the same hop.
+	if destLoss := destHop.LossSnapshot().SettledLoss; e.lossThreshold > 0 && destLoss > e.lossThreshold {
 		for i := destTTL - 1; i >= 1; i-- {
 			h, ok := hopMap[i]
 			if !ok || h == nil {
@@ -227,7 +228,7 @@ func (e *AlertEngine) FindAffectedHop(hopMap map[int]*hop.Hop, maxTTL int, delta
 			if pn == nil || pn.GetReceived() == 0 {
 				continue
 			}
-			if h.SettledLoss() >= destLoss-2.0 {
+			if h.LossSnapshot().SettledLoss >= destLoss-2.0 {
 				asn, org := pn.GetASN()
 				asnStr := ""
 				if asn > 0 {
