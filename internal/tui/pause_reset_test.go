@@ -166,8 +166,7 @@ func prCounts(s *TargetSession) []prHopCounts {
 }
 
 func prSame(a, b hop.ProbeStats) bool {
-	return a.Sent == b.Sent && a.Received == b.Received &&
-		a.RecvRounds == b.RecvRounds && a.ProbesSent == b.ProbesSent
+	return a.Sent == b.Sent && a.Received == b.Received && a.ProbesSent == b.ProbesSent
 }
 
 // prCompare checks every target's counts in got against the reference run.

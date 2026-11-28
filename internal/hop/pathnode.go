@@ -426,14 +426,13 @@ func (pn *PathNode) MarkEchoSent() {
 	pn.echoSentThisRound = true
 }
 
-// MarkProbeRoundEnd closes the per-probe-type round window. TTL kinds count
-// the round into Sent; echo does not (its Sent tracks real sends).
+// MarkProbeRoundEnd closes the per-probe-type round window.
 func (pn *PathNode) MarkProbeRoundEnd() {
 	pn.mu.Lock()
 	defer pn.mu.Unlock()
-	pn.icmpTTL.markRoundEnd(true)
-	pn.primary.markRoundEnd(true)
-	pn.icmpEcho.markRoundEnd(false)
+	pn.icmpTTL.markRoundEnd()
+	pn.primary.markRoundEnd()
+	pn.icmpEcho.markRoundEnd()
 	pn.echoSentThisRound = false
 }
 

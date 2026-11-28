@@ -53,6 +53,7 @@ func (m Model) onMainKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		for _, s := range m.sessions {
 			s.table.ResetAll()
 			s.probeCount = 0
+			s.unsentRounds = 0
 			if s.alertEngine != nil {
 				s.alertEngine.Reset()
 			}

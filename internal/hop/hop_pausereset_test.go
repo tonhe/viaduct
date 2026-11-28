@@ -158,8 +158,7 @@ func TestHopMarkRoundEnd_PausedRoundsLeaveCountsUnchanged(t *testing.T) {
 		{"PrimaryStats", pn.PrimaryStats(), fn.PrimaryStats()},
 		{"EchoStats", pn.EchoStats(), fn.EchoStats()},
 	} {
-		if c.got.Sent != c.want.Sent || c.got.Received != c.want.Received ||
-			c.got.RecvRounds != c.want.RecvRounds || c.got.ProbesSent != c.want.ProbesSent {
+		if c.got.Sent != c.want.Sent || c.got.Received != c.want.Received || c.got.ProbesSent != c.want.ProbesSent {
 			t.Errorf("%s = %+v, want %+v", c.name, c.got, c.want)
 		}
 	}

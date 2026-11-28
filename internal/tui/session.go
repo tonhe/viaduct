@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"net"
 	"time"
 
@@ -35,6 +36,35 @@ type TargetSession struct {
 	startErr        error // resolution/family/socket failure; session never traces
 	marked           bool  // comparison mark for column view
 	notice           string // setup notice shown in the status bar (TargetSpec.Notice)
+	// unsentRounds counts the rounds that closed while the hop table had no
+	// row: rounds in which no probe could be sent to any TTL, from the start
+	// of the trace or since the last reset. See noSendNotice.
+	unsentRounds int
+}
+
+// noSendNotice says that no probe has left yet, when that is why the hop
+// table is empty: a TTL that nothing was sent to gets no row, so a trace
+// whose first rounds all failed to send would show an empty table and no
+// reason. It is "" before the first round has closed and once the table has
+// a row. short is the form for a column-view pane.
+func (s *TargetSession) noSendNotice(short bool) string {
+	if s.unsentRounds == 0 || len(s.table.Snapshot()) > 0 {
+		return ""
+	}
+	if short {
+		if s.unsentRounds == 1 {
+			return "No probe sent in 1 round"
+		}
+		return fmt.Sprintf("No probe sent in %d rounds", s.unsentRounds)
+	}
+	where := "Run with --debug-log FILE to see why."
+	if s.debug != nil {
+		where = "The debug log says why."
+	}
+	if s.unsentRounds == 1 {
+		return "No probe could be sent in the first round. " + where
+	}
+	return fmt.Sprintf("No probe could be sent in the first %d rounds. %s", s.unsentRounds, where)
 }
 
 // newSession creates a TargetSession with the per-target initial state that

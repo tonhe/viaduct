@@ -563,6 +563,12 @@ func (m Model) renderView() string {
 			}
 		}
 
+		// No row because no probe could be sent: say so, where the rows
+		// would be.
+		if notice := s.noSendNotice(false); notice != "" && len(hopLines) == 0 {
+			hopLines = append(hopLines, amberStyle().Render(truncateCells(notice, m.width)))
+		}
+
 		displayLines = hopLines
 		if availableRows > 0 && len(hopLines) > availableRows {
 			if m.autoScroll {
@@ -1643,6 +1649,13 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 		b.WriteString(fmt.Sprintf("via — %s (%s) — %s — %d flows\n", s.target, targetIPStr, protoLabel, s.probeCfg.NumPaths))
 	} else {
 		b.WriteString(fmt.Sprintf("via — %s (%s) — %s\n", s.target, targetIPStr, protoLabel))
+	}
+
+	// No row to show because no probe could be sent: the summary says so in
+	// place of an empty table.
+	if notice := s.noSendNotice(false); notice != "" {
+		b.WriteString(notice + "\n")
+		return b.String()
 	}
 
 	// Determine max TTL to display

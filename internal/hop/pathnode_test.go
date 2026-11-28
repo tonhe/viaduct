@@ -426,21 +426,24 @@ func TestPathNodeMarkEchoSent(t *testing.T) {
 	}
 }
 
+// A round end counts nothing into Sent, for any probe type: the TTL kinds no
+// longer count the rounds a node was known as probes sent to it (viaduct#154).
+// Their sent count is ProbesSent, the probes written for the node's hop.
 func TestPathNodeProbeStatsRoundEnd(t *testing.T) {
 	pn := NewPathNode(net.ParseIP("198.51.100.7"))
 	// Round 1: icmp replies; round 2: silence.
 	pn.AddSample(10*time.Millisecond, 0, KindICMPTTL)
 	pn.MarkProbeRoundEnd()
 	pn.MarkProbeRoundEnd()
-	icmp := pn.ICMPTTLStats()
-	if icmp.Sent != 2 || icmp.RecvRounds != 1 {
-		t.Errorf("icmpTTL sent/recvRounds = %d/%d, want 2/1", icmp.Sent, icmp.RecvRounds)
+	for name, s := range map[string]ProbeStats{"icmp-ttl": pn.ICMPTTLStats(), "primary": pn.PrimaryStats(), "echo": pn.EchoStats()} {
+		if s.Sent != 0 {
+			t.Errorf("%s: Sent = %d after two round ends in which nothing was sent to the node, want 0", name, s.Sent)
+		}
+		if s.ProbesSent != 0 {
+			t.Errorf("%s: ProbesSent = %d with no probe recorded as sent, want 0", name, s.ProbesSent)
+		}
 	}
-	if got := icmp.RoundLossPercent(); got != 50.0 {
-		t.Errorf("icmpTTL round loss = %v, want 50", got)
-	}
-	// Echo Sent must be untouched by round ends.
-	if pn.EchoStats().Sent != 0 {
-		t.Error("echo Sent moved on round end")
+	if got := pn.ICMPTTLStats().Received; got != 1 {
+		t.Errorf("icmp-ttl Received = %d, want 1", got)
 	}
 }

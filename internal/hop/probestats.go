@@ -5,19 +5,21 @@ import "time"
 // ProbeStats accumulates per-probe-type counters for one PathNode.
 // Not self-locking: the owning PathNode's mutex guards all access.
 //
-// Two sent semantics coexist (see design spec "Data model"):
-//   - TTL kinds: Sent counts rounds the node existed (markRoundEnd(true));
-//     loss is round-based via RecvRounds.
-//   - Echo kind: Sent counts actual sends (markSent()); loss is probe-based.
+// Every count is in probes that were written. The two kinds keep their sent
+// count in different fields:
+//   - Echo kind: Sent counts the echoes sent to the node (markSent).
+//   - TTL kinds: ProbesSent counts the probes of this type sent to the node's
+//     hop. Sent is not used and stays 0: a TTL-limited probe is sent to a
+//     hop, not to a node.
 type ProbeStats struct {
-	Sent       int
-	Received   int
-	RecvRounds int
+	// Sent is the echoes sent to the node. Echo kind only.
+	Sent     int
+	Received int
 
 	// ProbesSent is, for the TTL kinds, the number of probes of this type
 	// sent to the node's hop in the rounds the node was known: the figure
-	// Received is counted against. (Sent counts rounds for those kinds.) For
-	// the echo kind it is not used; Sent already counts echoes.
+	// Received is counted against. For the echo kind it is not used; Sent
+	// already counts echoes.
 	ProbesSent int
 
 	MinRTT  time.Duration
@@ -43,24 +45,9 @@ func (s *ProbeStats) addReply(rtt time.Duration) {
 	s.respondedThisRound = true
 }
 
-// markRoundEnd closes out a round. countRound is true for TTL kinds (Sent
-// counts rounds) and false for echo (Sent counts sends via markSent).
-func (s *ProbeStats) markRoundEnd(countRound bool) {
-	if countRound {
-		s.Sent++
-	}
-	if s.respondedThisRound {
-		s.RecvRounds++
-	}
+// markRoundEnd closes out a round.
+func (s *ProbeStats) markRoundEnd() {
 	s.respondedThisRound = false
-}
-
-// RoundLossPercent is the round-based loss used for TTL kinds.
-func (s *ProbeStats) RoundLossPercent() float64 {
-	if s.Sent == 0 {
-		return 0
-	}
-	return float64(s.Sent-s.RecvRounds) / float64(s.Sent) * 100
 }
 
 // ProbeLossPercent is the probe-based loss used for the echo kind.
