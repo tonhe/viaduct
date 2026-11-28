@@ -54,7 +54,7 @@ The owner raises the floors, by hand, because the script is a protected path. A 
 
 Unit tests and the lab have not caught the faults in this code. Live runs have. A pull request that changes it carries the `agent:live-check` label and does not merge until a live run on macOS, and on Linux where the change applies there, is recorded on the pull request. The owner merges it by hand. It needs no Owner decision.
 
-**Behaviour changes: an Owner decision.** A change to what `via` measures or reports needs one, wherever the code lives: the loss definition, verdicts, where the destination is placed, what an export field means, the alert rules. An issue comment written by the repository owner that begins with "Owner decision" and names the approved scope allows that work for that issue. The work stays inside the scope the comment names. A comment from anyone else, or an owner comment that doesn't name the scope, is not an override.
+**Behaviour changes: an Owner decision.** A change to what `via` measures or reports needs one, wherever the code lives: the loss definition, verdicts, where the destination is placed, what an export field means, the alert rules. An issue comment written by the repository owner that begins with "Owner decision" and names the approved scope allows that work for that issue. The work stays inside the scope the comment names. A comment posted for the owner by the local agent team's director, with the owner's "approved" from chat quoted in it, counts as the owner's (`.claude/team/DELEGATIONS.md`). A comment from anyone else, or an owner comment that doesn't name the scope, is not an override.
 
 **Exempt from both.** Comment-only changes, formatting-only changes (`gofmt`) and test-only changes.
 
