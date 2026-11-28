@@ -8,7 +8,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/tonhe/viaduct/internal/hop"
-	"github.com/tonhe/viaduct/internal/theme"
 )
 
 // minPaneWidth is the narrowest a target pane may be before the view stops
@@ -38,7 +37,7 @@ func lightPaneBorder() paneBorder {
 // otherwise.
 func paneBorderStyle(focused bool) lipgloss.Style {
 	if focused {
-		return lipgloss.NewStyle().Foreground(theme.Current.Base0D)
+		return accentStyle()
 	}
 	return dimStyle()
 }
@@ -122,7 +121,7 @@ type paneLayout struct {
 const (
 	paneNumW  = 2
 	paneAvgW  = 6
-	paneLossW = 5
+	paneLossW = 7 // the longest figure hop.FormatLoss returns ("100.0%?")
 	paneIPMin = 9
 	paneIPMax = 15
 )
@@ -326,14 +325,14 @@ func (m Model) paneTopBorder(s *TargetSession, bd paneBorder, bstyle lipgloss.St
 	}
 	labelStyle := headerStyle()
 	if focused {
-		labelStyle = headerStyle().Bold(true).Foreground(theme.Current.Base0D)
+		labelStyle = accentStyle().Bold(true)
 	}
 	return bstyle.Render(bd.tl+" ") + labelStyle.Render(label) + bstyle.Render(" "+strings.Repeat(bd.h, fill)+bd.tr)
 }
 
 // paneHeaderContent builds the column-header row content (between borders).
 func (m Model) paneHeaderContent(lay paneLayout, inner int) string {
-	fields := []string{dimStyle().Render(fmt.Sprintf("%-*s", paneNumW, "#"))}
+	fields := []string{dimStyle().Render(fmt.Sprintf("%*s", paneNumW, "#"))}
 	fields = append(fields, dimStyle().Render(padCell("IP", lay.ipw)))
 	if lay.hostw > 0 {
 		fields = append(fields, dimStyle().Render(padCell("Host", lay.hostw)))
@@ -374,19 +373,18 @@ func (m Model) paneRowContent(lay paneLayout, inner, ttl int, h *hop.Hop) string
 			avgCell = fmt.Sprintf("%*s", paneAvgW, formatDuration(h.AvgRTT()))
 		}
 		if lay.showLoss {
-			// The hop's figure, as in the detail table, in the pane's
-			// narrower cell: whole percent, "~" for echo loss on a
-			// rate-limited hop, "?" while the cause is not yet known.
+			// The hop's figure, written as the detail table writes it
+			// (hop.FormatLoss), right-aligned in the pane's cell.
 			loss, kind := h.Loss()
-			lossStr := fmt.Sprintf("%.0f%%", loss)
 			style := lossStyleFor(loss)
 			switch kind {
 			case hop.LossRateLimited:
-				lossStr, style = "~"+lossStr, rateLimitStyle()
+				style = rateLimitStyle()
 			case hop.LossProvisional:
-				lossStr, style = lossStr+"?", dimStyle()
+				style = dimStyle()
 			}
-			lossCell = style.Render(fmt.Sprintf("%*s", paneLossW, lossStr))
+			lossStr := hop.FormatLoss(loss, kind)
+			lossCell = style.Render(strings.Repeat(" ", maxInt(0, paneLossW-lipgloss.Width(lossStr))) + lossStr)
 		}
 	}
 

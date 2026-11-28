@@ -54,6 +54,12 @@ func starStyle() lipgloss.Style {
 func treeStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Current.Base03)
 }
+
+// accentStyle is the accent colour on its own: the focused pane's border and
+// label in column view.
+func accentStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(theme.Current.Base0D)
+}
 func flowStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Current.Base0D)
 }
