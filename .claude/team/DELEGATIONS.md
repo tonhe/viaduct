@@ -21,6 +21,10 @@ D4. **Close an issue** when the pull request that fixes it has merged and its ac
 
 D5. **File issues** for findings, following "Filing issues" in `CLAUDE.md`.
 
+D6. **Delete a merged pull request's branch** after the merge. Not a branch whose pull request is open or was closed without merging.
+
+D7. **Close an issue as a duplicate**, with a comment that links the issue it duplicates.
+
 ## Dev
 
 V1. **Claim an issue** with `agent:in-progress`, push branches, and open pull requests, as `PROTOCOL.md` describes.
@@ -41,5 +45,5 @@ These always need the owner, each time:
 - writing a comment that begins "Owner decision";
 - merging a pull request that touches the paths in D1's last line;
 - merging or changing a nightly-loop pull request;
-- force-pushing, or deleting a branch another role or the loop created;
+- force-pushing, or deleting a branch whose pull request has not merged;
 - anything on a repository other than `tonhe/viaduct`.
