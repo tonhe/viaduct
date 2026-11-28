@@ -72,8 +72,8 @@ func TestReportMode_DebugLogRoundRecords(t *testing.T) {
 			for _, want := range []string{
 				"[192.0.2.4] round 1: took ",
 				"[198.51.100.4] round 1: took ",
-				"[192.0.2.4] final round=1 ttl=4 nodes=192.0.2.4 loss=0.0% kind=measured icmp-ttl=0/0 echo=0/0 echo-counted=0/0 rate-limited=undetermined",
-				"[198.51.100.4] final round=1 ttl=4 nodes=192.0.2.4 loss=0.0% kind=measured icmp-ttl=0/0 echo=0/0 echo-counted=0/0 rate-limited=undetermined",
+				"[192.0.2.4] final round=1 ttl=4 nodes=192.0.2.4 loss=0.0% kind=measured icmp-ttl=0/0 echo=0/0 echo-counted=0/0 rate-limited=undetermined verdict-held=no verdict-probes=0/0",
+				"[198.51.100.4] final round=1 ttl=4 nodes=192.0.2.4 loss=0.0% kind=measured icmp-ttl=0/0 echo=0/0 echo-counted=0/0 rate-limited=undetermined verdict-held=no verdict-probes=0/0",
 			} {
 				if got := sink.count(want); got != 1 {
 					t.Errorf("%d lines containing %q, want 1:\n%s", got, want, strings.Join(sink.lines, "\n"))

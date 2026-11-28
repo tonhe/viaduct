@@ -111,22 +111,22 @@ func TestDebugLog_SnapshotEveryTenRounds(t *testing.T) {
 		{
 			name: "no loss", rounds: 10,
 			round: func(s *stallSim, i int) { s.round(3, true) },
-			want:  "[192.0.2.1] snapshot round=10 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/0 echo-counted=10/0 rate-limited=undetermined",
+			want:  "[192.0.2.1] snapshot round=10 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=10/0 udp-ttl=20/0 echo=10/0 echo-counted=10/0 rate-limited=undetermined verdict-held=no verdict-probes=30/0",
 		},
 		{
 			name: "provisional", rounds: 10,
 			round: func(s *stallSim, i int) { s.round(2, true) },
-			want:  "[192.0.2.1] snapshot round=10 ttl=3 nodes=192.0.2.3 loss=33.3%? kind=provisional icmp-ttl=10/0 udp-ttl=20/10 echo=10/0 echo-counted=10/0 rate-limited=undetermined",
+			want:  "[192.0.2.1] snapshot round=10 ttl=3 nodes=192.0.2.3 loss=33.3%? kind=provisional icmp-ttl=10/0 udp-ttl=20/10 echo=10/0 echo-counted=10/0 rate-limited=undetermined verdict-held=no verdict-probes=30/10",
 		},
 		{
 			name: "rate-limited", rounds: 30,
 			round: func(s *stallSim, i int) { s.round(1, true) },
-			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=~0%† kind=rate_limited icmp-ttl=30/0 udp-ttl=60/60 echo=30/0 echo-counted=30/0 rate-limited=yes",
+			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=~0%† kind=rate_limited icmp-ttl=30/0 udp-ttl=60/60 echo=30/0 echo-counted=30/0 rate-limited=yes verdict-held=no verdict-probes=90/60",
 		},
 		{
 			name: "real loss", rounds: 30,
 			round: func(s *stallSim, i int) { s.round(2, i%3 != 0) },
-			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=33.3% kind=measured icmp-ttl=30/0 udp-ttl=60/30 echo=30/10 echo-counted=30/10 rate-limited=no",
+			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=33.3% kind=measured icmp-ttl=30/0 udp-ttl=60/30 echo=30/10 echo-counted=30/10 rate-limited=no verdict-held=no verdict-probes=90/30",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,7 +164,7 @@ func TestDebugLog_SnapshotSilentHop(t *testing.T) {
 	}
 	m, _ = m.onRoundEnd(RoundEndMsg{}) // round 11 closes: round 10's snapshot is written
 	snaps := sink.containing(" snapshot ")
-	want := "[192.0.2.1] snapshot round=10 ttl=1 nodes=- loss=100.0% kind=measured icmp-ttl=10/10 udp-ttl=20/20 echo=0/0 echo-counted=0/0 rate-limited=undetermined"
+	want := "[192.0.2.1] snapshot round=10 ttl=1 nodes=- loss=100.0% kind=measured icmp-ttl=10/10 udp-ttl=20/20 echo=0/0 echo-counted=0/0 rate-limited=undetermined verdict-held=no verdict-probes=30/30"
 	if len(snaps) != 1 || snaps[0] != want {
 		t.Errorf("\n got %q\nwant %s", snaps, want)
 	}
@@ -180,7 +180,7 @@ func TestDebugLog_FinalSnapshot(t *testing.T) {
 	if len(finals) != stallTTLs {
 		t.Fatalf("got %d final lines, want %d:\n%s", len(finals), stallTTLs, strings.Join(sink.lines, "\n"))
 	}
-	want := "[192.0.2.1] final round=4 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=4/0 udp-ttl=8/0 echo=4/0 echo-counted=4/0 rate-limited=undetermined"
+	want := "[192.0.2.1] final round=4 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=4/0 udp-ttl=8/0 echo=4/0 echo-counted=4/0 rate-limited=undetermined verdict-held=no verdict-probes=12/0"
 	if finals[2] != want {
 		t.Errorf("\n got %s\nwant %s", finals[2], want)
 	}
@@ -348,6 +348,72 @@ func TestReportDebug_DrivesItsOwnAlertEngine(t *testing.T) {
 	}
 }
 
+// A hop that keeps an earlier verdict says so, with the TTL-probe counts that
+// verdict was made from, so the line can be checked against the rule the way
+// an export can (viaduct#228). Once the verdict is taken again (A answers
+// every echo against 47.6% TTL-probe loss: rate-limited) the counts are the
+// current ones.
+func TestDebugLog_HeldVerdict(t *testing.T) {
+	sink := &debugSink{}
+	d := NewReportDebug(sink.logf, "192.0.2.9", "udp", 5, 0, 3, true)
+	table := hop.NewTable(30)
+	a, b := net.ParseIP("198.51.100.1"), net.ParseIP("198.51.100.2")
+	table.MarkRoundSentByType(1, 1, 6)
+	h := table.Get(1)
+	// B has the hop to itself for 25 rounds, answers one TTL probe of seven
+	// and ignores every echo: the verdict is measured.
+	for round := 0; round < 25; round++ {
+		if round > 0 {
+			table.MarkRoundSentByType(1, 1, 6)
+		}
+		h.AddSample(b, time.Millisecond, 0, hop.KindICMPTTL)
+		for _, n := range h.GetNodes() {
+			n.MarkEchoSent()
+		}
+		d.RoundClosed(table, CloseRound(table))
+	}
+	if got := h.RateLimitState(); got != hop.RateLimitNo {
+		t.Fatalf("fixture: verdict = %v after 25 rounds, want no", got)
+	}
+	// Then A appears, answers every TTL probe and every echo. B leaves the
+	// echo totals, which start again from A's first answer, and the hop
+	// holds its verdict until they reach 20.
+	aRound := func() {
+		table.MarkRoundSentByType(1, 1, 6)
+		h.AddSample(a, time.Millisecond, 0, hop.KindICMPTTL)
+		for flow := 0; flow < 6; flow++ {
+			h.AddSample(a, time.Millisecond, flow, hop.KindPrimary)
+		}
+		for _, n := range h.GetNodes() {
+			n.MarkEchoSent()
+		}
+		h.AddSample(a, time.Millisecond, 0, hop.KindEcho)
+		d.RoundClosed(table, CloseRound(table))
+	}
+	for i := 0; i < 6; i++ { // rounds 26 to 31: round 30's snapshot is written
+		aRound()
+	}
+	if !h.VerdictHeld() {
+		t.Fatalf("fixture: the hop does not hold its verdict after A's first echoes")
+	}
+	wantHeld := "[192.0.2.9] snapshot round=30 ttl=1 nodes=198.51.100.2,198.51.100.1 loss=71.4% kind=measured icmp-ttl=30/0 udp-ttl=180/150 echo=35/30 echo-counted=5/0 rate-limited=no verdict-held=yes verdict-probes=175/150"
+	if got := sink.containing(" snapshot round=30 "); len(got) != 1 || got[0] != wantHeld {
+		t.Errorf("held hop:\n got %q\nwant %s", got, wantHeld)
+	}
+
+	for i := 0; i < 14; i++ { // rounds 32 to 45: A's 20th echo
+		aRound()
+	}
+	if h.VerdictHeld() {
+		t.Fatalf("fixture: the hop still holds its verdict with 20 new echo samples")
+	}
+	d.Final(table)
+	wantFinal := "[192.0.2.9] final round=45 ttl=1 nodes=198.51.100.2,198.51.100.1 loss=~0%† kind=rate_limited icmp-ttl=45/0 udp-ttl=270/150 echo=65/45 echo-counted=20/0 rate-limited=yes verdict-held=no verdict-probes=315/150"
+	if got := sink.containing(" final "); len(got) != 1 || got[0] != wantFinal {
+		t.Errorf("hop with a new verdict:\n got %q\nwant %s", got, wantFinal)
+	}
+}
+
 // Hops beyond the destination are in the hop table (round one probes every
 // TTL before the destination's distance is known) and are listed in the
 // snapshot and final sets, marked beyond=yes, with the fields every hop line
@@ -398,10 +464,10 @@ func TestDebugLog_HopsBeyondDestination(t *testing.T) {
 	}{{"snapshot", 10}, {"final", 11}} {
 		r := tc.round
 		want := []string{
-			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=1 nodes=198.51.100.1 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0", tc.label, r, r, 2*r) + tail,
-			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=2 nodes=192.0.2.9 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0", tc.label, r, r, 2*r) + tail,
-			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=3 nodes=192.0.2.9 loss=0.0%% kind=measured icmp-ttl=1/0 udp-ttl=2/0", tc.label, r) + tail + " beyond=yes",
-			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=4 nodes=- loss=100.0%% kind=measured icmp-ttl=1/1 udp-ttl=2/2", tc.label, r) + tail + " beyond=yes",
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=1 nodes=198.51.100.1 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0", tc.label, r, r, 2*r) + tail + fmt.Sprintf(" verdict-held=no verdict-probes=%d/0", 3*r),
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=2 nodes=192.0.2.9 loss=0.0%% kind=measured icmp-ttl=%d/0 udp-ttl=%d/0", tc.label, r, r, 2*r) + tail + fmt.Sprintf(" verdict-held=no verdict-probes=%d/0", 3*r),
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=3 nodes=192.0.2.9 loss=0.0%% kind=measured icmp-ttl=1/0 udp-ttl=2/0", tc.label, r) + tail + " verdict-held=no verdict-probes=3/0 beyond=yes",
+			fmt.Sprintf("[192.0.2.9] %s round=%d ttl=4 nodes=- loss=100.0%% kind=measured icmp-ttl=1/1 udp-ttl=2/2", tc.label, r) + tail + " verdict-held=no verdict-probes=3/3 beyond=yes",
 		}
 		got := sink.containing(" " + tc.label + " ")
 		if len(got) != len(want) {
