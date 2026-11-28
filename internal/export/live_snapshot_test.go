@@ -55,6 +55,12 @@ func TestBuildReport_LiveExportIsOneSnapshot(t *testing.T) {
 			t.Fatalf("build %d: verdict probes %d/%d, probes %d/%d; want equal",
 				builds, got.VerdictProbesSent, got.VerdictProbesReceived, got.ProbesSent, got.ProbesReceived)
 		}
+		// Every round sends 7 probes, so rounds and probes_sent agree only
+		// when they cover the same rounds: the closed ones (viaduct#262).
+		if got.ProbesSent != 7*got.Rounds {
+			t.Fatalf("build %d: probes_sent %d over %d rounds of 7 probes; want rounds to leave out the open round, as probes_sent does",
+				builds, got.ProbesSent, got.Rounds)
+		}
 		if r.Probes != got.ProbesSent || got.Sent != got.ProbesSent {
 			t.Fatalf("build %d: report probes %d, hop sent %d, probes_sent %d; want equal",
 				builds, r.Probes, got.Sent, got.ProbesSent)

@@ -12,7 +12,9 @@ func TestHop_LossSnapshotCarriesProbeCounts(t *testing.T) {
 	ip := net.ParseIP("192.0.2.7")
 	h := NewHop(3)
 
-	check := func(t *testing.T, when string) {
+	// closed is the number of rounds closed so far: the rounds the probe
+	// counts cover.
+	check := func(t *testing.T, when string, closed int) {
 		t.Helper()
 		snap := h.LossSnapshot()
 		sent, recvd := h.ProbeCounts()
@@ -23,12 +25,15 @@ func TestHop_LossSnapshotCarriesProbeCounts(t *testing.T) {
 		if got := h.LossPercent(); snap.LossPct != got {
 			t.Errorf("%s: snapshot LossPct = %v, LossPercent = %v", when, snap.LossPct, got)
 		}
-		if got := h.Rounds(); snap.Rounds != got {
-			t.Errorf("%s: snapshot Rounds = %d, Rounds = %d", when, snap.Rounds, got)
+		if snap.Rounds != closed {
+			t.Errorf("%s: snapshot Rounds = %d, want the %d closed rounds", when, snap.Rounds, closed)
+		}
+		if snap.ProbesSent != 7*snap.Rounds {
+			t.Errorf("%s: snapshot ProbesSent = %d over %d rounds of 7 probes", when, snap.ProbesSent, snap.Rounds)
 		}
 	}
 
-	check(t, "new hop")
+	check(t, "new hop", 0)
 
 	// Two closed rounds of 7 probes, 5 then 3 answered.
 	for _, answered := range []int{5, 3} {
@@ -38,7 +43,10 @@ func TestHop_LossSnapshotCarriesProbeCounts(t *testing.T) {
 		}
 		h.MarkRoundEnd()
 	}
-	check(t, "two closed rounds")
+	check(t, "two closed rounds", 2)
+	if got := h.Rounds(); got != 2 {
+		t.Errorf("two closed rounds: Rounds() = %d, want 2", got)
+	}
 	snap := h.LossSnapshot()
 	if snap.ProbesSent != 14 || snap.ProbesReceived != 8 || snap.Rounds != 2 {
 		t.Errorf("snapshot probes, rounds = %d, %d, %d; want 14, 8, 2",
@@ -48,11 +56,24 @@ func TestHop_LossSnapshotCarriesProbeCounts(t *testing.T) {
 		t.Errorf("snapshot LossPct = %v, want %v", snap.LossPct, want)
 	}
 
-	// An open round is not in the probe counts or the loss.
+	// An open round is not in the probe counts, the loss or the snapshot's
+	// rounds (viaduct#262). Hop.Rounds counts it: the Rnd column shows the
+	// round under way.
 	h.MarkRoundSentProbes(7)
 	h.AddSample(ip, time.Millisecond, 0, KindPrimary)
-	check(t, "open round")
+	check(t, "open round", 2)
+	if got := h.Rounds(); got != 3 {
+		t.Errorf("open round: Rounds() = %d, want 3: it counts the open round", got)
+	}
 	if snap := h.LossSnapshot(); snap.ProbesSent != 14 || snap.ProbesReceived != 8 {
 		t.Errorf("open round: snapshot probes = %d, %d; want 14, 8", snap.ProbesSent, snap.ProbesReceived)
 	}
+
+	// Closing it brings it in.
+	h.MarkRoundEnd()
+	check(t, "third round closed", 3)
+
+	// After a reset the snapshot starts over.
+	h.Reset()
+	check(t, "after Reset", 0)
 }
