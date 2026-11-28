@@ -374,7 +374,8 @@ func (t *Tracer) SetOnRoundSent(r RoundMarker) { t.OnRound = r }
 func (t *Tracer) SetOnRoundEnd(f func()) { t.OnRoundEnd = f }
 
 // Run starts sending probes and listening. Results are sent to the results channel.
-// If a SentCounter is set, it is called each time a probe is dispatched.
+// If OnRound is set, it is called once per TTL per round with the probes sent;
+// OnRoundEnd, if set, is called when a round's replies have been waited for.
 // It runs continuously (like mtr) until the context is cancelled.
 // The protocol is determined by cfg.Protocol (ICMP, UDP, or TCP).
 func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
