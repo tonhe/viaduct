@@ -25,10 +25,22 @@ import (
 )
 
 var (
-	// version is injected by release builds (-ldflags "-X main.version=<tag>").
-	// Left at "dev", it is replaced at startup from the build info; see version.go.
-	version      = "dev"
-	buildVersion = "dev" // injected at build time via -ldflags
+	// version is set at link time (-ldflags "-X main.version=..."):
+	//
+	//   - GoReleaser sets it to the release version, the tag without its "v"
+	//     (.goreleaser.yml);
+	//   - make build sets it to git describe --tags --always --dirty, without
+	//     a leading "v" (Makefile).
+	//
+	// A build that injects nothing (go build, go install) leaves it at "dev",
+	// and init replaces it at startup from the build info: see resolveVersion
+	// in version.go.
+	version = "dev"
+	// buildVersion is set at link time too (-X main.buildVersion=...):
+	// GoReleaser sets it to the short commit hash, make build to a UTC
+	// timestamp (YYYYMMDD.HHMM). A build that injects nothing leaves it at
+	// "dev": nothing resolves it at startup.
+	buildVersion = "dev"
 )
 
 // tracerIface captures the methods runReport uses on probe.Tracer.
