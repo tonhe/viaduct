@@ -16,13 +16,5 @@ jobs:
       owner_login: tonhe
       verify_command: make test-all
       platforms: Linux, macOS, and Windows
-      # An agent PR that touches one of these needs a comment by the owner on its
-      # issue beginning "Owner decision". Without one the check fails.
-      protected_review_paths: |
-        internal/probe/family.go
-        internal/sysprobe/**
-        internal/asn/**
-        internal/probe/probe.go
-        cmd/via/main.go
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

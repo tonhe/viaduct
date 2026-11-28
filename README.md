@@ -64,7 +64,7 @@ make install    # builds and copies to ~/bin/
 > sudo setcap cap_net_raw+ep $(which via)
 > ```
 
-`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead.
+`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead. A flag error (`--no-paths` with another `--paths` value, an unknown `--output` format or protocol) is reported before that, without `sudo`.
 
 ---
 
@@ -114,6 +114,8 @@ via -r google.com
 
 **Auto mode** starts with UDP for ECMP discovery. If no responses are received after 3 rounds (~3 seconds), it automatically falls back to ICMP. The TUI header updates to reflect the active protocol.
 
+**What the flow count can miss.** A router that balances by port sends each flow to a next hop by what is in effect an even, independent draw, so a small number of flows can all land on the same one. With the default of 6 flows, a hop with two equal-cost next hops shows only one of them in about 1 run in 64, with every probe answered and nothing in the output to say a path went unseen. More flows lower the odds: about 1 in 256 with `--paths 8`, 1 in 4096 with `--paths 12`. With more than two next hops the chance of missing one is higher.
+
 **TCP mode by platform.** The destination's SYN-ACK or RST is what marks it as reached, and where `via` reads it differs:
 
 | Platform | TCP replies are read from | Status |
@@ -151,11 +153,13 @@ via -6 google.com       # IPv6
 
 If `-6` is requested and the target has no AAAA record (or the host has no IPv6 transport), `via` exits with a clear error rather than silently falling back.
 
-- **Capability:** a host counts as IPv6-capable only if it has a global or unique-local IPv6 address. A link-local address alone is not enough.
-- **Route pre-flight:** before probing an IPv6 target, `via` checks that the host has a route to it. If family was auto-selected and there is no IPv6 route, it falls back to IPv4 and shows `no IPv6 route to <address>; using IPv4` in the status bar (on stderr in report mode). With `-6` it exits with an error instead.
+- **Capability:** a host counts as IPv6-capable only if it has a global or unique-local IPv6 address. A link-local address alone is not enough, so on a host with only link-local IPv6, `-6` is refused for every target, `::1` included.
+- **Route pre-flight:** before probing an IPv6 target, `via` checks that the host has a route to it. If family was auto-selected and there is no IPv6 route, it falls back to IPv4 and shows `no IPv6 route to <address>; using IPv4` in the status bar (on stderr in report mode). With `-6` (or `ip_family = "6"` in the config) it exits with an error instead. A host whose only IPv6 address is unique-local (`fd00::/8`) counts as IPv6-capable, so it picks IPv6 for every dual-stack target and usually falls back to IPv4 here, with the notice shown once per target.
 - **IPv4-mapped addresses:** `::ffff:192.0.2.1` is traced as `192.0.2.1` over IPv4. Combining one with `-6` is an error.
 - **Multicast:** multicast targets (`224.0.0.0/4`, `ff00::/8`) are rejected at startup.
+- **Unspecified and broadcast:** `0.0.0.0`, `::` and `255.255.255.255` are rejected at startup. A name that also resolves to a unicast address uses that address.
 - **Link-local:** IPv6 link-local targets (`fe80::/10`), with or without a zone (`fe80::1%eth0`), are not supported and are rejected at startup.
+- **Zones:** any address with a zone (`2001:db8::1%eth0`) is rejected at startup. Give the address without `%zone`.
 - **Narrow terminals:** a 39-character address is shown in full where it fits. Where it does not, it is shortened in the middle (`2001:db8…55:6661`) so hops that share a prefix stay distinguishable.
 
 ---
@@ -168,7 +172,7 @@ Many routers rate-limit ICMP TTL Exceeded responses, causing tools like `mtr` an
 
 The `†` dagger in the loss column (`~N%†`) indicates a hop whose stats come from direct echo probes rather than TTL Exceeded replies. No configuration needed — it just works.
 
-**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. A probe that could not be sent (the socket refused the write, or did not take it within 100 ms) is not counted as sent and not counted as lost; a round in which nothing could be sent to a hop is not a round for that hop and does not count toward alerting. `Rnd` is the number of rounds.
+**How loss is counted.** Loss% is per probe: TTL-limited probes that got no reply, over probes sent, across completed rounds. A round still waiting for replies is not counted, so a live view never shows probes in flight as lost. A probe that could not be sent (the socket refused the write, or did not take it within 100 ms) is not counted as sent and not counted as lost; a round in which nothing could be sent to a hop is not a round for that hop and does not count toward alerting. `Rnd` is the number of rounds; past 99999 the hop table shows it in thousands or millions, rounded down (`123k`, `12M`). Probe Detail's `received/sent` counts are shortened the same way when they do not fit their column (`12k/123k`).
 
 **When a hop is marked rate-limited.** Only when the difference between its TTL-probe loss and its echo loss is statistically significant (p < 0.01) with at least 20 echo samples, so an ordinary lossy link, where both figures are noisy samples of the same loss, is not mistaken for rate limiting. The verdict is made for the hop: every TTL-limited probe sent to it, of every type, against every echo sent to its nodes. The destination is judged the same way, because a host throttles the Port Unreachable errors it sends in answer to UDP probes just as a router throttles Time Exceeded.
 
@@ -195,6 +199,21 @@ TUI, report mode and alerting all use the same figure, and the JSON carries it. 
 CSV carries the same figures as columns (`loss_pct` raw, plus `headline_loss_pct`, `loss_kind`, `rate_limited`, the per-probe-type counts, `echo_ignored`, the hop's echo totals as `hop_echo_sent` and `hop_echo_received`, and `verdict_held`, `verdict_probes_sent` and `verdict_probes_received`), and a DOT node label shows the hop's headline figure as the views render it (`~N%†`, `N%?` or a plain `N%`).
 
 Echoes go to the nodes of the path only, one per node per round, up to and including the destination.
+
+**Which hop is the destination.** The target can answer at more than one TTL. The first round probes every TTL and the target answers each probe that reaches it; load-balanced paths can differ in length, so one flow reaches the target a hop earlier than the others; and now and then a single probe takes a shorter path. The destination row is the lowest TTL at which the target answers and no router answers any flow that reaches the target. In UDP and TCP mode the flows that count are the UDP or TCP ones: the ICMP TTL probe sent beside them may be routed along a longer path, and a router that answers it counts only when the target answers none of the UDP or TCP probes. Only replies count as evidence; a probe that went unanswered does not, because a lost reply and a hop that answers nothing look the same. A lower TTL where the target answered once, or answers only some of the flows, is an ordinary hop that lists the target among its nodes, and it is judged like any other hop. The destination row's loss and rate-limit verdict are those of its own TTL: the probes sent with that TTL against the replies to them.
+
+- The first round in which the target answers settles the row at once, on the lowest TTL it answered at beyond the routers. A reply lost further out does not change that. A stray reply in that round (one probe that reached the target by a shorter path) is left out when routers answer between it and the target's distance. When nothing answers there, the row starts on the stray's TTL and is corrected by the slow upward move below: one round for each TTL in between, then 24 rounds.
+- After that the row moves only on evidence, and on how strong it is:
+  - Down, when the target answers at a lower TTL with no router there, in 3 rounds in a row.
+  - Up, when a router answers at the destination's TTL or beyond it, in 3 rounds: the path is longer.
+  - Up, when the target is merely silent at its TTL and answers further out: only after 24 rounds that all found it at the same further TTL and none nearer. Silence at the destination's TTL with answers beyond it is exactly what loss at the destination looks like, so a destination that loses probes, at any rate, keeps its row. A path that really gets longer through hops that answer nothing is followed 24 rounds after the target is found again.
+- When the target stops answering, the row stays where it is and shows the loss. The tracer meanwhile probes one TTL further each round, up to `--max-hops`, in case the path has become longer, and goes back to the destination's TTL as soon as the target answers there again. The rows this creates beyond the destination are not shown and get no echoes.
+- When the row moves, every hop keeps its own counts and its own verdict: nothing is carried from the old row to the new one. A row that was hidden beyond the destination has had no echoes, so its loss, if it has any, reads `N%?` until it has 20 echo samples of its own. The loss alert follows the destination to its new row and keeps its state (see [Destination Alerting](#destination-alerting)).
+- Not detected: flows whose path is longer through hops that answer nothing, while other flows still reach the target at the shorter distance. The row then stays at the shorter distance and those flows' unanswered probes count as loss there.
+- If the first round loses the probe at the target's distance, the row starts further out, on a TTL the target also answers at, and comes down when the target has answered nearer in 3 rounds in a row. At very high loss that can take a hundred rounds or more; the loss figure is the target's either way.
+- <kbd>r</kbd> clears the measurements and keeps the destination's TTL.
+
+The TUI, report mode, the exports, the debug log and alerting all use this one destination TTL.
 
 ---
 
@@ -225,6 +244,8 @@ Press <kbd>d</kbd> to cycle through five view presets:
 `via` monitors the destination hop for sustained degradation and alerts when thresholds are exceeded. By default, alerts fire when loss exceeds 5% for 3 consecutive rounds.
 
 When an alert fires, `via` walks backward through the hops to identify which hop and ASN is likely causing the problem, and displays the alert in a red bar above the status line.
+
+The alert is about the destination, whichever TTL its row is at. If the row moves to another TTL (see [Which hop is the destination](#rate-limit-detection)), the count of consecutive bad rounds and a raised alert carry over, and the hop named as affected is looked for again. A raised alert clears, as always, on the first round in which the destination, at its new row, is within the thresholds.
 
 Configure with `--alert-loss`, `--alert-latency`, and `--alert-rounds`. Disable with `--no-alert`. Press <kbd>r</kbd> to reset alert state.
 
@@ -291,7 +312,7 @@ In report mode (`-r`, or `-o`) with several targets, a target that fails does no
 
 Exports in multi-target mode group all targets: JSON uses a `targets` array, CSV adds a leading `target` column, and DOT produces a single digraph with shared-IP node merging. Report mode (`-r`) prints each target's table in sequence.
 
-Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`.
+Quitting the TUI prints a final summary table for every target, not only the focused one. The tables are in the order of the summary panel, with a blank line between them. A target that failed at startup gets one line in place of its table: `via — <target> — error: <message>`. In the table a hostname and an ASN label are cut to 20 characters' width, and a round count past 99999 is shown in thousands or millions, rounded down (`123k`), as in the hop table.
 
 ---
 
@@ -380,11 +401,11 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--count` | `-c` | 0 | Number of probe rounds (0 = infinite; report mode runs 10 when this is not set) |
 | `--first-ttl` | `-f` | 1 | Starting TTL |
 | `--psize` | `-s` | 64 | Payload size in bytes |
-| `--paths` | | 6 | Number of ECMP flows to probe |
-| `--no-paths` | | | Disable ECMP, single-path mode |
+| `--paths` | | 6 | Number of ECMP flows to probe, 1 to 32. A value outside that range is clamped with a warning |
+| `--no-paths` | | | Disable ECMP, single-path mode. The same as `--paths 1`; an error with any other `--paths` value |
 | `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
 | `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
-| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
+| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total). A target given twice is traced once; names are compared without regard to case |
 | `--report` | `-r` | | Report mode: non-interactive, run `--count` rounds (10 if not set), print table and exit. The last round waits up to `--timeout` for replies still outstanding, so a run can take up to one timeout longer than count × interval |
 | `--output` | `-o` | | Export format: `json`, `csv`, or `dot`, written to stdout (implies `--report`; see [Exporting from the command line](#exporting-from-the-command-line)) |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
@@ -417,8 +438,9 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 
 - **Source address**, at the start of each target's trace: one line for each socket that sends probes (`icmp socket`, `udp send socket` or `tcp send socket`, `echo socket`) with the source address it is bound to. A socket that could not be bound has one line that says why (`no source address was found at startup`, `binding to source address <address> failed: <error>`, an IPv6 link-local source address, or Windows) and ends `the socket is not bound and the kernel chooses the source address of each probe`. See [Source address](#source-address).
 - **Send failures**: each address a send failed for (once per address, with the error) and, for each round, the probes that could not be sent.
-- **Round line**, one per completed round: the time since the previous round closed, the probes sent in the round by type, the replies counted in the round by type, and how many of the hops probed answered none of their TTL-limited probes. A round in which every probed hop is silent reads `no reply from 8 of 8 hops probed`. A reply is counted in the round in which it arrives, as it is for loss.
-- **Snapshot**, one line per hop in the hop table, every 10 rounds (`snapshot`) and once at exit (`final`): the hop's addresses, its loss exactly as the views show it (`12.3%`, `85.7%?`, `~0%†`) with its kind, and the counts behind it as `sent/lost` over completed rounds: TTL-limited probes by type, direct echoes (`echo`), the echoes that count toward the verdict (`echo-counted`, which leaves out a node that ignores ping), the rate-limit verdict, whether the hop is holding an earlier verdict (`verdict-held=yes` while its echo totals are back below 20 samples, as `verdict_held` in the exports) and the TTL-limited probes that verdict was made from (`verdict-probes`, all types together; the current counts unless the verdict is held). A hop beyond the destination's TTL has the same fields and ends with `beyond=yes`. The views and exports leave those hops out. They are in the table because the first round probes every TTL before the destination's distance is known, and because a path that gets shorter leaves its old rows behind; echoes are not sent to them. The round line's totals include their probes. A `snapshot` set holds the figures its round closed with and is written when the next round closes, so its timestamp is one round later than its `round=`. The log of a run always ends with a `final` set. A run that ends on a multiple of 10 rounds has no `snapshot` set for its last round: the `final` set stands for it and includes any reply that arrived after the round closed. A run that is killed, or whose round loop stalls, right after a multiple of 10 rounds and before the next round closes has no hop lines for that round: its `snapshot` set was still waiting to be written. That set is missing by design, and the round lines up to that round are in the log.
+- **Round line**, one per completed round: the time since the previous round closed, the probes sent in the round by type, the replies counted in the round by type, and how many of the hops probed answered none of their TTL-limited probes. A round in which every probed hop is silent reads `no reply from 8 of 8 hops probed`. The hops counted are those up to the destination; TTLs probed beyond it (in round one, and while the tracer looks further out for a destination that did not answer) are counted apart at the end of the line, `; 2 TTLs probed beyond the destination`, and the sent and reply totals include their probes. A reply is counted in the round in which it arrives, as it is for loss.
+- **Snapshot**, one line per hop in the hop table, every 10 rounds (`snapshot`) and once at exit (`final`): the hop's addresses, its loss exactly as the views show it (`12.3%`, `85.7%?`, `~0%†`) with its kind, and the counts behind it as `sent/lost` over completed rounds: TTL-limited probes by type, direct echoes (`echo`), the echoes that count toward the verdict (`echo-counted`, which leaves out a node that ignores ping), the rate-limit verdict, whether the hop is holding an earlier verdict (`verdict-held=yes` while its echo totals are back below 20 samples, as `verdict_held` in the exports) and the TTL-limited probes that verdict was made from (`verdict-probes`, all types together; the current counts unless the verdict is held). A hop beyond the destination's TTL has the same fields and ends with `beyond=yes`. The views and exports leave those hops out. They are in the table because the first round probes every TTL before the destination's distance is known, because the tracer probes further out while the destination is not answering, and because a path that gets shorter leaves its old rows behind; echoes are not sent to them. The round line's totals include their probes. A `snapshot` set holds the figures its round closed with and is written when the next round closes, so its timestamp is one round later than its `round=`. The log of a run always ends with a `final` set. A run that ends on a multiple of 10 rounds has no `snapshot` set for its last round: the `final` set stands for it and includes any reply that arrived after the round closed. A run that is killed, or whose round loop stalls, right after a multiple of 10 rounds and before the next round closes has no hop lines for that round: its `snapshot` set was still waiting to be written. That set is missing by design, and the round lines up to that round are in the log.
+- **Destination moves**: a line when the destination row moves to another TTL, `round 14: destination moved from ttl=9 to ttl=8`.
 - **Alerts**: a line when an alert is raised and a line when it clears, with the alert's text. Report mode shows no alerts; its log records the ones the TUI would have raised with the same `--alert-*` settings.
 - **TCP replies** (`-P tcp` only), lines starting `tcp receive:`: where the destination's replies are read from (on macOS the BPF device, the interface, its link type and the filter in words), and after each round's sends and at exit the running totals: `round 12: tcp receive totals: 208 segments read, 72 from the target, 72 SYN-ACK/RST, 72 matched`. On Linux "segments read" counts every TCP segment the host received. On macOS a last line gives the capture's own counts when the device is closed.
 
@@ -463,6 +485,20 @@ warning: config: PingSupplement was removed in v0.3.0 and is ignored
 
 Saving settings from the menu writes only current keys, so the removed key is gone from the file after the next save. `ping_supplement` (also accepted as `PingSupplement`) is the only such key today.
 
+### Starting view (`display_mode`)
+
+`display_mode` in the config file, or **Display Mode** under Display & Enrichment in the settings menu (<kbd>Esc</kbd>), chooses the view `via` opens in:
+
+| `display_mode` | View |
+|----------------|------|
+| `default` | Default |
+| `health` | Health |
+| `latency` | Latency |
+| `variability` | Variability |
+| `probes` | Probe Detail |
+
+Changing Display Mode in the menu and saving switches the running view to the one chosen. Saving other settings with Display Mode left as it was keeps the view you are in. <kbd>d</kbd> still cycles the views and does not change the setting.
+
 ### Exporting from the TUI
 
 Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table to a file.
@@ -484,7 +520,7 @@ Press <kbd>e</kbd> during a trace to write a snapshot of the current hop table t
 
 `--output` / `-o` exports a trace without the TUI. It takes `json`, `csv` or `dot` (case-insensitive; `graphviz` is accepted for `dot`); any other value is an error.
 
-- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval.
+- **Report mode** — `-o` implies `--report`, so `-r` is optional. `via` runs `--count` rounds (10 if `-c` is not given), writes the export and exits. The last round stays open until its probes are answered or time out, so when a hop is silent the run can take up to one `--timeout` longer than count × interval. If the export cannot be written (a full disk, a closed pipe), `via` reports the write error and exits non-zero.
 - **Where it goes** — standard output. There is no file argument; redirect or pipe it. Warnings and errors go to stderr, so they stay out of the export.
 
 ```bash

@@ -37,6 +37,7 @@ type RoundDebug struct {
 	last   time.Time // when the previous round closed
 	rounds int
 	alert  string // the text of the alert that is raised, "" when none is
+	dest   int    // the destination's TTL when the previous round closed, 0 while unknown
 	prev   map[int]roundCounts
 	// held is the periodic snapshot of the last round closed, not yet
 	// written: the next round's close writes it, Final drops it.
@@ -96,8 +97,9 @@ func NewReportDebug(logf func(format string, args ...any), target, protocol stri
 	return d
 }
 
-// CloseRound closes the round on every hop of table and returns the TTLs
-// probes were sent to in that round.
+// CloseRound closes the round on every hop of table and on the table itself,
+// which settles the destination's TTL, and returns the TTLs probes were sent
+// to in that round.
 func CloseRound(table *hop.Table) map[int]bool {
 	hops := table.Snapshot()
 	sentTo := make(map[int]bool, len(hops))
@@ -107,6 +109,7 @@ func CloseRound(table *hop.Table) map[int]bool {
 		}
 		h.MarkRoundEnd()
 	}
+	table.EndRound()
 	return sentTo
 }
 
@@ -138,8 +141,14 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 	d.last = now
 
 	hops := table.Snapshot()
+	target := table.TargetTTL()
 	var sum roundCounts
-	probed, silent := 0, 0
+	// Hops probed and hops that answered nothing are counted up to the
+	// destination. Hops beyond it are probed in round one, and again while
+	// the tracer looks further out for a destination that did not answer;
+	// they are counted apart, so that a silent TTL nobody is shown does not
+	// read as a silent hop of the path.
+	probed, silent, beyond := 0, 0, 0
 	for _, h := range hops {
 		var c roundCounts
 		c.icmpSent, c.icmpRecvd, c.primarySent, c.primaryRecvd = h.ProbeCountsByType()
@@ -157,7 +166,11 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 		sum.primaryRecvd += delta.primaryRecvd
 		sum.echoSent += delta.echoSent
 		sum.echoRecvd += delta.echoRecvd
-		if delta.icmpSent+delta.primarySent > 0 {
+		switch {
+		case delta.icmpSent+delta.primarySent == 0:
+		case target > 0 && h.TTL > target:
+			beyond++
+		default:
 			probed++
 			if delta.icmpRecvd+delta.primaryRecvd == 0 {
 				silent++
@@ -171,14 +184,25 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 		}
 		return s + fmt.Sprintf(" icmp-echo=%d", echo)
 	}
-	d.printf("round %d: took %v; sent %s; replies %s; no reply from %d of %d hops probed",
+	line := fmt.Sprintf("round %d: took %v; sent %s; replies %s; no reply from %d of %d hops probed",
 		d.rounds, took.Round(time.Millisecond),
 		byType(sum.icmpSent, sum.primarySent, sum.echoSent),
 		byType(sum.icmpRecvd, sum.primaryRecvd, sum.echoRecvd),
 		silent, probed)
+	if beyond > 0 {
+		line += fmt.Sprintf("; %d TTLs probed beyond the destination", beyond)
+	}
+	d.printf("%s", line)
+
+	if d.dest != 0 && target != 0 && target != d.dest {
+		d.printf("round %d: destination moved from ttl=%d to ttl=%d", d.rounds, d.dest, target)
+	}
+	if target != 0 {
+		d.dest = target
+	}
 
 	if d.drive {
-		d.engine.ObserveRound(hops, sentTo, alertMaxTTL(table, table.TargetTTL()))
+		d.engine.ObserveRound(hops, sentTo, alertMaxTTL(table, target))
 	}
 	d.logAlert()
 

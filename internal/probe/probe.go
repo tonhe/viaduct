@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tonhe/viaduct/internal/dest"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -291,11 +292,14 @@ type Tracer struct {
 	cfg           Config
 	target        net.IP
 	pm            *probeMap
-	targetTTL     int32 // atomically set when target is reached; 0 = not yet found
+	targetTTL     int32 // atomic: the highest TTL a round probes; 0 = target not yet found, probe every TTL
 	responseCount int32 // atomic: tracks responses received by listen()
 	OnRound       RoundMarker
 	OnRoundEnd    func() // called at end of each probe round
 	Paused        int32  // atomic: 1 = paused, 0 = running
+
+	// dest corrects targetTTL when each round closes (destination.go).
+	dest dest.Tracker
 
 	// icmpProto is constructed once at Tracer creation and reused across all
 	// listener calls. Constructing it per-packet in identifyAny was wasteful;
@@ -370,7 +374,8 @@ func (t *Tracer) SetOnRoundSent(r RoundMarker) { t.OnRound = r }
 func (t *Tracer) SetOnRoundEnd(f func()) { t.OnRoundEnd = f }
 
 // Run starts sending probes and listening. Results are sent to the results channel.
-// If a SentCounter is set, it is called each time a probe is dispatched.
+// If OnRound is set, it is called once per TTL per round with the probes sent;
+// OnRoundEnd, if set, is called when a round's replies have been waited for.
 // It runs continuously (like mtr) until the context is cancelled.
 // The protocol is determined by cfg.Protocol (ICMP, UDP, or TCP).
 func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
@@ -412,8 +417,11 @@ func (t *Tracer) Run(ctx context.Context, results chan<- Result) error {
 func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- Result) error {
 	proto := t.cfg.Protocol
 
-	// icmpProto is used for the tier-1 ICMP TTL probe every round, regardless
-	// of primary protocol. It shares cfg.ICMPID with the listener demux.
+	// icmpProto builds the tier-1 ICMP TTL probe every round, regardless of
+	// primary protocol. Its ID is cfg.ICMPID when that is set. When it is 0
+	// this object draws its own random ID, which is not the one the listener's
+	// t.icmpProto drew. That is harmless: IdentifyResponse does not consult
+	// the ID, and replies are matched against the probe map.
 	icmpProto := NewICMPProtocol(t.cfg)
 	primaryType := ProbeTypeForProtocolName(proto.Name())
 
@@ -513,6 +521,7 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		if reached := int(atomic.LoadInt32(&t.targetTTL)); reached > 0 {
 			maxTTL = reached
 		}
+		probedTo := 0 // the highest TTL a probe was written for this round
 
 		for ttl := t.cfg.FirstTTL; ttl <= maxTTL; ttl++ {
 			// Cheap context/pause check per TTL — before tier 1.
@@ -586,6 +595,10 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 				}
 			}
 
+			if icmpSent+primarySent > 0 {
+				probedTo = ttl
+			}
+
 			// One round-sent notification per TTL per round, carrying the
 			// number of probes that went out.
 			if t.OnRound != nil {
@@ -650,6 +663,8 @@ func (t *Tracer) run(ctx context.Context, conn *icmp.PacketConn, results chan<- 
 		if lastRound {
 			t.awaitFinalReplies(ctx)
 		}
+		// The round's replies are in: settle how far the next round probes.
+		t.endDestinationRound(probedTo)
 		if t.OnRoundEnd != nil {
 			t.OnRoundEnd()
 		}
@@ -884,17 +899,22 @@ func (t *Tracer) checkAutoFallback() {
 	}
 	// No responses — fallback to ICMP
 	auto.Fallback()
-	atomic.StoreInt32(&t.targetTTL, 0)
+	t.resetDestination()
 	if t.cfg.OnProtocolSwitch != nil {
 		t.cfg.OnProtocolSwitch("icmp")
 	}
 }
 
-// listen reads ICMP responses and matches them to outstanding probes.
-// It handles responses for all protocol modes:
-//   - ICMP Echo Reply: destination reached (ICMP mode only)
-//   - ICMP Time Exceeded: intermediate hop (all modes) — uses Protocol.IdentifyResponse
-//   - ICMP Destination Unreachable: destination reached (UDP/TCP) — uses Protocol.IdentifyResponse
+// listen reads ICMP messages and matches them to outstanding probes, in
+// every protocol mode:
+//   - Echo Reply: answers a tier-1 ICMP TTL probe or an echo-tier probe. It
+//     is matched on its ID and sequence, and only when it comes from the
+//     address that probe was sent to.
+//   - Time Exceeded: an intermediate hop. The quoted packet is identified by
+//     identifyAny (the primary protocol first, then ICMP) and must be
+//     addressed to the target.
+//   - Destination Unreachable: identified the same way. Whether it means the
+//     destination was reached is the primary protocol's IsDestReachedICMP.
 //
 // conn accepts any icmpPacketConn; in production this is *icmp.PacketConn,
 // and in tests it is a fakeICMPConn driven by channels.
@@ -911,6 +931,11 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				// The socket is closed and every further read fails at
+				// once: return, or this loop spins until ctx is cancelled.
+				return
+			}
 			continue // timeout or error, loop back and check ctx
 		}
 
@@ -1015,6 +1040,7 @@ func (t *Tracer) listen(ctx context.Context, conn icmpPacketConn, results chan<-
 		if isTarget {
 			atomic.CompareAndSwapInt32(&t.targetTTL, 0, int32(rec.ttl))
 		}
+		t.noteDestinationReply(rec, isTarget)
 		rtt := time.Since(rec.sentAt)
 
 		select {

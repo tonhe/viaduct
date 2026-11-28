@@ -651,12 +651,15 @@ func TestConfigDir_XDGEmpty(t *testing.T) {
 		t.Skip("XDG not used on Windows")
 	}
 
+	// HOME is set here too, so the test does not depend on the home directory
+	// of whoever runs it.
+	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", home)
 
 	got := configDir()
-	// Must end with /.config/via or ./config/via (when HOME is also empty)
-	if !strings.HasSuffix(got, filepath.Join(".config", "via")) {
-		t.Errorf("configDir() with no XDG = %q, expected suffix '.config/via'", got)
+	if want := filepath.Join(home, ".config", "via"); got != want {
+		t.Errorf("configDir() with no XDG = %q, want %q", got, want)
 	}
 }
 

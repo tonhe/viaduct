@@ -85,8 +85,8 @@ func TestParseInnerHeader_IPv4_TCP(t *testing.T) {
 	pkt := []byte{
 		0x45, 0x00, 0x00, 0x2c, 0xab, 0xcd, 0x00, 0x00,
 		0x40, 0x06, 0x00, 0x00,
-		10, 0, 0, 1,
-		93, 184, 216, 34,
+		192, 0, 2, 1,
+		198, 51, 100, 34,
 		0xc3, 0x50,
 		0x01, 0xbb,
 		0, 0, 0, 1, 0, 0, 0, 0,
@@ -95,11 +95,11 @@ func TestParseInnerHeader_IPv4_TCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !src.Equal(net.ParseIP("10.0.0.1")) {
-		t.Errorf("src = %v, want 10.0.0.1", src)
+	if !src.Equal(net.ParseIP("192.0.2.1")) {
+		t.Errorf("src = %v, want 192.0.2.1", src)
 	}
-	if !dst.Equal(net.ParseIP("93.184.216.34")) {
-		t.Errorf("dst = %v, want 93.184.216.34", dst)
+	if !dst.Equal(net.ParseIP("198.51.100.34")) {
+		t.Errorf("dst = %v, want 198.51.100.34", dst)
 	}
 	if proto != 6 {
 		t.Errorf("proto = %d, want 6", proto)
@@ -117,7 +117,7 @@ func TestParseInnerHeader_IPv6_UDP(t *testing.T) {
 		0x60, 0, 0, 0,
 		0, 8, 17, 64,
 		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
 		0xc3, 0x50,
 		0x01, 0xbb,
 		0, 8, 0, 0,
@@ -129,8 +129,8 @@ func TestParseInnerHeader_IPv6_UDP(t *testing.T) {
 	if !src.Equal(net.ParseIP("2001:db8::1")) {
 		t.Errorf("src = %v, want 2001:db8::1", src)
 	}
-	if !dst.Equal(net.ParseIP("2606:4700::6810:80f0")) {
-		t.Errorf("dst = %v, want 2606:4700::6810:80f0", dst)
+	if !dst.Equal(net.ParseIP("2001:db8::6810:80f0")) {
+		t.Errorf("dst = %v, want 2001:db8::6810:80f0", dst)
 	}
 	if proto != 17 {
 		t.Errorf("proto = %d, want 17", proto)
@@ -147,7 +147,7 @@ func TestParseInnerHeader_IPv6_WithFragmentHeader(t *testing.T) {
 		0x60, 0, 0, 0,
 		0, 16, 44, 64, // payload len=16, next=44 (Fragment)
 		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
 		// Fragment header (fixed 8 bytes): next=17 (UDP), reserved=0, frag offset/M=0, identification=0
 		17, 0, 0, 0, 0, 0, 0, 0,
 		// UDP
@@ -160,8 +160,8 @@ func TestParseInnerHeader_IPv6_WithFragmentHeader(t *testing.T) {
 	if !src.Equal(net.ParseIP("2001:db8::1")) {
 		t.Errorf("src = %v, want 2001:db8::1", src)
 	}
-	if !dst.Equal(net.ParseIP("2606:4700::6810:80f0")) {
-		t.Errorf("dst = %v, want 2606:4700::6810:80f0", dst)
+	if !dst.Equal(net.ParseIP("2001:db8::6810:80f0")) {
+		t.Errorf("dst = %v, want 2001:db8::6810:80f0", dst)
 	}
 	if proto != 17 {
 		t.Errorf("proto = %d, want 17 (UDP)", proto)
@@ -188,8 +188,8 @@ func TestParseInnerHeader_TooShort(t *testing.T) {
 // with a value captured from real via output and verified by Wireshark.
 // See scripts/capture-references.sh.
 func TestTCPChecksum_IPv4(t *testing.T) {
-	src := net.IPv4(10, 0, 0, 1)
-	dst := net.IPv4(93, 184, 216, 34)
+	src := net.IPv4(192, 0, 2, 1)
+	dst := net.IPv4(198, 51, 100, 34)
 	hdr := []byte{
 		0xc3, 0x50, 0x01, 0xbb,
 		0, 0, 0, 1, 0, 0, 0, 0,
@@ -207,7 +207,7 @@ func TestTCPChecksum_IPv4(t *testing.T) {
 
 func TestTCPChecksum_IPv6(t *testing.T) {
 	src := net.ParseIP("2001:db8::1")
-	dst := net.ParseIP("2606:4700::6810:80f0")
+	dst := net.ParseIP("2001:db8::6810:80f0")
 	hdr := []byte{
 		0xc3, 0x50, 0x01, 0xbb,
 		0, 0, 0, 1, 0, 0, 0, 0,
@@ -273,10 +273,10 @@ func TestTransportOffset(t *testing.T) {
 }
 
 func TestASNReverseName_IPv4(t *testing.T) {
-	got := ASNReverseName(4, net.ParseIP("1.2.3.4"))
-	want := "4.3.2.1.origin.asn.cymru.com"
+	got := ASNReverseName(4, net.ParseIP("192.0.2.4"))
+	want := "4.2.0.192.origin.asn.cymru.com"
 	if got != want {
-		t.Errorf("ASNReverseName(4, 1.2.3.4) = %q, want %q", got, want)
+		t.Errorf("ASNReverseName(4, 192.0.2.4) = %q, want %q", got, want)
 	}
 }
 

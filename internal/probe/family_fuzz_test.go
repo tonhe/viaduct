@@ -11,11 +11,11 @@ import (
 func FuzzParseInnerHeader(f *testing.F) {
 	// Seeds: canonical v4 TCP, canonical v6 UDP, truncated, malformed
 	f.Add(4, []byte{0x45, 0x00, 0x00, 0x2c, 0xab, 0xcd, 0x00, 0x00,
-		0x40, 0x06, 0x00, 0x00, 10, 0, 0, 1, 93, 184, 216, 34,
+		0x40, 0x06, 0x00, 0x00, 192, 0, 2, 1, 198, 51, 100, 34,
 		0xc3, 0x50, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0})
 	f.Add(6, []byte{0x60, 0, 0, 0, 0, 8, 17, 64,
 		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
 		0xc3, 0x50, 0x01, 0xbb, 0, 8, 0, 0})
 	f.Add(4, []byte{0x45})    // truncated
 	f.Add(6, []byte{0x60, 0}) // truncated
@@ -54,7 +54,7 @@ func FuzzTransportOffset(f *testing.F) {
 // src/dst/segment inputs — real inputs come from wire and can be anything.
 func FuzzTCPChecksum(f *testing.F) {
 	// Seed with v4 + v6 canonical + odd/short segments
-	f.Add(4, []byte{10, 0, 0, 1}, []byte{93, 184, 216, 34}, []byte{0, 0, 0, 0})
+	f.Add(4, []byte{192, 0, 2, 1}, []byte{198, 51, 100, 34}, []byte{0, 0, 0, 0})
 	f.Add(6, make([]byte, 16), make([]byte, 16), []byte{0xff})
 	f.Add(4, []byte{}, []byte{}, []byte{})
 	f.Fuzz(func(t *testing.T, v int, src, dst, seg []byte) {

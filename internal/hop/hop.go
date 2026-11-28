@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/tonhe/viaduct/internal/dest"
 )
 
 // Hop holds the state for a single TTL hop.
@@ -290,6 +292,10 @@ func (h *Hop) StDev() float64 {
 func (h *Hop) LossPercent() float64 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.lossPercentLocked()
+}
+
+func (h *Hop) lossPercentLocked() float64 {
 	if h.closedSent == 0 {
 		return 0
 	}
@@ -620,17 +626,27 @@ type LossSnapshot struct {
 	VerdictHeld           bool
 	VerdictProbesSent     int
 	VerdictProbesReceived int
+	// ProbesSent and ProbesReceived are ProbeCounts, LossPct is LossPercent
+	// and Rounds is Rounds, read with the figures above.
+	ProbesSent     int
+	ProbesReceived int
+	LossPct        float64
+	Rounds         int
 }
 
 // LossSnapshot returns the hop's headline loss, its kind, its rate-limit
 // verdict, the echo totals they were made from (see VerdictEchoTotals), the
 // nodes left out of those totals (see EchoIgnored), whether the verdict is a
 // held one and the TTL-probe counts it was made from (see VerdictHeld and
-// VerdictProbeCounts), all from one state.
+// VerdictProbeCounts), and its probe counts, per-probe loss and rounds (see
+// ProbeCounts, LossPercent and Rounds), all from one state.
 func (h *Hop) LossSnapshot() LossSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	var snap LossSnapshot
+	snap.ProbesSent, snap.ProbesReceived = h.closedSent, h.closedRecvd
+	snap.LossPct = h.lossPercentLocked()
+	snap.Rounds = h.roundsSent
 	snap.Loss, snap.Kind = h.lossLocked()
 	snap.RateLimit = h.rateLimitStateLocked()
 	snap.EchoSent, snap.EchoReceived = h.echoTotalsLocked()
@@ -754,6 +770,9 @@ type Table struct {
 	maxHops int
 	hops    map[int]*Hop
 	mu      sync.RWMutex
+
+	// dest follows which TTL is the destination's (destination.go).
+	dest dest.Tracker
 }
 
 // NewTable creates a hop table with the given max hop limit.
@@ -816,19 +835,6 @@ func (t *Table) Snapshot() []*Hop {
 	return result
 }
 
-// TargetTTL returns the destination's distance: the lowest TTL at which a
-// node marked as the target has answered, or 0 while it has not.
-func (t *Table) TargetTTL() int {
-	for _, h := range t.Snapshot() {
-		for _, n := range h.GetNodes() {
-			if n.IsTarget() {
-				return h.TTL
-			}
-		}
-	}
-	return 0
-}
-
 // EchoNode is a node to send direct echoes to, and the hop it belongs to.
 type EchoNode struct {
 	IP  net.IP
@@ -864,7 +870,9 @@ func (t *Table) MaxTTLSeen() int {
 	return t.maxTTLSeenLocked()
 }
 
-// ResetAll resets stats on all hops.
+// ResetAll resets stats on all hops. The destination's TTL is kept: a reset
+// clears what was measured, not where the target is, and the tracer keeps
+// probing up to it.
 func (t *Table) ResetAll() {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

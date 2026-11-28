@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/tonhe/viaduct/internal/export"
 	"github.com/tonhe/viaduct/internal/hop"
 )
 
@@ -409,37 +411,109 @@ func TestOnMainKey_Export(t *testing.T) {
 }
 
 // TestExportCmd_NoRaceOnSessionFields verifies that exportCmd snapshots all
-// session scalar fields before building the closure, so concurrent mutations
-// by the update loop cannot race with the async tea.Cmd goroutine.
+// session scalar fields before building the closure, so mutations by the
+// update loop after the key press neither race with the async tea.Cmd
+// goroutine nor change what is exported.
 //
-// Under -race this test fails on the pre-fix code (closure read s.probeCount
-// etc. through the live *TargetSession while the loop writes them) and passes
-// after the fix (locals captured at call site, no shared pointer reads).
+// The session's fields are changed after exportCmd returns and before the
+// closure runs, and the exported file must still describe the session as it
+// was at the key press. A closure that read a field through the live
+// *TargetSession would export the changed value and fail here, with or
+// without -race. The fields keep changing while the closure runs, so under
+// -race such a read is also reported as a data race.
 func TestExportCmd_NoRaceOnSessionFields(t *testing.T) {
-	// Write the export file to a throw-away directory so the test is
-	// hermetic and leaves no files behind in the working directory.
-	t.Chdir(t.TempDir())
+	// The session as it is when the export key is pressed: four hops in the
+	// table, the destination at TTL 2.
+	const wantTarget, wantIP, wantProto, wantHops = "example.com", "192.0.2.1", "udp", 2
 
-	m := newTestModel()
-
-	// Obtain the cmd while the session is in a known state.
-	cmd := m.exportCmd()
-
-	done := make(chan struct{})
-
-	// Run the closure in a goroutine — this is what tea does with tea.Cmd.
-	go func() {
-		defer close(done)
-		cmd() // reads the snapshotted locals; must not touch s.*
-	}()
-
-	// Simulate the update-loop writing session scalars concurrently.
-	for i := range 100 {
-		m.sessions[0].probeCount = i
-		m.sessions[0].maxTTLHit = i % 30
+	// change is what the update loop may do to a session afterwards.
+	change := func(s *TargetSession, i int) {
+		s.target = "changed.example"
+		s.targetIP = net.ParseIP("198.51.100.99")
+		s.protocolName = "tcp"
+		s.probeCount = i
+		s.maxTTLHit = 3 + i%2
+	}
+	check := func(t *testing.T, r export.Report) {
+		t.Helper()
+		if r.Target != wantTarget || r.TargetIP != wantIP || r.Protocol != wantProto {
+			t.Errorf("exported target %q (%s) over %q, want %q (%s) over %q: the closure read the live session",
+				r.Target, r.TargetIP, r.Protocol, wantTarget, wantIP, wantProto)
+		}
+		if len(r.Hops) != wantHops {
+			t.Errorf("exported %d hops, want %d (maxTTLHit at the key press): the closure read the live session",
+				len(r.Hops), wantHops)
+		}
 	}
 
-	<-done
+	for _, tc := range []struct {
+		name     string
+		sessions int
+	}{
+		{"single target", 1},
+		{"multi target", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Write the export file to a throw-away directory so the test is
+			// hermetic and leaves no files behind in the working directory.
+			t.Chdir(t.TempDir())
+
+			m := newTestModel(hopsFull())
+			m.sessions[0].maxTTLHit = wantHops
+			for len(m.sessions) < tc.sessions {
+				second := newTestModel(hopsFull()).sessions[0]
+				second.maxTTLHit = wantHops
+				m.sessions = append(m.sessions, second)
+			}
+
+			// Obtain the cmd while the sessions are in the known state.
+			cmd := m.exportCmd()
+
+			// The update loop changes every field before the closure starts...
+			for _, s := range m.sessions {
+				change(s, 0)
+			}
+
+			// Run the closure in a goroutine — this is what tea does with tea.Cmd.
+			msgCh := make(chan tea.Msg, 1)
+			go func() { msgCh <- cmd() }()
+
+			// ...and keeps writing them while it runs.
+			for i := range 100 {
+				for _, s := range m.sessions {
+					change(s, i)
+				}
+			}
+
+			done, ok := (<-msgCh).(ExportDoneMsg)
+			if !ok || done.Err != nil {
+				t.Fatalf("export: msg = %+v, want an ExportDoneMsg without an error", done)
+			}
+			raw, err := os.ReadFile(done.Path)
+			if err != nil {
+				t.Fatalf("reading the export: %v", err)
+			}
+
+			if tc.sessions == 1 {
+				var r export.Report
+				if err := json.Unmarshal(raw, &r); err != nil {
+					t.Fatalf("parsing the export: %v\n%s", err, raw)
+				}
+				check(t, r)
+				return
+			}
+			var mr export.MultiReport
+			if err := json.Unmarshal(raw, &mr); err != nil {
+				t.Fatalf("parsing the export: %v\n%s", err, raw)
+			}
+			if len(mr.Targets) != tc.sessions {
+				t.Fatalf("exported %d targets, want %d", len(mr.Targets), tc.sessions)
+			}
+			for _, r := range mr.Targets {
+				check(t, r)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

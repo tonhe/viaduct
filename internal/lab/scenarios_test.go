@@ -622,11 +622,20 @@ func TestMultiTargetIsolation(t *testing.T) {
 
 // Scenario 10: r2 has two equal-cost next hops toward dst1. UDP flows with
 // different source ports must reveal both, with nothing lost.
+//
+// r2 picks the next hop from a hash of each probe's addresses and ports, with
+// a seed the kernel draws at boot, and via draws its first source port at
+// random. Which flow takes which next hop therefore differs from run to run,
+// and each flow is an even, independent draw. With via's default of 6 flows,
+// all of them land on the next hop the ICMP TTL probe takes in 1 run in 64,
+// and the hop then shows one router. The scenario uses 32 flows, the most via
+// allows, which puts those odds at 1 in 2^32.
 func TestECMPDiscoversBothPaths(t *testing.T) {
+	const flows = 32
 	const rounds = 10
 	reset(t)
 	script(t, "scenarios/ecmp.sh")
-	r := via(t, "-c", strconv.Itoa(rounds), "-i", "200ms", dst1V4)
+	r := via(t, "-c", strconv.Itoa(rounds), "-i", "200ms", "--paths", strconv.Itoa(flows), dst1V4)
 	h := hopByTTL(t, r, 3)
 	got := map[string]bool{}
 	for _, n := range h.Nodes {
@@ -635,7 +644,8 @@ func TestECMPDiscoversBothPaths(t *testing.T) {
 	if !got[r3V4] || !got[r3bV4] || len(got) != 2 {
 		t.Errorf("TTL 3 nodes = %v, want exactly %s and %s", got, r3V4, r3bV4)
 	}
-	if sent := rounds * 7; h.ProbesSent != sent || h.ProbesReceived != sent {
+	// Each round sends one ICMP TTL probe and one UDP probe per flow.
+	if sent := rounds * (1 + flows); h.ProbesSent != sent || h.ProbesReceived != sent {
 		t.Errorf("TTL 3 probes sent/received = %d/%d, want %d/%d", h.ProbesSent, h.ProbesReceived, sent, sent)
 	}
 }

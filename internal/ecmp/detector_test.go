@@ -13,27 +13,27 @@ func makeTestTable() *hop.Table {
 
 	// TTL 1: single IP (all flows)
 	h1 := t.GetOrCreate(1)
-	ip1 := net.ParseIP("10.0.0.1")
+	ip1 := net.ParseIP("192.0.2.1")
 	h1.AddSample(ip1, 5*time.Millisecond, 0, hop.KindPrimary)
 	h1.AddSample(ip1, 5*time.Millisecond, 1, hop.KindPrimary)
 	h1.AddSample(ip1, 5*time.Millisecond, 2, hop.KindPrimary)
 
 	// TTL 2: single IP
 	h2 := t.GetOrCreate(2)
-	ip2 := net.ParseIP("10.0.1.1")
+	ip2 := net.ParseIP("198.51.100.1")
 	h2.AddSample(ip2, 10*time.Millisecond, 0, hop.KindPrimary)
 	h2.AddSample(ip2, 10*time.Millisecond, 1, hop.KindPrimary)
 	h2.AddSample(ip2, 10*time.Millisecond, 2, hop.KindPrimary)
 
 	// TTL 3: DIVERGENCE — two IPs
 	h3 := t.GetOrCreate(3)
-	h3.AddSample(net.ParseIP("10.0.2.1"), 12*time.Millisecond, 0, hop.KindPrimary)
-	h3.AddSample(net.ParseIP("10.0.2.1"), 12*time.Millisecond, 1, hop.KindPrimary)
-	h3.AddSample(net.ParseIP("10.0.2.2"), 15*time.Millisecond, 2, hop.KindPrimary)
+	h3.AddSample(net.ParseIP("203.0.113.1"), 12*time.Millisecond, 0, hop.KindPrimary)
+	h3.AddSample(net.ParseIP("203.0.113.1"), 12*time.Millisecond, 1, hop.KindPrimary)
+	h3.AddSample(net.ParseIP("203.0.113.2"), 15*time.Millisecond, 2, hop.KindPrimary)
 
 	// TTL 4: CONVERGENCE — single IP again
 	h4 := t.GetOrCreate(4)
-	ip4 := net.ParseIP("10.0.3.1")
+	ip4 := net.ParseIP("203.0.113.31")
 	h4.AddSample(ip4, 20*time.Millisecond, 0, hop.KindPrimary)
 	h4.AddSample(ip4, 20*time.Millisecond, 1, hop.KindPrimary)
 	h4.AddSample(ip4, 20*time.Millisecond, 2, hop.KindPrimary)
@@ -66,7 +66,7 @@ func TestDetectConvergence(t *testing.T) {
 func TestNoDivergence(t *testing.T) {
 	table := hop.NewTable(10)
 	h := table.GetOrCreate(1)
-	h.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h.AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
 	result := Analyze(table)
 	if len(result.DivergencePoints) != 0 {
 		t.Fatalf("expected 0 divergence, got %d", len(result.DivergencePoints))
@@ -89,8 +89,8 @@ func TestAnalyzeEmptyTable(t *testing.T) {
 func TestAnalyzeSingleHop(t *testing.T) {
 	table := hop.NewTable(10)
 	h := table.GetOrCreate(1)
-	h.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
-	h.AddSample(net.ParseIP("10.0.0.2"), 5*time.Millisecond, 1, hop.KindPrimary)
+	h.AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h.AddSample(net.ParseIP("192.0.2.2"), 5*time.Millisecond, 1, hop.KindPrimary)
 	result := Analyze(table)
 	if len(result.DivergencePoints) != 0 || len(result.ConvergencePoints) != 0 {
 		t.Fatalf("expected empty result for single hop, got div=%v conv=%v",
@@ -108,12 +108,12 @@ func TestAnalyzeTwoHopDivergence(t *testing.T) {
 	table := hop.NewTable(10)
 	// TTL 1: single IP
 	h1 := table.GetOrCreate(1)
-	h1.AddSample(net.ParseIP("10.0.0.1"), 5*time.Millisecond, 0, hop.KindPrimary)
+	h1.AddSample(net.ParseIP("192.0.2.1"), 5*time.Millisecond, 0, hop.KindPrimary)
 
 	// TTL 2: two IPs — divergence
 	h2 := table.GetOrCreate(2)
-	h2.AddSample(net.ParseIP("10.0.1.1"), 10*time.Millisecond, 0, hop.KindPrimary)
-	h2.AddSample(net.ParseIP("10.0.1.2"), 10*time.Millisecond, 1, hop.KindPrimary)
+	h2.AddSample(net.ParseIP("198.51.100.1"), 10*time.Millisecond, 0, hop.KindPrimary)
+	h2.AddSample(net.ParseIP("198.51.100.2"), 10*time.Millisecond, 1, hop.KindPrimary)
 
 	result := Analyze(table)
 	if len(result.DivergencePoints) != 1 || result.DivergencePoints[0] != 2 {

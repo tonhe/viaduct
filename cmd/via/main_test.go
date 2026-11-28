@@ -316,11 +316,11 @@ type stubTracer struct {
 	// capturedCfg records the Config passed at construction (set externally).
 	capturedCfg probe.Config
 
-	results        []probe.Result
-	onRound        probe.RoundMarker
-	onRoundEnd     func()
-	onEchoSent     func(ip net.IP, ttl int)
-	echoSubmitted  [][]probe.EchoTarget // one entry per SubmitEchoTargets call
+	results       []probe.Result
+	onRound       probe.RoundMarker
+	onRoundEnd    func()
+	onEchoSent    func(ip net.IP, ttl int)
+	echoSubmitted [][]probe.EchoTarget // one entry per SubmitEchoTargets call
 }
 
 func (s *stubTracer) SetOnRoundSent(r probe.RoundMarker) { s.onRound = r }
@@ -635,7 +635,7 @@ func baseProbeConfig() probe.Config {
 		NoDNS:       false,
 		ReportMode:  false,
 		NumPaths:    6,
-		IPVersion: 4,
+		IPVersion:   4,
 	}
 	cfg.Protocol, _ = buildProtocol("udp", 0, &cfg.NumPaths, cfg)
 	return cfg
@@ -653,7 +653,7 @@ func TestResolveTargetSpecs_MixedSuccess(t *testing.T) {
 		return nil, fmt.Errorf("unexpected host %q", host)
 	}
 	initPortAllocator(2)
-	specs := resolveTargetSpecs([]string{"v4.example", "bad.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+	specs := resolveTargetSpecs([]string{"v4.example", "bad.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 	if len(specs) != 2 {
 		t.Fatalf("specs = %d, want 2", len(specs))
 	}
@@ -674,7 +674,7 @@ func TestResolveTargetSpecs_PortBlocks(t *testing.T) {
 		return []net.IP{net.ParseIP("192.0.2.10")}, nil
 	}
 	initPortAllocator(2)
-	specs := resolveTargetSpecs([]string{"a.example", "b.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+	specs := resolveTargetSpecs([]string{"a.example", "b.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 	wantBase0, wantID0, _ := sessionPorts(0)
 	wantBase1, wantID1, _ := sessionPorts(1)
 	if specs[1].Cfg.BasePort != wantBase1 {
@@ -711,7 +711,7 @@ func TestResolveTargetSpecs_EmptyAnswer(t *testing.T) {
 
 	specs := resolveTargetSpecs(
 		[]string{"ok.example", "empty.example"},
-		false, false, true, true,
+		false, false, "", true, true,
 		baseProbeConfig(), "udp", lookup,
 	)
 
@@ -733,7 +733,8 @@ func TestResolveTargetSpecs_EmptyAnswer(t *testing.T) {
 // is Undetermined. The rendering must come from the hop table alone.
 
 // seedHopRateLimit populates an already-created hop with per-kind samples
-// that drive the hop's RateLimitState.
+// that drive the hop's RateLimitState. Sends and answers are interleaved
+// round by round: an answer arrives before the next round's echo is sent.
 func seedHopRateLimit(t *testing.T, tbl *hop.Table, ttl int, ip net.IP, ttlRounds, ttlRecv, echoSent, echoRecv int) *hop.Hop {
 	t.Helper()
 	h := tbl.GetOrCreate(ttl)
@@ -744,17 +745,26 @@ func seedHopRateLimit(t *testing.T, tbl *hop.Table, ttl int, ip net.IP, ttlRound
 	if pn == nil {
 		t.Fatalf("PrimaryNode nil after seeding sample at ttl %d", ttl)
 	}
-	for i := 0; i < ttlRounds; i++ {
-		if i < ttlRecv {
-			pn.AddSample(time.Millisecond, 0, hop.KindICMPTTL)
+	// Round by round, as a session runs: the round's TTL probe and its
+	// answer, then the round's echo and its answer. The first ttlRecv TTL
+	// probes and the first echoRecv echoes are the answered ones.
+	rounds := ttlRounds
+	if echoSent > rounds {
+		rounds = echoSent
+	}
+	for i := 0; i < rounds; i++ {
+		if i < ttlRounds {
+			if i < ttlRecv {
+				pn.AddSample(time.Millisecond, 0, hop.KindICMPTTL)
+			}
+			pn.MarkProbeRoundEnd()
 		}
-		pn.MarkProbeRoundEnd()
-	}
-	for i := 0; i < echoSent; i++ {
-		pn.MarkEchoSent()
-	}
-	for i := 0; i < echoRecv; i++ {
-		pn.AddSample(time.Millisecond, 0, hop.KindEcho)
+		if i < echoSent {
+			pn.MarkEchoSent()
+			if i < echoRecv {
+				pn.AddSample(time.Millisecond, 0, hop.KindEcho)
+			}
+		}
 	}
 	h.MarkRoundSent()
 	return h

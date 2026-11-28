@@ -191,7 +191,7 @@ func TestColumnPaneLineWidths(t *testing.T) {
 
 	h3 := s.table.GetOrCreate(3)
 	h3.MarkRoundSent()
-	h3.AddSample(net.ParseIP("1.1.1.1"), 6*time.Millisecond, 0, hop.KindPrimary)
+	h3.AddSample(net.ParseIP("203.0.113.1"), 6*time.Millisecond, 0, hop.KindPrimary)
 	h3.MarkRoundEnd()
 
 	const paneWidth = 40

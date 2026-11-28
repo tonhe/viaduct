@@ -231,6 +231,7 @@ type Model struct {
 	exportStatusMsg  string
 	exportStatusTime time.Time
 	nowFunc          func() time.Time // for test determinism; nil defaults to time.Now
+	asnLookup        func(net.IP) (asn.Info, bool) // test seam; nil = enricher.Lookup
 }
 
 // focused returns the currently focused session. Model always has at least one session.
@@ -264,6 +265,7 @@ func New(target string, targetIP net.IP, cfg probe.Config, version string, proto
 		dnsEnabled: !cfg.NoDNS,
 		autoScroll: true,
 		config:     appCfg,
+		viewMode:   startViewMode(appCfg),
 	}
 }
 
@@ -689,7 +691,7 @@ func (m Model) asnColumnWidth(full bool) int {
 		if ip == nil {
 			continue
 		}
-		info, ok := m.enricher.Lookup(ip)
+		info, ok := m.lookupASN(ip)
 		if !ok || info.Number == 0 {
 			continue
 		}
@@ -699,8 +701,8 @@ func (m Model) asnColumnWidth(full bool) int {
 		} else {
 			label = asn.FormatASNShort(info.Number)
 		}
-		if len(label) > maxLen {
-			maxLen = len(label)
+		if w := lipgloss.Width(label); w > maxLen {
+			maxLen = w
 		}
 	}
 	if maxLen < min {
@@ -1228,13 +1230,11 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 				hostname = name
 			}
 		}
-		if len(hostname) > layout.hostnameWidth {
-			hostname = hostname[:layout.hostnameWidth]
-		}
+		hostname = truncateCells(hostname, layout.hostnameWidth)
 		if hostname == "" {
 			hostname = "..."
 		}
-		parts = append(parts, hostStyle().Render(fmt.Sprintf("%-*s", layout.hostnameWidth, hostname)))
+		parts = append(parts, hostStyle().Render(padCell(hostname, layout.hostnameWidth)))
 	}
 
 	if layout.showASN {
@@ -1248,7 +1248,7 @@ func (m Model) renderHop(h *hop.Hop, deltas []time.Duration, maxDeltaTTL int) st
 	// RTT stats are hop-level, taken from the TTL-limited probes. Echo
 	// replies are kept in the node's EchoStats and do not feed them.
 	if layout.showRnd {
-		parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
+		parts = append(parts, fmt.Sprintf("%-5s", formatRounds(h.Rounds(), 5)))
 	}
 	parts = append(parts, fmt.Sprintf("%-7s", formatDuration(h.AvgRTT())))
 	if layout.showBest {
@@ -1380,13 +1380,11 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 					hostname = name
 				}
 			}
-			if len(hostname) > layout.hostnameWidth {
-				hostname = hostname[:layout.hostnameWidth]
-			}
+			hostname = truncateCells(hostname, layout.hostnameWidth)
 			if hostname == "" {
 				hostname = "..."
 			}
-			parts = append(parts, hostStyle().Render(fmt.Sprintf("%-*s", layout.hostnameWidth, hostname)))
+			parts = append(parts, hostStyle().Render(padCell(hostname, layout.hostnameWidth)))
 		}
 
 		if layout.showASN {
@@ -1408,7 +1406,7 @@ func (m Model) renderDivergentHop(h *hop.Hop, deltas []time.Duration, maxDeltaTT
 		// into PathNode stats and needs no separate branch.
 		if layout.showRnd {
 			if i == 0 {
-				parts = append(parts, fmt.Sprintf("%-5d", h.Rounds()))
+				parts = append(parts, fmt.Sprintf("%-5s", formatRounds(h.Rounds(), 5)))
 			} else {
 				parts = append(parts, fmt.Sprintf("%-5s", "-"))
 			}
@@ -1506,11 +1504,20 @@ func (m Model) prevASNForTTL(ttl int) int {
 		if ip == nil {
 			continue
 		}
-		if info, ok := m.enricher.Lookup(ip); ok && info.Number != 0 {
+		if info, ok := m.lookupASN(ip); ok && info.Number != 0 {
 			return info.Number
 		}
 	}
 	return 0
+}
+
+// lookupASN returns the cached ASN info for ip: from the enricher, or from
+// asnLookup when a test has set it.
+func (m Model) lookupASN(ip net.IP) (asn.Info, bool) {
+	if m.asnLookup != nil {
+		return m.asnLookup(ip)
+	}
+	return m.enricher.Lookup(ip)
 }
 
 // renderASNCell formats the ASN column with boundary highlighting.
@@ -1520,7 +1527,7 @@ func (m Model) renderASNCell(ip net.IP, prevASN int, width int, full bool) strin
 	if m.enricher == nil || ip == nil {
 		return fmt.Sprintf("%-*s", width, "")
 	}
-	info, ok := m.enricher.Lookup(ip)
+	info, ok := m.lookupASN(ip)
 	if !ok {
 		return dimStyle().Render(fmt.Sprintf("%-*s", width, "..."))
 	}
@@ -1533,10 +1540,7 @@ func (m Model) renderASNCell(ip net.IP, prevASN int, width int, full bool) strin
 	if label == "" {
 		return fmt.Sprintf("%-*s", width, "")
 	}
-	if len(label) > width {
-		label = label[:width]
-	}
-	formatted := fmt.Sprintf("%-*s", width, label)
+	formatted := padCell(truncateCells(label, width), width)
 	if info.Number != 0 && info.Number != prevASN {
 		return asnBoundaryStyle().Render(formatted)
 	}
@@ -1683,27 +1687,23 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 						hostname = name
 					}
 				}
-				if len(hostname) > 20 {
-					hostname = hostname[:20]
-				}
+				hostname = summaryCell(hostname, summaryHostCut, summaryHostWidth)
 
 				asnLabel := ""
 				currentASN := 0
 				if m.enricher != nil {
-					if info, ok := m.enricher.Lookup(ip); ok {
+					if info, ok := m.lookupASN(ip); ok {
 						currentASN = info.Number
 						asnLabel = asn.FormatASN(info.Number, info.Org)
 					}
 				}
-				if len(asnLabel) > 20 {
-					asnLabel = asnLabel[:20]
-				}
+				asnLabel = summaryCell(asnLabel, summaryASNWidth, summaryASNWidth)
 
 				lossStr := "-"
 				sntStr := "-"
 				if nodeIdx == 0 {
 					lossStr = hopLossStr
-					sntStr = fmt.Sprintf("%d", sent)
+					sntStr = formatRounds(sent, summaryRndWidth)
 				}
 
 				avg := float64(node.AvgRTT().Microseconds()) / 1000.0
@@ -1714,7 +1714,7 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 				flows := hop.FormatFlowIDs(node.GetFlowIDs())
 				stab := fmt.Sprintf("%.0f%%", node.StabilityPercent())
 
-				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %-22s %-20s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
+				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %s %s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -1742,24 +1742,20 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 					hostname = name
 				}
 			}
-			if len(hostname) > 20 {
-				hostname = hostname[:20]
-			}
+			hostname = summaryCell(hostname, summaryHostCut, summaryHostWidth)
 
 			asnLabel := ""
 			currentASN := 0
 			if m.enricher != nil {
-				if info, ok := m.enricher.Lookup(ip); ok {
+				if info, ok := m.lookupASN(ip); ok {
 					currentASN = info.Number
 					asnLabel = asn.FormatASN(info.Number, info.Org)
 				}
 			}
-			if len(asnLabel) > 20 {
-				asnLabel = asnLabel[:20]
-			}
+			asnLabel = summaryCell(asnLabel, summaryASNWidth, summaryASNWidth)
 
 			lossStr := hopLossStr
-			sent := h.Rounds()
+			sent := formatRounds(h.Rounds(), summaryRndWidth)
 			avg := float64(h.AvgRTT().Microseconds()) / 1000.0
 			minRTT := float64(h.GetMinRTT().Microseconds()) / 1000.0
 			maxRTT := float64(h.GetMaxRTT().Microseconds()) / 1000.0
@@ -1774,7 +1770,7 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 					flows = hop.FormatFlowIDs(nodes[0].GetFlowIDs())
 					stab = fmt.Sprintf("%.0f%%", nodes[0].StabilityPercent())
 				}
-				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %-22s %-20s %-8s %-5d %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
+				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %s %s %-8s %-5s %-7s %-7s %-7s %-7s %-7s %-8s %-5s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -1790,7 +1786,7 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 					stab,
 				))
 			} else {
-				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %-22s %-20s %-8s %-5d %-7s %-7s %-7s %-7s %-7s\n",
+				b.WriteString(fmt.Sprintf("%-3d "+ipFmt+" %s %s %-8s %-5s %-7s %-7s %-7s %-7s %-7s\n",
 					ttl,
 					ip.String(),
 					hostname,
@@ -1812,6 +1808,21 @@ func (m Model) finalSummaryFor(s *TargetSession) string {
 	_ = prevASN // FinalSummary is plain text, no boundary highlighting
 
 	return b.String()
+}
+
+// Widths of the exit summary's Hostname, ASN and Rnd columns. A hostname is
+// cut to summaryHostCut cells and leaves two blank before the ASN column.
+const (
+	summaryHostCut   = 20
+	summaryHostWidth = 22
+	summaryASNWidth  = 20
+	summaryRndWidth  = 5
+)
+
+// summaryCell cuts s to at most cut display cells, never inside a character,
+// and pads it to width cells.
+func summaryCell(s string, cut, width int) string {
+	return padCell(truncateCells(s, cut), width)
 }
 
 // maxScrollOffset returns the maximum valid scroll offset for the current state.

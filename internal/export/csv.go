@@ -156,10 +156,9 @@ func writeCSVRows(cw *csv.Writer, r Report, withTarget bool) error {
 }
 
 // WriteCSV writes the report as a CSV table with one row per node, and one
-// row for a hop that has no node.
+// row for a hop that has no node. It returns the first error of w.
 func WriteCSV(w io.Writer, r Report) error {
 	cw := csv.NewWriter(w)
-	defer cw.Flush()
 
 	if err := cw.Write(csvHeader); err != nil {
 		return err
@@ -169,5 +168,14 @@ func WriteCSV(w io.Writer, r Report) error {
 		return err
 	}
 
+	return flushCSV(cw)
+}
+
+// flushCSV writes out what cw still holds and returns the error of that write
+// or of any before it. The csv.Writer buffers its output, so until it is
+// flushed a report smaller than the buffer has not reached the underlying
+// writer at all, and Error has nothing to report.
+func flushCSV(cw *csv.Writer) error {
+	cw.Flush()
 	return cw.Error()
 }

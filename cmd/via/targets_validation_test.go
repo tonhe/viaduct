@@ -35,7 +35,7 @@ func TestResolveTargetSpecs_RejectsMulticast(t *testing.T) {
 
 	for _, target := range []string{"224.0.0.251", "239.1.2.3", "ff02::1", "ff0e::1", "mdns.example"} {
 		t.Run(target, func(t *testing.T) {
-			specs := resolveTargetSpecs([]string{target}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+			specs := resolveTargetSpecs([]string{target}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 			err := specs[0].Err
 			if err == nil {
 				t.Fatalf("multicast target %s accepted (IP %v)", target, specs[0].IP)
@@ -50,7 +50,7 @@ func TestResolveTargetSpecs_RejectsMulticast(t *testing.T) {
 	}
 
 	t.Run("a name with a unicast address too uses the unicast one", func(t *testing.T) {
-		specs := resolveTargetSpecs([]string{"mixed.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"mixed.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		if specs[0].Err != nil {
 			t.Fatalf("unexpected error: %v", specs[0].Err)
 		}
@@ -61,7 +61,7 @@ func TestResolveTargetSpecs_RejectsMulticast(t *testing.T) {
 
 	t.Run("in multi-target mode only the multicast target errors, and the error names it", func(t *testing.T) {
 		initPortAllocator(2)
-		specs := resolveTargetSpecs([]string{"198.51.100.1", "224.0.0.251"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"198.51.100.1", "224.0.0.251"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		if specs[0].Err != nil {
 			t.Errorf("unicast target errored: %v", specs[0].Err)
 		}
@@ -91,7 +91,7 @@ func TestResolveTargetSpecs_RejectsLinkLocal(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			routeChecked := false
 			withRouteCheck(t, func(net.IP) error { routeChecked = true; return fmt.Errorf("invalid argument") })
-			specs := resolveTargetSpecs([]string{target}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+			specs := resolveTargetSpecs([]string{target}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 			err := specs[0].Err
 			if err == nil {
 				t.Fatalf("link-local target %s accepted (IP %v)", target, specs[0].IP)
@@ -113,7 +113,7 @@ func TestResolveTargetSpecs_RejectsLinkLocal(t *testing.T) {
 
 	t.Run("a zoned literal is refused without a lookup", func(t *testing.T) {
 		looked := false
-		specs := resolveTargetSpecs([]string{"fe80::1%eth0"}, false, false, true, true, baseProbeConfig(), "udp",
+		specs := resolveTargetSpecs([]string{"fe80::1%eth0"}, false, false, "", true, true, baseProbeConfig(), "udp",
 			func(string) ([]net.IP, error) { looked = true; return nil, fmt.Errorf("no such host") })
 		if specs[0].Err == nil || !strings.Contains(specs[0].Err.Error(), "link-local") {
 			t.Errorf("error = %v, want a link-local refusal", specs[0].Err)
@@ -125,7 +125,7 @@ func TestResolveTargetSpecs_RejectsLinkLocal(t *testing.T) {
 
 	t.Run("a name with a routable address too uses that one", func(t *testing.T) {
 		withRouteCheck(t, func(net.IP) error { return nil })
-		specs := resolveTargetSpecs([]string{"mixed.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"mixed.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		if specs[0].Err != nil {
 			t.Fatalf("unexpected error: %v", specs[0].Err)
 		}
@@ -137,7 +137,7 @@ func TestResolveTargetSpecs_RejectsLinkLocal(t *testing.T) {
 	t.Run("ordinary targets are unaffected", func(t *testing.T) {
 		withRouteCheck(t, func(net.IP) error { return nil })
 		for _, target := range []string{"2001:db8:100::7", "198.51.100.7"} {
-			specs := resolveTargetSpecs([]string{target}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+			specs := resolveTargetSpecs([]string{target}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 			if specs[0].Err != nil || specs[0].IP.String() != target {
 				t.Errorf("%s: err %v, IP %v; want it accepted", target, specs[0].Err, specs[0].IP)
 			}
@@ -211,7 +211,7 @@ func TestResolveTargetSpecs_IPv6RoutePreflight(t *testing.T) {
 
 	t.Run("auto-selected IPv6 with no route falls back to IPv4, with a notice", func(t *testing.T) {
 		withRouteCheck(t, noV6Route)
-		specs := resolveTargetSpecs([]string{"dual.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"dual.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		sp := specs[0]
 		if sp.Err != nil {
 			t.Fatalf("unexpected error: %v", sp.Err)
@@ -226,7 +226,7 @@ func TestResolveTargetSpecs_IPv6RoutePreflight(t *testing.T) {
 
 	t.Run("-6 with no route fails clearly and does not fall back", func(t *testing.T) {
 		withRouteCheck(t, noV6Route)
-		specs := resolveTargetSpecs([]string{"dual.example"}, false, true, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"dual.example"}, false, true, "-6", true, true, baseProbeConfig(), "udp", lookup)
 		err := specs[0].Err
 		if err == nil {
 			t.Fatalf("-6 with no IPv6 route accepted: IPv%d %v", specs[0].Cfg.IPVersion, specs[0].IP)
@@ -240,7 +240,7 @@ func TestResolveTargetSpecs_IPv6RoutePreflight(t *testing.T) {
 
 	t.Run("IPv6 with a route is used, no notice", func(t *testing.T) {
 		withRouteCheck(t, func(net.IP) error { return nil })
-		specs := resolveTargetSpecs([]string{"dual.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"dual.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		sp := specs[0]
 		if sp.Err != nil || sp.Cfg.IPVersion != 6 || sp.Notice != "" {
 			t.Errorf("err %v, IPv%d, notice %q; want IPv6 with no error and no notice", sp.Err, sp.Cfg.IPVersion, sp.Notice)
@@ -249,12 +249,12 @@ func TestResolveTargetSpecs_IPv6RoutePreflight(t *testing.T) {
 
 	t.Run("IPv6-only target with no route is left on IPv6: there is nothing to fall back to", func(t *testing.T) {
 		withRouteCheck(t, noV6Route)
-		specs := resolveTargetSpecs([]string{"v6only.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"v6only.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		sp := specs[0]
 		if sp.Err == nil {
 			t.Fatalf("an unreachable IPv6-only target was accepted: IPv%d %v", sp.Cfg.IPVersion, sp.IP)
 		}
-		if !strings.Contains(sp.Err.Error(), "no IPv6 route") || strings.Contains(sp.Err.Error(), "-6 was given") {
+		if !strings.Contains(sp.Err.Error(), "no IPv6 route") || strings.Contains(sp.Err.Error(), "-6") || strings.Contains(sp.Err.Error(), "forced") {
 			t.Errorf("error = %q, want a no-route error that does not blame -6", sp.Err)
 		}
 	})
@@ -262,7 +262,7 @@ func TestResolveTargetSpecs_IPv6RoutePreflight(t *testing.T) {
 	t.Run("an IPv4 selection is not pre-flighted", func(t *testing.T) {
 		called := false
 		withRouteCheck(t, func(net.IP) error { called = true; return fmt.Errorf("unreachable") })
-		specs := resolveTargetSpecs([]string{"v4only.example"}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"v4only.example"}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 		if specs[0].Err != nil || specs[0].Cfg.IPVersion != 4 {
 			t.Errorf("err %v, IPv%d; want IPv4 with no error", specs[0].Err, specs[0].Cfg.IPVersion)
 		}
@@ -279,7 +279,7 @@ func TestResolveTargetSpecs_IPv4MappedLiteral(t *testing.T) {
 
 	t.Run("traced over IPv4", func(t *testing.T) {
 		for _, target := range []string{"::ffff:192.0.2.1", "::FFFF:192.0.2.1", "::ffff:c000:201"} {
-			specs := resolveTargetSpecs([]string{target}, false, false, true, true, baseProbeConfig(), "udp", lookup)
+			specs := resolveTargetSpecs([]string{target}, false, false, "", true, true, baseProbeConfig(), "udp", lookup)
 			if specs[0].Err != nil {
 				t.Fatalf("%s: unexpected error: %v", target, specs[0].Err)
 			}
@@ -296,14 +296,14 @@ func TestResolveTargetSpecs_IPv4MappedLiteral(t *testing.T) {
 	})
 
 	t.Run("works on a host with no IPv6 transport", func(t *testing.T) {
-		specs := resolveTargetSpecs([]string{"::ffff:192.0.2.1"}, false, false, true, false, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"::ffff:192.0.2.1"}, false, false, "", true, false, baseProbeConfig(), "udp", lookup)
 		if specs[0].Err != nil || specs[0].Cfg.IPVersion != 4 {
 			t.Errorf("err = %v, IPVersion = %d; want IPv4 with no error", specs[0].Err, specs[0].Cfg.IPVersion)
 		}
 	})
 
 	t.Run("-6 fails with a clear error", func(t *testing.T) {
-		specs := resolveTargetSpecs([]string{"::ffff:192.0.2.1"}, false, true, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"::ffff:192.0.2.1"}, false, true, "-6", true, true, baseProbeConfig(), "udp", lookup)
 		err := specs[0].Err
 		if err == nil {
 			t.Fatalf("-6 with a mapped literal accepted (IP %v, version %d)", specs[0].IP, specs[0].Cfg.IPVersion)
@@ -314,7 +314,7 @@ func TestResolveTargetSpecs_IPv4MappedLiteral(t *testing.T) {
 	})
 
 	t.Run("a plain IPv4 literal with -6 keeps its existing error", func(t *testing.T) {
-		specs := resolveTargetSpecs([]string{"192.0.2.1"}, false, true, true, true, baseProbeConfig(), "udp", lookup)
+		specs := resolveTargetSpecs([]string{"192.0.2.1"}, false, true, "-6", true, true, baseProbeConfig(), "udp", lookup)
 		err := specs[0].Err
 		if err == nil || strings.Contains(err.Error(), "IPv4-mapped") {
 			t.Errorf("error = %v, want the ordinary no-IPv6 error", err)

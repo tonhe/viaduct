@@ -201,6 +201,8 @@ Loss belongs to the hop, not to a node: an unanswered TTL-limited probe does not
 | `Echo` | 9 | direct echoes to the node, `received/sent` |
 | `Rnd` | 5 | the hop's rounds |
 
+A count that does not fit its 9 cells in full has each number shortened to thousands or millions, rounded down, as `Rnd` is: `12345/123456` is shown as `12k/123k`. The exports carry the full counts.
+
 - A count cell is a dim `—` when no probe of that type was sent.
 - The Echo count is dim while the hop has no verdict: until it first has the 20 echo samples a rate-limit verdict needs, counted over the hop's nodes. Until then the count is still accumulating and must not look like a settled figure. Once the hop has had a verdict the count stays undimmed, also while a held verdict covers fewer than 20 samples.
 - A TTL with no reply is the hop number and `*`.
@@ -257,6 +259,8 @@ With more than one target and column view off, a panel sits between the separato
 The main menu lists Theme, Probe Settings, Display & Enrichment, Alerting, then Save & Exit and Cancel under a divider. The cursor row is prefixed with `►` and drawn bold `Base06` on `Base02`. Submenus show a `›` hint. A dim footer line gives the keys.
 
 The theme list shows 12 themes at a time and applies each theme as the cursor moves over it, so the whole screen previews it. `Esc` from the list restores the previous theme. Leaving the overlay with unsaved changes asks for confirmation. Saving writes the config file.
+
+Display Mode, under Display & Enrichment, is the `display_mode` setting. It names the view a session opens in: `default`, `health`, `latency` and `variability` open the view of that name, and `probes` opens Probe Detail. Saving with Display Mode changed switches the running view to the one chosen. Saving with it unchanged leaves the view alone, so a view reached with `d` survives a save of some other setting. `d` never changes the setting. The mapping is `viewModeForDisplayMode` in `internal/tui/display_mode.go`; a view added to the `d` cycle needs a value there and in `displayModeOptions`.
 
 ## Themes
 

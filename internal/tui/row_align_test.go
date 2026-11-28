@@ -46,6 +46,11 @@ const alignSparkWidth = 14
 // alignLongHost is longer than the hostname column ever gets.
 const alignLongHost = "ae-303-1215.core01.pop-east.transit.example.net"
 
+// alignLongHostUTF8 is as long, with characters of more than one byte that
+// are one cell wide each: a cut by bytes leaves the cell short or breaks a
+// character.
+const alignLongHostUTF8 = "ae-303-1215.cöre01.pöp-éast.trånsit.exämple.net"
+
 // alignAddrs holds the fixture addresses per family, from the documentation
 // ranges (RFC 5737, RFC 3849). The IPv6 ones include addresses of 38
 // characters, the longest the documentation prefix can spell.
@@ -73,7 +78,7 @@ func alignHops(family int, ecmp bool) []alignHop {
 	a := alignAddrs[family]
 	hops := []alignHop{
 		{ttl: 1, nodes: []alignNode{{a[0], "gw.example.net", 6}}},
-		{ttl: 2, nodes: []alignNode{{a[1], alignLongHost, 6}}},
+		{ttl: 2, nodes: []alignNode{{a[1], alignLongHostUTF8, 6}}},
 		{ttl: 3, nodes: []alignNode{{a[2], alignLongHost, 6}, {a[3], "", 4}, {a[4], "b.example.net", 2}}},
 		{ttl: 4},
 		{ttl: 5, nodes: []alignNode{{a[5], "", 5}, {a[6], alignLongHost, 3}}},
@@ -136,6 +141,30 @@ func withAlignHops(family int, ecmp bool, numPaths int) testOpt {
 // Its cache is empty, so the cells show the pending marker.
 func withASNColumn() testOpt {
 	return func(m *Model) { m.enricher = asn.New(0) }
+}
+
+// alignASNOrg is an organisation name with characters of more than one byte.
+const alignASNOrg = "Rés€au Zürich Transit ÅB"
+
+// withASNLabels turns the ASN column on with real labels: the first hops of
+// the fixture resolve to AS numbers, one with an org name of non-ASCII
+// characters; the rest stay pending. The labels come through the model's
+// lookup seam, so internal/asn is not involved.
+func withASNLabels(family int) testOpt {
+	a := alignAddrs[family]
+	infos := map[string]asn.Info{
+		net.ParseIP(a[0]).String(): {Number: 64496, Org: "EXAMPLE-NET"},
+		net.ParseIP(a[1]).String(): {Number: 64497, Org: alignASNOrg},
+		net.ParseIP(a[2]).String(): {Number: 4200000000, Org: "EXAMPLE-TRANSIT"},
+		net.ParseIP(a[7]).String(): {Number: 64496, Org: "EXAMPLE-NET"},
+	}
+	return func(m *Model) {
+		m.enricher = asn.New(0)
+		m.asnLookup = func(ip net.IP) (asn.Info, bool) {
+			info, ok := infos[ip.String()]
+			return info, ok
+		}
+	}
 }
 
 // alignCol is a column as the header line defines it: its label and the cell
@@ -373,7 +402,8 @@ func TestRowAlignment_HopTable(t *testing.T) {
 
 	type variant struct {
 		family, numPaths int
-		ecmp, withASN    bool
+		ecmp             bool
+		withASN          string // "", "pending" or "labels"
 		height           int
 	}
 	var variants []variant
@@ -381,7 +411,7 @@ func TestRowAlignment_HopTable(t *testing.T) {
 		for _, ecmp := range []bool{true, false} {
 			// One flow is what an ICMP trace has; six is the default.
 			for _, numPaths := range []int{1, 6} {
-				for _, withASN := range []bool{false, true} {
+				for _, withASN := range []string{"", "pending", "labels"} {
 					for _, height := range []int{alignTall, alignShort} {
 						variants = append(variants, variant{family, numPaths, ecmp, withASN, height})
 					}
@@ -393,11 +423,14 @@ func TestRowAlignment_HopTable(t *testing.T) {
 	for _, v := range variants {
 		for _, view := range alignViews {
 			for _, w := range alignWidths {
-				name := fmt.Sprintf("IPv%d/ecmp=%v/paths=%d/asn=%v/h=%d/%s/%d", v.family, v.ecmp, v.numPaths, v.withASN, v.height, view, w)
+				name := fmt.Sprintf("IPv%d/ecmp=%v/paths=%d/asn=%s/h=%d/%s/%d", v.family, v.ecmp, v.numPaths, v.withASN, v.height, view, w)
 				t.Run(name, func(t *testing.T) {
 					opts := []testOpt{withSize(w, v.height), withIPVersion(v.family), withView(view), withAlignHops(v.family, v.ecmp, v.numPaths)}
-					if v.withASN {
+					switch v.withASN {
+					case "pending":
 						opts = append(opts, withASNColumn())
+					case "labels":
+						opts = append(opts, withASNLabels(v.family))
 					}
 					m := newTestModel(opts...)
 					out := m.View()
@@ -421,6 +454,14 @@ func TestRowAlignment_HopTable(t *testing.T) {
 					}
 					if !strings.Contains(stripANSI(out), "100.0%?") {
 						t.Error("no row with the widest loss cell, 100.0%?")
+					}
+					if plain := stripANSI(out); v.withASN == "labels" && strings.Contains(plain, " ASN ") {
+						// Hops 2 and 3 are on screen at every height.
+						for _, label := range []string{"AS64497", "AS4200000000"} {
+							if !strings.Contains(plain, label) {
+								t.Errorf("ASN column is shown but no row has the label %s", label)
+							}
+						}
 					}
 					if v.ecmp && view != ViewProbeDetail {
 						if tall && counts.tree != 5 {

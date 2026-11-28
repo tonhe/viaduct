@@ -29,9 +29,9 @@ func WriteJSONMulti(w io.Writer, m MultiReport) error {
 // one header row; rows from each target follow in order. A target that could
 // not be traced (Error set, no hops) contributes one row: its target name, the
 // hop and node columns empty and the message in the trailing error column.
+// It returns the first error of w.
 func WriteCSVMulti(w io.Writer, m MultiReport) error {
 	cw := csv.NewWriter(w)
-	defer cw.Flush()
 
 	header := append([]string{"target"}, csvHeader...)
 	if err := cw.Write(header); err != nil {
@@ -44,7 +44,7 @@ func WriteCSVMulti(w io.Writer, m MultiReport) error {
 		}
 	}
 
-	return cw.Error()
+	return flushCSV(cw)
 }
 
 // WriteDOTMulti writes all targets as a single Graphviz DOT directed graph.
@@ -58,7 +58,10 @@ func WriteCSVMulti(w io.Writer, m MultiReport) error {
 //   - Gap hops (* * *): "gap_<sanitized-target>_<ttl>" — kept distinct per
 //     target because two unknown hops at the same TTL from different targets
 //     are unrelated; merging them would falsely imply a shared router.
-func WriteDOTMulti(w io.Writer, m MultiReport) error {
+//
+// It returns the first error of out and writes nothing after it.
+func WriteDOTMulti(out io.Writer, m MultiReport) error {
+	w := &firstErrWriter{w: out}
 	title := "via → multi-target"
 	fmt.Fprintf(w, "digraph %s {\n", dotQuote(title))
 	fmt.Fprintln(w, "  rankdir=TB;")
@@ -187,5 +190,5 @@ func WriteDOTMulti(w io.Writer, m MultiReport) error {
 	}
 
 	fmt.Fprintln(w, "}")
-	return nil
+	return w.err
 }

@@ -429,9 +429,9 @@ func TestParseOriginResponse_TrailingNoise(t *testing.T) {
 		txt  string
 		want int
 	}{
-		{"13335 | 1.1.1.0/24 | US | arin | 2014-03-28\n", 13335},
-		{"13335 | 1.1.1.0/24 | US | arin | 2014-03-28\r\n", 13335},
-		{"\t13335\t| 1.1.1.0/24 | US", 13335},
+		{"64496 | 192.0.2.0/24 | US | arin | 2014-03-28\n", 64496},
+		{"64496 | 192.0.2.0/24 | US | arin | 2014-03-28\r\n", 64496},
+		{"\t64496\t| 192.0.2.0/24 | US", 64496},
 	}
 	for _, tc := range cases {
 		got, err := parseOriginResponse(tc.txt)

@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -58,6 +57,13 @@ var _ tracerIface = (*probe.Tracer)(nil)
 var _ probe.RoundTypeMarker = (*hop.Table)(nil)
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(exitStatus(err))
+	}
+}
+
+// newRootCmd builds the via command with all its flags.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:     "via [target ...]",
 		Short:   "A modern traceroute tool with real-time TUI",
@@ -77,7 +83,7 @@ func main() {
 	rootCmd.Flags().BoolP("report", "r", false, "report mode: run --count rounds (default 10), print table, exit")
 	rootCmd.Flags().BoolP("no-dns", "n", false, "skip reverse DNS lookups")
 	rootCmd.Flags().Int("paths", 6, "number of ECMP flow variations (1 = disable multipath)")
-	rootCmd.Flags().Bool("no-paths", false, "disable ECMP multipath (shorthand for --paths 1)")
+	rootCmd.Flags().Bool("no-paths", false, "disable ECMP multipath (shorthand for --paths 1; an error with any other --paths value)")
 	rootCmd.Flags().StringP("protocol", "P", "udp", "probe protocol: udp, icmp, tcp, auto")
 	rootCmd.Flags().IntP("port", "p", 0, "destination port override (default: protocol-specific)")
 	rootCmd.Flags().BoolP("ipv4", "4", false, "force IPv4")
@@ -92,9 +98,7 @@ func main() {
 	rootCmd.Flags().String("targets", "", "file containing one target per line (combined with positional args)")
 	rootCmd.Flags().String("debug-log", "", "append diagnostics to this file: send failures, a line per round, per-hop loss snapshots, alerts")
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(exitStatus(err))
-	}
+	return rootCmd
 }
 
 // lookupFunc is a pluggable DNS resolver function, injectable for tests.
@@ -102,16 +106,22 @@ type lookupFunc func(host string) ([]net.IP, error)
 
 // resolveTargetSpecs resolves every target and selects its IP family
 // independently. Failures land in TargetSpec.Err; they never abort the
-// other targets. Port/ID blocks are assigned by session index.
-func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, base probe.Config, protocolName string, lookup lookupFunc) []tui.TargetSpec {
+// other targets. Port/ID blocks are assigned by session index. familySrc
+// names what forced the family (see familySource) and is used only in error
+// messages.
+func resolveTargetSpecs(targets []string, forceV4, forceV6 bool, familySrc string, hasV4, hasV6 bool, base probe.Config, protocolName string, lookup lookupFunc) []tui.TargetSpec {
 	specs := make([]tui.TargetSpec, len(targets))
 	for i, tgt := range targets {
 		specs[i] = tui.TargetSpec{Name: tgt, ProtocolName: protocolName}
-		// A link-local target is not supported: the trace would be one hop on
-		// the local link. A zoned literal is caught before the lookup, which
-		// returns the address without its zone.
-		if isZonedLinkLocalLiteral(tgt) {
-			specs[i].Err = fmt.Errorf("%s is a link-local address; link-local targets are not supported", tgt)
+		// A zoned literal is refused before the lookup, which would return
+		// the address without its zone. A link-local target is not supported
+		// at all: the trace would be one hop on the local link.
+		if zip, ok := zonedLiteral(tgt); ok {
+			if isLinkLocalV6(zip) {
+				specs[i].Err = fmt.Errorf("%s is a link-local address; link-local targets are not supported", tgt)
+			} else {
+				specs[i].Err = fmt.Errorf("%s is an address with a zone; zoned targets are not supported, give the address without %%zone", tgt)
+			}
 			continue
 		}
 		ips, err := lookup(tgt)
@@ -127,6 +137,13 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 			specs[i].Err = err
 			continue
 		}
+		// The unspecified address (0.0.0.0, ::) and the IPv4 broadcast
+		// address are not destinations either; 0.0.0.0 would trace localhost.
+		ips, err = dropUnspecifiedBroadcast(tgt, ips)
+		if err != nil {
+			specs[i].Err = err
+			continue
+		}
 		// Link-local without a zone, or a name that resolves to it. A name that
 		// also has other addresses uses those.
 		ips, err = dropLinkLocal(tgt, ips)
@@ -138,7 +155,7 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 		// embeds and is traced over IPv4 (To4 below does that). Forcing IPv6
 		// on one is a contradiction, so say so instead of "no AAAA record".
 		if forceV6 && isIPv4MappedLiteral(tgt) {
-			specs[i].Err = fmt.Errorf("%s is an IPv4-mapped address and is traced over IPv4; it cannot be used with -6", tgt)
+			specs[i].Err = fmt.Errorf("%s is an IPv4-mapped address and is traced over IPv4; it cannot be used with %s", tgt, familySrc)
 			continue
 		}
 		var v4, v6 net.IP
@@ -151,7 +168,9 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 		}
 		ver, ip, err := selectFamily(forceV4, forceV6, v4, v6, hasV4, hasV6)
 		if err != nil {
-			specs[i].Err = err
+			// Name the target: in multi-target mode each failure is printed
+			// on its own line.
+			specs[i].Err = fmt.Errorf("%s: %w", tgt, err)
 			continue
 		}
 		// Pre-flight an IPv6 choice: a host can have an IPv6 address and still
@@ -162,7 +181,7 @@ func resolveTargetSpecs(targets []string, forceV4, forceV6, hasV4, hasV6 bool, b
 			if rerr := routeTo(ip); rerr != nil {
 				switch {
 				case forceV6:
-					specs[i].Err = fmt.Errorf("no IPv6 route to %s (%v); -6 was given, so not falling back to IPv4", ip, rerr)
+					specs[i].Err = fmt.Errorf("no IPv6 route to %s (%v); IPv6 was forced by %s, so not falling back to IPv4", ip, rerr, familySrc)
 					continue
 				case v4 != nil:
 					specs[i].Notice = fmt.Sprintf("no IPv6 route to %s; using IPv4", ip)
@@ -198,6 +217,46 @@ func resolveNumPaths(flagPaths int, pathsChanged, noPaths bool, configPaths int)
 	default:
 		return configPaths, nil
 	}
+}
+
+// checkFlags reports the flag errors that can be told from the command line
+// alone: --no-paths with a contradicting --paths, an unknown --output format,
+// an unknown protocol. configProtocol is the protocol the config file names,
+// used when -P was not given. runTrace checks each of these again where it
+// uses the value; this runs first so that they are reported before anything
+// that needs privileges.
+func checkFlags(cmd *cobra.Command, configProtocol string) error {
+	flagPaths, _ := cmd.Flags().GetInt("paths")
+	noPaths, _ := cmd.Flags().GetBool("no-paths")
+	if _, err := resolveNumPaths(flagPaths, cmd.Flags().Changed("paths"), noPaths, 1); err != nil {
+		return err
+	}
+	if outputFmt, _ := cmd.Flags().GetString("output"); outputFmt != "" {
+		if _, err := export.FormatName(outputFmt); err != nil {
+			return err
+		}
+	}
+	protocolName, _ := cmd.Flags().GetString("protocol")
+	if !cmd.Flags().Changed("protocol") {
+		protocolName = configProtocol
+	}
+	n := 1
+	if _, err := buildProtocol(protocolName, 0, &n, probe.Config{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// pathsClampWarning returns the warning for a flow count outside 1 to
+// maxNumPaths, which is clamped, or "" when the count is in range.
+func pathsClampWarning(numPaths int) string {
+	switch {
+	case numPaths > maxNumPaths:
+		return fmt.Sprintf("Warning: --paths %d exceeds maximum %d, clamping", numPaths, maxNumPaths)
+	case numPaths < 1:
+		return fmt.Sprintf("Warning: --paths %d is below 1, using 1 (single path)", numPaths)
+	}
+	return ""
 }
 
 // routeTo reports whether this host has a route to ip. It connects a UDP
@@ -240,15 +299,60 @@ func isLinkLocalV6(ip net.IP) bool {
 	return ip.To4() == nil && ip.IsLinkLocalUnicast()
 }
 
-// isZonedLinkLocalLiteral reports whether s is an IPv6 link-local literal with
-// a zone, such as fe80::1%eth0.
-func isZonedLinkLocalLiteral(s string) bool {
+// zonedLiteral reports whether s is an address literal with a zone, such as
+// fe80::1%eth0 or 2001:db8::1%eth0, and returns the address without it.
+func zonedLiteral(s string) (net.IP, bool) {
 	addr, _, zoned := strings.Cut(s, "%")
 	if !zoned {
-		return false
+		return nil, false
 	}
 	ip := net.ParseIP(addr)
-	return ip != nil && isLinkLocalV6(ip)
+	return ip, ip != nil
+}
+
+// dropUnspecifiedBroadcast removes the unspecified addresses (0.0.0.0, ::) and
+// the IPv4 limited broadcast address (255.255.255.255) from a target's
+// resolved addresses. If nothing else is left, it returns an error naming the
+// target.
+func dropUnspecifiedBroadcast(target string, ips []net.IP) ([]net.IP, error) {
+	kept := make([]net.IP, 0, len(ips))
+	var kind string
+	for _, ip := range ips {
+		switch {
+		case ip.IsUnspecified():
+			kind = "the unspecified address"
+		case ip.Equal(net.IPv4bcast):
+			kind = "the broadcast address"
+		default:
+			kept = append(kept, ip)
+		}
+	}
+	if len(kept) == 0 && len(ips) > 0 {
+		if net.ParseIP(target) != nil {
+			return nil, fmt.Errorf("%s is %s; via traces unicast targets only", target, kind)
+		}
+		return nil, fmt.Errorf("%s resolves only to unspecified or broadcast addresses; via traces unicast targets only", target)
+	}
+	return kept, nil
+}
+
+// familySource names what forced the IP family, for error messages: the -4
+// or -6 flag, or ip_family in the config file. It returns "" when no family
+// was forced.
+func familySource(forceV4, forceV6, fromConfig bool) string {
+	var ver string
+	switch {
+	case forceV4:
+		ver = "4"
+	case forceV6:
+		ver = "6"
+	default:
+		return ""
+	}
+	if fromConfig {
+		return fmt.Sprintf("ip_family = %q in the config file", ver)
+	}
+	return "-" + ver
 }
 
 // dropLinkLocal removes IPv6 link-local addresses (fe80::/10) from a target's
@@ -348,7 +452,9 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("-4 and -6 are mutually exclusive")
 	}
 
-	// Apply config default if neither flag was set
+	// Apply config default if neither flag was set. familySrc names what
+	// forced the family, so error messages blame the right thing.
+	familySrc := familySource(forceV4, forceV6, false)
 	if !forceV4 && !forceV6 {
 		switch appCfg.IPFamily {
 		case "4":
@@ -356,6 +462,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		case "6":
 			forceV6 = true
 		}
+		familySrc = familySource(forceV4, forceV6, true)
 	}
 
 	// Merge positional args with --targets file.
@@ -370,6 +477,13 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	targets, err := mergeTargets(args, fileTargets)
 	if err != nil {
 		// mergeTargets returns descriptive errors (0 targets / >16 targets).
+		return err
+	}
+
+	// Flag errors that need no socket and no lookup are reported here, before
+	// the capability check: an unprivileged run must not be sent through sudo
+	// only to be told its flags contradict each other.
+	if err := checkFlags(cmd, appCfg.Protocol); err != nil {
 		return err
 	}
 
@@ -465,9 +579,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// --paths 100 host1 host2 would let session 0's flow IDs spill into session 1's
 	// port block, causing cross-target reply misattribution.
 	if clamped, changed := clampNumPaths(numPaths); changed {
-		if numPaths > maxNumPaths {
-			fmt.Fprintf(os.Stderr, "Warning: --paths %d exceeds maximum %d, clamping\n", numPaths, maxNumPaths)
-		}
+		fmt.Fprintln(os.Stderr, pathsClampWarning(numPaths))
 		numPaths = clamped
 	}
 
@@ -486,7 +598,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		MaxRounds:   count,
 		NoDNS:       noDNS,
 		ReportMode:  reportMode,
-		NumPaths: numPaths,
+		NumPaths:    numPaths,
 	}
 
 	// --debug-log: the probe engine's send failures and each target's round
@@ -517,7 +629,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	initPortAllocator(len(targets))
 
 	// Resolve all targets. hasV4/hasV6 probed once before the loop.
-	specs := resolveTargetSpecs(targets, forceV4, forceV6, hasV4, hasV6, baseCfg, protocolName, net.LookupIP)
+	specs := resolveTargetSpecs(targets, forceV4, forceV6, familySrc, hasV4, hasV6, baseCfg, protocolName, net.LookupIP)
 
 	// The base config's protocol object is shared by every spec. Give each
 	// target its own where the protocol keeps per-trace state (auto mode).
@@ -886,8 +998,6 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 		tracer.SubmitEchoTargets(collectEchoTargets(table))
 	})
 
-	var maxTTLHit int32
-
 	collectorDone := make(chan struct{})
 	go func() {
 		defer close(collectorDone)
@@ -896,15 +1006,7 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 			case <-ctx.Done():
 				return
 			case r := <-probeResults:
-				h := table.GetOrCreate(r.TTL)
-				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
-				if r.IsTarget {
-					h.MarkTarget(r.IP)
-					cur := atomic.LoadInt32(&maxTTLHit)
-					if cur == 0 || int32(r.TTL) < cur {
-						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
-					}
-				}
+				recordResult(table, r)
 				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
 					resolver.Submit(r.IP)
 				}
@@ -924,12 +1026,26 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	<-collectorDone
 	debug.Final(table)
 
+	return table, resolver, enricher, pathMaxTTL(table), nil
+}
+
+// recordResult adds a probe result to the hop table: the sample, and who
+// answered it, from which the table tells the destination's TTL.
+func recordResult(table *hop.Table, r probe.Result) {
+	kind := probeKindFor(r.ProbeType)
+	table.GetOrCreate(r.TTL).AddSample(r.IP, r.RTT, r.FlowID, kind)
+	table.NoteReply(r.TTL, r.IP, r.FlowID, kind, r.IsTarget)
+}
+
+// pathMaxTTL is the last TTL a report shows: the destination's
+// (hop.Table.TargetTTL, the same one the TUI, the debug log and alerting
+// use), or the highest TTL seen while the target has not answered.
+func pathMaxTTL(table *hop.Table) int {
 	maxTTL := table.MaxTTLSeen()
-	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
+	if hit := table.TargetTTL(); hit > 0 && hit < maxTTL {
 		maxTTL = hit
 	}
-
-	return table, resolver, enricher, maxTTL, nil
+	return maxTTL
 }
 
 // probeKindFor maps a probe.ProbeType to the hop.ProbeKind slot that a
@@ -1010,9 +1126,6 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 		tracer.SubmitEchoTargets(collectEchoTargets(table))
 	})
 
-	// Track target hit for display (atomic for cross-goroutine safety)
-	var maxTTLHit int32
-
 	// Collect probe results in a goroutine
 	collectorDone := make(chan struct{})
 	go func() {
@@ -1022,15 +1135,7 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 			case <-ctx.Done():
 				return
 			case r := <-probeResults:
-				h := table.GetOrCreate(r.TTL)
-				h.AddSample(r.IP, r.RTT, r.FlowID, probeKindFor(r.ProbeType))
-				if r.IsTarget {
-					h.MarkTarget(r.IP)
-					cur := atomic.LoadInt32(&maxTTLHit)
-					if cur == 0 || int32(r.TTL) < cur {
-						atomic.StoreInt32(&maxTTLHit, int32(r.TTL))
-					}
-				}
+				recordResult(table, r)
 				// Echo replies come from IPs we already know — skip DNS
 				// resubmission to save cache churn, matching the TUI path.
 				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
@@ -1055,24 +1160,27 @@ func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolNa
 	<-collectorDone // wait for collector goroutine to exit
 	debug.Final(table)
 
-	maxTTL := table.MaxTTLSeen()
-	if hit := int(atomic.LoadInt32(&maxTTLHit)); hit > 0 && hit < maxTTL {
-		maxTTL = hit
-	}
+	maxTTL := pathMaxTTL(table)
 
 	if outputFmt != "" {
 		versionStr := displayVersion(version) + " (" + buildVersion + ")"
 		report := export.BuildReport(versionStr, target, targetIP, protocolName, table, resolver, enricher, maxTTL)
+		// A report that could not be written (a full disk, a closed pipe)
+		// is a failed run: the caller exits non-zero.
+		var werr error
 		switch outputFmt {
 		case "json":
-			export.WriteJSON(os.Stdout, report)
+			werr = export.WriteJSON(os.Stdout, report)
 		case "csv":
-			export.WriteCSV(os.Stdout, report)
+			werr = export.WriteCSV(os.Stdout, report)
 		case "dot":
-			export.WriteDOT(os.Stdout, report)
+			werr = export.WriteDOT(os.Stdout, report)
+		}
+		if werr != nil {
+			return table, fmt.Errorf("writing the %s report: %w", outputFmt, werr)
 		}
 	} else {
-		printReport(target, targetIP, table, resolver, enricher, int(atomic.LoadInt32(&maxTTLHit)), cfg.NumPaths, protocolName)
+		printReport(target, targetIP, table, resolver, enricher, table.TargetTTL(), cfg.NumPaths, protocolName)
 	}
 	return table, nil
 }

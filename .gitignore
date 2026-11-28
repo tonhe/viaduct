@@ -23,3 +23,7 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+
+# Agent team launcher: per-host state
+.claude/team/HANDOFF-*.md
+.claude/team/.run/

@@ -28,6 +28,7 @@ type AlertEngine struct {
 	affectedHop    int
 	affectedASN    string
 	disabled       bool
+	lastMaxTTL     int // the last TTL ObserveRound looked at in the round before
 }
 
 // NewAlertEngine creates a new alert engine with the given thresholds.
@@ -83,7 +84,8 @@ func (e *AlertEngine) Update(destLoss float64, destLatency time.Duration) bool {
 
 // ObserveRound feeds a round that has just been closed to the engine: hops
 // are the table's hops, sentTo the TTLs probes were sent to in that round and
-// maxTTL the last TTL to look at. A nil engine (alerting off) does nothing.
+// maxTTL the last TTL to look at: the destination's, once known. A nil engine
+// (alerting off) does nothing.
 func (e *AlertEngine) ObserveRound(hops []*hop.Hop, sentTo map[int]bool, maxTTL int) {
 	if e == nil {
 		return
@@ -99,8 +101,16 @@ func (e *AlertEngine) ObserveRound(hops []*hop.Hop, sentTo map[int]bool, maxTTL 
 	if dest := destAlertTTL(hopMap, maxTTL); dest > 0 && !sentTo[dest] {
 		return
 	}
+	// The engine follows the destination's hop, whichever TTL that is. When
+	// the destination moves (hop.Table.TargetTTL) the count of bad rounds and
+	// a raised alert carry over: they are about the destination, and a good
+	// round at its new hop clears them as it would at the old one. Only the
+	// hop named as affected is looked for again.
+	moved := e.lastMaxTTL != 0 && maxTTL != e.lastMaxTTL
+	e.lastMaxTTL = maxTTL
 	destLoss, destLatency := destAlertMetrics(hopMap, maxTTL)
-	if e.Update(destLoss, destLatency) && e.State() == AlertDegraded {
+	changed := e.Update(destLoss, destLatency)
+	if e.State() == AlertDegraded && (changed || moved) {
 		e.FindAffectedHop(hopMap, maxTTL, computeDeltas(hopMap, maxTTL))
 	}
 }
