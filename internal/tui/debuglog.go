@@ -42,6 +42,11 @@ type RoundDebug struct {
 	// held is the periodic snapshot of the last round closed, not yet
 	// written: the next round's close writes it, Final drops it.
 	held []string
+	// paused is true while the trace is paused. idle is set with it and
+	// stays set until a round that sent a probe closes: a round that sent
+	// nothing is not recorded while it is set (see SetPaused).
+	paused, idle bool
+	pausedAt     time.Time
 }
 
 // roundCounts are a hop's cumulative counters when a round closed.
@@ -123,6 +128,32 @@ func alertMaxTTL(table *hop.Table, targetTTL int) int {
 	return maxTTL
 }
 
+// SetPaused tells the recorder that the trace was paused or resumed, and
+// writes a line for it. A paused tracer goes on closing rounds in which it
+// sends nothing. Those are not rounds of the trace: they get no round line,
+// no round number and no snapshot. The round that was under way when the
+// trace was paused sent probes and is recorded as usual. So is a round that
+// sent nothing while the trace was running (every send failed or was
+// skipped), with one exception: the empty round the tracer was waiting out
+// when the trace resumed, which closes just after.
+func (d *RoundDebug) SetPaused(paused bool) {
+	if d == nil || d.paused == paused {
+		return
+	}
+	d.paused = paused
+	now := d.now()
+	if paused {
+		d.idle = true
+		d.pausedAt = now
+		d.printf("paused after round %d", d.rounds)
+		return
+	}
+	// The next round's "took" is counted from here, not from before the
+	// pause.
+	d.last = now
+	d.printf("resumed after %v", now.Sub(d.pausedAt).Round(time.Millisecond))
+}
+
 // RoundClosed records a round that has just been closed on table (CloseRound,
 // whose result is sentTo). In the TUI the session's alert engine has already
 // seen the round.
@@ -130,6 +161,17 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 	if d == nil {
 		return
 	}
+	hops := table.Snapshot()
+	if d.idle {
+		if !d.sentSince(hops) {
+			// An empty round of a paused trace. Its replies, if any arrive,
+			// are counted with the next round that is recorded.
+			d.last = d.now()
+			return
+		}
+		d.idle = d.paused
+	}
+
 	// The run went on past the last snapshot round: its snapshot is not the
 	// final one, so it is written now.
 	d.write(d.held)
@@ -140,7 +182,6 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 	took := now.Sub(d.last)
 	d.last = now
 
-	hops := table.Snapshot()
 	target := table.TargetTTL()
 	var sum roundCounts
 	// Hops probed and hops that answered nothing are counted up to the
@@ -214,6 +255,24 @@ func (d *RoundDebug) RoundClosed(table *hop.Table, sentTo map[int]bool) {
 	if d.rounds%snapshotEvery == 0 {
 		d.held = d.snapshot("snapshot", table)
 	}
+}
+
+// sentSince reports whether any probe was sent since the last round that was
+// recorded.
+func (d *RoundDebug) sentSince(hops []*hop.Hop) bool {
+	for _, h := range hops {
+		var c roundCounts
+		c.icmpSent, c.icmpRecvd, c.primarySent, c.primaryRecvd = h.ProbeCountsByType()
+		c.echoSent, c.echoRecvd, _, _ = h.EchoCounts()
+		delta := c.minus(d.prev[h.TTL])
+		if delta.anyNegative() {
+			delta = c
+		}
+		if delta.icmpSent+delta.primarySent+delta.echoSent > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // logAlert writes a line when the alert engine's state has changed since the

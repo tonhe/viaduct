@@ -46,6 +46,7 @@ func (m Model) onMainKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if s.tracer != nil {
 				atomic.StoreInt32(&s.tracer.Paused, paused)
 			}
+			s.debug.SetPaused(m.paused)
 		}
 	case "r":
 		m.startTime = time.Now()
