@@ -403,7 +403,7 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--no-paths` | | | Disable ECMP, single-path mode |
 | `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
 | `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
-| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
+| `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total). A target given twice is traced once; names are compared without regard to case |
 | `--report` | `-r` | | Report mode: non-interactive, run `--count` rounds (10 if not set), print table and exit. The last round waits up to `--timeout` for replies still outstanding, so a run can take up to one timeout longer than count × interval |
 | `--output` | `-o` | | Export format: `json`, `csv`, or `dot`, written to stdout (implies `--report`; see [Exporting from the command line](#exporting-from-the-command-line)) |
 | `--no-dns` | `-n` | | Skip reverse DNS lookups |
