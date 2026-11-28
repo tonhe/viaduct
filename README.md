@@ -64,7 +64,7 @@ make install    # builds and copies to ~/bin/
 > sudo setcap cap_net_raw+ep $(which via)
 > ```
 
-`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead.
+`via` needs raw sockets. Started without that permission and not as root, it runs itself again under `sudo` with the same arguments, and exits with that run's exit status. If `sudo` is not installed, it reports the socket error instead. A flag error (`--no-paths` with another `--paths` value, an unknown `--output` format or protocol) is reported before that, without `sudo`.
 
 ---
 
@@ -401,8 +401,8 @@ via -c 5 -o dot example.com | dot -Tsvg > path.svg
 | `--count` | `-c` | 0 | Number of probe rounds (0 = infinite; report mode runs 10 when this is not set) |
 | `--first-ttl` | `-f` | 1 | Starting TTL |
 | `--psize` | `-s` | 64 | Payload size in bytes |
-| `--paths` | | 6 | Number of ECMP flows to probe |
-| `--no-paths` | | | Disable ECMP, single-path mode |
+| `--paths` | | 6 | Number of ECMP flows to probe, 1 to 32. A value outside that range is clamped with a warning |
+| `--no-paths` | | | Disable ECMP, single-path mode. The same as `--paths 1`; an error with any other `--paths` value |
 | `--ipv4` | `-4` | | Force IPv4; an error if the target has no A record or the host has no IPv4. Cannot be combined with `-6` |
 | `--ipv6` | `-6` | | Force IPv6; an error if the target has no AAAA record or the host has no IPv6 (see [IPv6 Support](#ipv6-support)). Cannot be combined with `-4` |
 | `--targets` | | | File of targets to trace, one per line (combined with positional args, max 16 total) |
