@@ -87,13 +87,25 @@ func computePDLayout(width, ipNeeded int, hasPrimary bool) pdLayout {
 	return l
 }
 
+// pdWidthCountNum is the room for one number of a count cell that does not
+// fit in full: two of them and the slash fill the column.
+const pdWidthCountNum = (pdWidthCount - 1) / 2
+
 // countCell renders "received/sent" for one probe type, or a dash when none
 // of that type were sent. dim marks a figure that is still accumulating.
+//
+// The cell is never wider than its column. A figure too long to show in full
+// has each number shortened to thousands or millions, rounded down, as the
+// Rnd column is: 12345/123456 is shown as 12k/123k.
 func countCell(received, sent int, dim bool) string {
 	if sent == 0 {
 		return dimStyle().Render(padCell("—", pdWidthCount))
 	}
-	plain := padCell(fmt.Sprintf("%d/%d", received, sent), pdWidthCount)
+	text := fmt.Sprintf("%d/%d", received, sent)
+	if len(text) > pdWidthCount {
+		text = formatRounds(received, pdWidthCountNum) + "/" + formatRounds(sent, pdWidthCountNum)
+	}
+	plain := padCell(text, pdWidthCount)
 	if dim {
 		return dimStyle().Render(plain)
 	}
