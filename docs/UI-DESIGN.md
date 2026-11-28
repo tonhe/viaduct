@@ -201,6 +201,8 @@ Loss belongs to the hop, not to a node: an unanswered TTL-limited probe does not
 | `Echo` | 9 | direct echoes to the node, `received/sent` |
 | `Rnd` | 5 | the hop's rounds |
 
+A count that does not fit its 9 cells in full has each number shortened to thousands or millions, rounded down, as `Rnd` is: `12345/123456` is shown as `12k/123k`. The exports carry the full counts.
+
 - A count cell is a dim `—` when no probe of that type was sent.
 - The Echo count is dim while the hop has no verdict: until it first has the 20 echo samples a rate-limit verdict needs, counted over the hop's nodes. Until then the count is still accumulating and must not look like a settled figure. Once the hop has had a verdict the count stays undimmed, also while a held verdict covers fewer than 20 samples.
 - A TTL with no reply is the hop number and `*`.
