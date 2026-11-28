@@ -144,8 +144,16 @@ func TestDebugLog_SnapshotEveryTenRounds(t *testing.T) {
 		},
 		{
 			name: "rate-limited", rounds: 30,
+			round: func(s *stallSim, i int) { s.round(2, true) },
+			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=~0%† kind=rate_limited icmp-ttl=30/0 udp-ttl=60/30 echo=30/0 echo-counted=30/0 rate-limited=yes verdict-held=no verdict-probes=90/30",
+		},
+		{
+			// The destination is judged on the probe types the target answers
+			// (viaduct#244): it never answers UDP here, so the UDP probes are
+			// not its loss.
+			name: "target answers one probe type", rounds: 30,
 			round: func(s *stallSim, i int) { s.round(1, true) },
-			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=~0%† kind=rate_limited icmp-ttl=30/0 udp-ttl=60/60 echo=30/0 echo-counted=30/0 rate-limited=yes verdict-held=no verdict-probes=90/60",
+			want:  "[192.0.2.1] snapshot round=30 ttl=3 nodes=192.0.2.3 loss=0.0% kind=measured icmp-ttl=30/0 udp-ttl=60/60 echo=30/0 echo-counted=30/0 rate-limited=no verdict-held=no verdict-probes=30/0",
 		},
 		{
 			name: "real loss", rounds: 30,

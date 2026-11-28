@@ -45,18 +45,18 @@ type Hop struct {
 	// so they are dropped until that round closes or a new round is sent.
 	draining bool
 
-	// heldVerdict is the hop's last rate-limit verdict, and heldEchoLoss the
-	// echo loss that went with it. Once a hop has had a verdict it keeps one:
-	// while its echo totals are below the samples a verdict needs, these stand
-	// in (see holdVerdictLocked). Undetermined until the first verdict.
-	// heldEchoSent and heldEchoRecvd are the echo totals both were made from,
-	// and heldProbesSent and heldProbesRecvd the TTL-probe counts.
-	heldVerdict     RateLimitState
-	heldEchoLoss    float64
-	heldEchoSent    int
-	heldEchoRecvd   int
-	heldProbesSent  int
-	heldProbesRecvd int
+	// held is the hop's last rate-limit verdict as a hop of the path, and
+	// heldTarget its last verdict judged on the target alone (see
+	// verdictBasis). Once a hop has had a verdict it keeps one: while its echo
+	// totals are below the samples a verdict needs, the record stands in (see
+	// holdVerdictLocked). Both are kept, so the hop has one to hold whichever
+	// way it is judged when it gains or loses the destination.
+	held       verdictRecord
+	heldTarget verdictRecord
+
+	// destination is set by Table.EndRound on the destination's hop (see
+	// Table.TargetTTL). That hop is judged on the target alone.
+	destination bool
 
 	mu sync.RWMutex
 }
@@ -329,7 +329,9 @@ func (h *Hop) MarkTarget(ip net.IP) {
 // hop that answers echoes but not its TTL probes is rate-limiting or filtering
 // them. A hop that loses both at the same rate has real loss.
 //
-// The destination is judged like any other hop.
+// The destination's hop is the exception (see verdictBasis): it is judged on
+// the target alone, so a router that answers at the same TTL does not dilute
+// the target's loss.
 func (h *Hop) RateLimitState() RateLimitState {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -337,18 +339,123 @@ func (h *Hop) RateLimitState() RateLimitState {
 }
 
 func (h *Hop) rateLimitStateLocked() RateLimitState {
-	// The destination is judged like any other hop: it throttles the Port
+	// The destination is tested like any other hop: it throttles the Port
 	// Unreachable errors it sends in answer to UDP probes just as a router
 	// throttles Time Exceeded. Real loss on the way to it costs echoes too,
-	// and is not flagged.
-	echoSent, echoRecvd := h.echoTotalsLocked()
-	verdict := rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, echoSent, echoSent-echoRecvd)
+	// and is not flagged. Only the counts differ (verdictBasis).
+	b := h.basisLocked()
+	verdict := b.verdict()
 	if verdict == RateLimitUndetermined {
 		// Too few echo samples. A hop that has had a verdict keeps it until
 		// its echo totals are enough for a new one.
-		return h.heldVerdict
+		return b.held.verdict
 	}
 	return verdict
+}
+
+// verdictRecord is a rate-limit verdict as it was taken, with the echo loss
+// that went with it and the counts both were made from.
+type verdictRecord struct {
+	verdict     RateLimitState // Undetermined until the first verdict
+	echoLoss    float64
+	echoSent    int
+	echoRecvd   int
+	probesSent  int
+	probesRecvd int
+}
+
+// verdictBasis is what a hop's verdict and headline loss are made from: the
+// TTL-limited probes sent and answered, as of the last closed round, the
+// echoes sent and answered, and the record of the last verdict taken on the
+// same basis.
+type verdictBasis struct {
+	probesSent, probesRecvd int
+	echoSent, echoRecvd     int
+	held                    *verdictRecord
+	// target is true when the counts are the target's alone (targetBasisLocked).
+	target bool
+}
+
+func (b verdictBasis) verdict() RateLimitState {
+	return rateLimitVerdict(b.probesSent, b.probesSent-b.probesRecvd, b.echoSent, b.echoSent-b.echoRecvd)
+}
+
+// isHeld reports whether the verdict made on this basis is a held one: there
+// has been a verdict, and the echo totals are now below the samples a new one
+// needs.
+func (b verdictBasis) isHeld() bool {
+	return b.echoSent < rateLimitMinEchoSamples && b.held.verdict != RateLimitUndetermined
+}
+
+// basisLocked returns the counts the hop is judged on. Every hop but the
+// destination's is judged as a hop of the path (hopBasisLocked). The
+// destination's hop is judged on the target alone (targetBasisLocked) once a
+// node there is marked as the target: at the destination's TTL a router can
+// answer the probes of a type whose path is longer (in UDP mode, the ICMP TTL
+// probe), and its echoes and replies would dilute the target's loss.
+func (h *Hop) basisLocked() verdictBasis {
+	if h.destination {
+		if b, ok := h.targetBasisLocked(); ok {
+			return b
+		}
+	}
+	return h.hopBasisLocked()
+}
+
+// hopBasisLocked is the basis of a hop of the path: every TTL-limited probe
+// sent to this TTL, of every type, against the hop's echo totals
+// (echoTotalsLocked).
+func (h *Hop) hopBasisLocked() verdictBasis {
+	b := verdictBasis{probesSent: h.closedSent, probesRecvd: h.closedRecvd, held: &h.held}
+	b.echoSent, b.echoRecvd = h.echoTotalsLocked()
+	return b
+}
+
+// targetBasisLocked is the basis of the target alone: only the echoes sent to
+// the node marked as the target, every one of them (there is no other node
+// whose answers could set the target's silence against), and only the
+// TTL-limited probes of the types the target has answered at this TTL. A
+// probe type the target never answers here is answered, or lost, by someone
+// else. ok is false when no node of the hop is marked as the target. If the
+// target has answered only echoes here, every probe type counts.
+func (h *Hop) targetBasisLocked() (b verdictBasis, ok bool) {
+	icmp, primary := false, false
+	for _, n := range h.Nodes {
+		if !n.IsTarget() {
+			continue
+		}
+		ok = true
+		e := n.EchoStats()
+		b.echoSent += e.Sent
+		b.echoRecvd += e.Received
+		icmp = icmp || n.ICMPTTLStats().Received > 0
+		primary = primary || n.PrimaryStats().Received > 0
+	}
+	if !ok {
+		return verdictBasis{}, false
+	}
+	if !icmp && !primary {
+		icmp, primary = true, true
+	}
+	if icmp {
+		b.probesSent += h.closedICMPSent
+		b.probesRecvd += h.closedICMPRecvd
+	}
+	if primary {
+		b.probesSent += h.closedSent - h.closedICMPSent
+		b.probesRecvd += h.closedRecvd - h.closedICMPRecvd
+	}
+	b.held = &h.heldTarget
+	b.target = true
+	return b, true
+}
+
+// setDestination records whether this hop is the destination's (see
+// Table.EndRound).
+func (h *Hop) setDestination(dest bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.destination = dest
 }
 
 // holdVerdictLocked records the hop's verdict, and the echo loss that goes
@@ -358,33 +465,57 @@ func (h *Hop) rateLimitStateLocked() RateLimitState {
 // first answers one. The record is then what the hop shows until the new
 // totals are enough. It is taken when a round closes and before every echo
 // answer, the event that changes the totals. Callers hold the write lock.
+//
+// The record is kept for both ways a hop can be judged (see basisLocked), so
+// a hop that gains or loses the destination has its own last verdict to hold.
 func (h *Hop) holdVerdictLocked() {
-	sent, received := h.echoTotalsLocked()
-	verdict := rateLimitVerdict(h.closedSent, h.closedSent-h.closedRecvd, sent, sent-received)
+	hold(h.hopBasisLocked())
+	if b, ok := h.targetBasisLocked(); ok {
+		hold(b)
+	}
+}
+
+// hold records b's verdict in b.held, if the counts are enough for one.
+func hold(b verdictBasis) {
+	verdict := b.verdict()
 	if verdict == RateLimitUndetermined {
 		return
 	}
-	h.heldVerdict = verdict
-	h.heldEchoLoss = echoLossPercent(sent, received)
-	h.heldEchoSent, h.heldEchoRecvd = sent, received
-	h.heldProbesSent, h.heldProbesRecvd = h.closedSent, h.closedRecvd
+	*b.held = verdictRecord{
+		verdict:     verdict,
+		echoLoss:    echoLossPercent(b.echoSent, b.echoRecvd),
+		echoSent:    b.echoSent,
+		echoRecvd:   b.echoRecvd,
+		probesSent:  b.probesSent,
+		probesRecvd: b.probesRecvd,
+	}
 }
 
 // verdictHeldLocked reports whether the verdict the hop shows is a held one:
 // it has had a verdict, and its echo totals are now below the samples a new
 // one needs.
 func (h *Hop) verdictHeldLocked() bool {
-	sent, _ := h.echoTotalsLocked()
-	return sent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined
+	return h.basisLocked().isHeld()
 }
 
 // verdictProbeCountsLocked returns the TTL-probe counts the hop's verdict was
 // made from: the held ones while the verdict is held, else the current ones.
 func (h *Hop) verdictProbeCountsLocked() (sent, received int) {
-	if h.verdictHeldLocked() {
-		return h.heldProbesSent, h.heldProbesRecvd
+	b := h.basisLocked()
+	if b.isHeld() {
+		return b.held.probesSent, b.held.probesRecvd
 	}
-	return h.closedSent, h.closedRecvd
+	return b.probesSent, b.probesRecvd
+}
+
+// verdictEchoTotalsLocked returns the echo totals the verdict was made from:
+// the held ones while the verdict is held, else the current ones.
+func (h *Hop) verdictEchoTotalsLocked() (sent, received int) {
+	b := h.basisLocked()
+	if b.isHeld() {
+		return b.held.echoSent, b.held.echoRecvd
+	}
+	return b.echoSent, b.echoRecvd
 }
 
 // VerdictHeld reports whether the hop is holding an earlier rate-limit
@@ -401,8 +532,10 @@ func (h *Hop) VerdictHeld() bool {
 // VerdictProbeCounts returns the TTL-limited probes sent to this TTL, and the
 // replies received, that the hop's rate-limit verdict was made from. While
 // the hop holds an earlier verdict (see VerdictHeld) they are the counts of
-// the moment that verdict was taken; otherwise they equal ProbeCounts. With
-// VerdictEchoTotals they are everything the verdict was computed from.
+// the moment that verdict was taken; otherwise they equal ProbeCounts, except
+// on the destination's hop, where they are the probes of the types the target
+// has answered (see basisLocked). With VerdictEchoTotals they are everything
+// the verdict was computed from.
 func (h *Hop) VerdictProbeCounts() (sent, received int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -461,7 +594,8 @@ func (h *Hop) echoTotalsLocked() (sent, received int) {
 // it is echo-derived. When the hop is judged rate-limited, its TTL probe loss
 // is an artifact of routers not answering, so the loss of direct echoes to
 // the hop's nodes is reported instead (shown as "~N%†"). Otherwise it is
-// LossPercent.
+// LossPercent, except on the destination's hop, where both are the target's
+// alone (see basisLocked).
 func (h *Hop) HeadlineLoss() (loss float64, rateLimited bool) {
 	loss, kind := h.Loss()
 	return loss, kind == LossRateLimited
@@ -492,23 +626,23 @@ func (h *Hop) Loss() (pct float64, kind LossKind) {
 }
 
 func (h *Hop) lossLocked() (pct float64, kind LossKind) {
+	b := h.basisLocked()
 	verdict := h.rateLimitStateLocked()
 	if verdict == RateLimitYes {
-		sent, received := h.echoTotalsLocked()
-		if sent < rateLimitMinEchoSamples {
+		if b.echoSent < rateLimitMinEchoSamples {
 			// The verdict is a held one: so is its echo loss.
-			return h.heldEchoLoss, LossRateLimited
+			return b.held.echoLoss, LossRateLimited
 		}
-		return echoLossPercent(sent, received), LossRateLimited
+		return echoLossPercent(b.echoSent, b.echoRecvd), LossRateLimited
 	}
-	if h.closedSent == 0 {
+	if b.probesSent == 0 {
 		return 0, LossMeasured
 	}
-	lost := h.closedSent - h.closedRecvd
+	lost := b.probesSent - b.probesRecvd
 	if lost <= 0 {
 		return 0, LossMeasured
 	}
-	pct = float64(lost) / float64(h.closedSent) * 100
+	pct = float64(lost) / float64(b.probesSent) * 100
 	if verdict == RateLimitUndetermined && len(h.Nodes) > 0 {
 		return pct, LossProvisional
 	}
@@ -562,7 +696,8 @@ func (h *Hop) ProbeCountsByType() (icmpSent, icmpRecvd, primarySent, primaryRecv
 // EchoCounts returns the direct echoes sent to this hop's nodes and the
 // answers received, and the part of both that counts toward the hop's
 // rate-limit verdict and echo loss: a node that ignores ping is left out of
-// the counted totals (see echoTotalsLocked).
+// the counted totals (see echoTotalsLocked), and on the destination's hop
+// only the target's echoes count (see basisLocked).
 func (h *Hop) EchoCounts() (sent, received, countedSent, countedReceived int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -571,8 +706,8 @@ func (h *Hop) EchoCounts() (sent, received, countedSent, countedReceived int) {
 		sent += s.Sent
 		received += s.Received
 	}
-	countedSent, countedReceived = h.echoTotalsLocked()
-	return sent, received, countedSent, countedReceived
+	b := h.basisLocked()
+	return sent, received, b.echoSent, b.echoRecvd
 }
 
 // VerdictEchoTotals returns the echo totals the hop's rate-limit verdict and
@@ -581,24 +716,26 @@ func (h *Hop) EchoCounts() (sent, received, countedSent, countedReceived int) {
 // While the hop holds an earlier verdict because those totals fell below the
 // samples a verdict needs, they are the totals the held verdict was made
 // from, so a rate-limited headline is always the loss of the totals returned.
+// On the destination's hop they are the echoes sent to the target and its
+// answers (see basisLocked).
 func (h *Hop) VerdictEchoTotals() (sent, received int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	sent, received = h.echoTotalsLocked()
-	if sent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined {
-		return h.heldEchoSent, h.heldEchoRecvd
-	}
-	return sent, received
+	return h.verdictEchoTotalsLocked()
 }
 
 // EchoIgnored reports whether the node with the given address is left out of
 // the hop's echo totals: it has answered none of its first echoSilentAfter
 // echoes while another node of the hop answers echo. A node that starts
 // answering is no longer left out; the echoes it ignored before stay out of
-// the totals.
+// the totals. On the destination's hop no node is: the target's echoes are
+// all counted, and the other nodes' echoes are not the target's.
 func (h *Hop) EchoIgnored(ip net.IP) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if h.basisLocked().target {
+		return false
+	}
 	ignores, othersAnswer := false, false
 	for _, n := range h.Nodes {
 		s := n.EchoStats()
@@ -657,13 +794,13 @@ func (h *Hop) LossSnapshot() LossSnapshot {
 		snap.SettledLoss = snap.Loss
 	}
 	snap.RateLimit = h.rateLimitStateLocked()
-	snap.EchoSent, snap.EchoReceived = h.echoTotalsLocked()
-	if snap.EchoSent < rateLimitMinEchoSamples && h.heldVerdict != RateLimitUndetermined {
-		snap.EchoSent, snap.EchoReceived = h.heldEchoSent, h.heldEchoRecvd
-	}
+	snap.EchoSent, snap.EchoReceived = h.verdictEchoTotalsLocked()
 	snap.VerdictHeld = h.verdictHeldLocked()
 	snap.VerdictProbesSent, snap.VerdictProbesReceived = h.verdictProbeCountsLocked()
 	snap.EchoIgnoredIPs = make(map[string]bool)
+	if h.basisLocked().target {
+		return snap // no node is left out of the target's totals (EchoIgnored)
+	}
 	for i, n := range h.Nodes {
 		if n.IP == nil {
 			continue
@@ -767,10 +904,8 @@ func (h *Hop) Reset() {
 	h.closedICMPSent, h.closedICMPRecvd = 0, 0
 	h.openICMP = 0
 	h.openPrimary = 0
-	h.heldVerdict = RateLimitUndetermined
-	h.heldEchoLoss = 0
-	h.heldEchoSent, h.heldEchoRecvd = 0, 0
-	h.heldProbesSent, h.heldProbesRecvd = 0, 0
+	h.held = verdictRecord{}
+	h.heldTarget = verdictRecord{}
 }
 
 // Table is a thread-safe collection of hops indexed by TTL.

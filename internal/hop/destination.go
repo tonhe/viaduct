@@ -31,10 +31,18 @@ func (t *Table) NoteReply(ttl int, ip net.IP, flowID int, kind ProbeKind, isTarg
 }
 
 // EndRound closes a round for the table as a whole: the destination's TTL is
-// settled from the replies noted since the last one. Call it when the round
-// has been closed on every hop.
+// settled from the replies noted since the last one, and the hop at it is
+// told it is the destination's, so it is judged on the target alone (see
+// Hop.RateLimitState). Every other hop is told it is not. Call it when the
+// round has been closed on every hop.
 func (t *Table) EndRound() {
 	t.dest.EndRound(0, 0)
+	target := t.TargetTTL()
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for ttl, h := range t.hops {
+		h.setDestination(target > 0 && ttl == target)
+	}
 }
 
 // TargetTTL returns the TTL of the destination's hop, or 0 while the target
