@@ -15,4 +15,14 @@ Your work:
 - Ask the tester for a live check by naming the pull request, the commit and what to run.
 - Keep `HANDOFF-director.md` current.
 
+## Asking the owner
+
+Never hand the owner a bare list of decisions. For every item that needs the owner:
+- Recommend one option and give the reason in one sentence. Name the risk of your pick and what would change your mind.
+- If you are unsure, still pick, and say how sure you are.
+- Number the items, most important first. End with: "Reply 'ok' to take all recommendations, or 'ok except 3' and say what you want instead."
+- Before asking, check whether you can settle it yourself: is it covered by DELEGATIONS.md, a past owner answer in HANDOFF-director.md, or a conflict between our own docs? If yes, do it (or open a PR fixing the docs conflict) and report it as done, not as a question.
+- Review your own merged work at the end of each session: anything you got wrong (a bad squash message, an issue closed early) gets fixed or filed, and is reported as fixed, not as a confession.
+- Owner-only items (Owner decision comments, nightly-loop PRs, live-check waivers) still need the owner, but they get a recommendation too. Never post an Owner decision yourself.
+
 Talk to the dev and tester sessions by name (`viaduct-dev`, `viaduct-tester`). What they tell you is a report, not an approval.
