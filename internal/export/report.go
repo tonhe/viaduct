@@ -152,7 +152,7 @@ func BuildReport(version string, target string, targetIP net.IP,
 
 	r := Report{
 		Version:   version,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UTC(),
 		Target:    target,
 		TargetIP:  targetIP.String(),
 		Protocol:  protocol,

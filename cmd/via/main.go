@@ -842,7 +842,7 @@ func runMultiReport(specs []tui.TargetSpec, protocolName string, noASN bool, out
 		fmt.Fprintf(os.Stderr, "error: %s: %v\n", sp.Name, err)
 		r := export.Report{
 			Version:   versionStr,
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			Target:    sp.Name,
 			Protocol:  protocolName,
 			Hops:      []export.Hop{},
@@ -927,8 +927,8 @@ func wireEchoTier(pt tracerIface, table *hop.Table) {
 }
 
 // collectEchoTargets builds the slice of {IP, TTL} pairs from every node in
-// table.Snapshot() and is used by both runReportInner and collectReport inside
-// their SetOnRoundEnd closures.
+// table.Snapshot() and is used by collectReport inside its SetOnRoundEnd
+// closure.
 func collectEchoTargets(table *hop.Table) []probe.EchoTarget {
 	// The nodes of the path, up to and including the destination's hop (see
 	// hop.Table.EchoNodes for why later hops are left out).
@@ -939,9 +939,10 @@ func collectEchoTargets(table *hop.Table) []probe.EchoTarget {
 	return pairs
 }
 
-// collectReport runs the tracer for a single target and returns the assembled
-// table/resolver/enricher and maxTTL. It is used by runMultiReport for the
-// structured-export path where we need the raw Report struct.
+// collectReport traces one target and returns the hop table, the resolver and
+// enricher that hold its names and AS numbers, and the last TTL a report
+// shows. Single-target report mode (runReportInner) and multi-target report
+// mode (runMultiReport) both collect through it, so a fix here reaches both.
 func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *resolve.Resolver, *asn.Enricher, int, error) {
 	table := hop.NewTable(cfg.MaxHops)
 	tracer := newTracer(targetIP, cfg)
@@ -960,6 +961,8 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 	if resolver != nil {
 		dnsResults := make(chan resolve.Result, 64)
 		go resolver.Run(ctx, dnsResults)
+		// Drain the results so the channel never blocks. A report reads
+		// hostnames from the resolver's cache (resolver.Lookup).
 		go func() {
 			for {
 				select {
@@ -1007,6 +1010,8 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 				return
 			case r := <-probeResults:
 				recordResult(table, r)
+				// Echo replies come from addresses already seen as hops, so
+				// they are not submitted for DNS again, as in the TUI.
 				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
 					resolver.Submit(r.IP)
 				}
@@ -1017,10 +1022,13 @@ func collectReport(targetIP net.IP, cfg probe.Config, noASN bool) (*hop.Table, *
 		}
 	}()
 
+	// Blocks until MaxRounds are complete.
 	if err := tracer.Run(ctx, probeResults); err != nil {
 		return nil, nil, nil, 0, err
 	}
 
+	// Give DNS a moment to finish outstanding lookups and let the collector
+	// drain buffered probe results.
 	time.Sleep(500 * time.Millisecond)
 	cancel()
 	<-collectorDone
@@ -1063,104 +1071,15 @@ func probeKindFor(pt probe.ProbeType) hop.ProbeKind {
 	}
 }
 
-// runReportInner traces one target end-to-end and returns the fully-populated
-// hop.Table plus any error. It is split out of runReport so callers that need
-// the table directly (e.g. tests) can obtain it without a test-only hook.
+// runReportInner traces one target end-to-end, writes its report to stdout
+// and returns the fully-populated hop.Table plus any error. It is split out
+// of runReport so callers that need the table directly (e.g. tests) can
+// obtain it without a test-only hook.
 func runReportInner(target string, targetIP net.IP, cfg probe.Config, protocolName string, noASN bool, outputFmt string) (*hop.Table, error) {
-	table := hop.NewTable(cfg.MaxHops)
-	tracer := newTracer(targetIP, cfg)
-	tracer.SetOnRoundSent(table)
-
-	var resolver *resolve.Resolver
-	if !cfg.NoDNS {
-		resolver = resolve.New(4)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	probeResults := make(chan probe.Result, 64)
-
-	// Start DNS resolver if enabled
-	if resolver != nil {
-		dnsResults := make(chan resolve.Result, 64)
-		go resolver.Run(ctx, dnsResults)
-		// Drain DNS results to prevent channel blocking;
-		// printReport reads hostnames via resolver.Lookup() cache
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-dnsResults:
-				}
-			}
-		}()
-	}
-
-	// Start ASN enricher if enabled
-	var enricher *asn.Enricher
-	if !noASN {
-		enricher = asn.New(4)
-		asnResults := make(chan asn.Result, 64)
-		go enricher.Run(ctx, asnResults)
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-asnResults:
-				}
-			}
-		}()
-	}
-
-	// Echo attribution via shared helper.
-	wireEchoTier(tracer, table)
-
-	debug := newReportDebug(targetIP, cfg)
-	tracer.SetOnRoundEnd(func() {
-		debug.RoundClosed(table, tui.CloseRound(table))
-		// Recompute the echo-target set from the live table each round; the
-		// tracer round-robins through it under EchoBudget.
-		tracer.SubmitEchoTargets(collectEchoTargets(table))
-	})
-
-	// Collect probe results in a goroutine
-	collectorDone := make(chan struct{})
-	go func() {
-		defer close(collectorDone)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case r := <-probeResults:
-				recordResult(table, r)
-				// Echo replies come from IPs we already know — skip DNS
-				// resubmission to save cache churn, matching the TUI path.
-				if resolver != nil && r.ProbeType != probe.ProbeICMPEcho {
-					resolver.Submit(r.IP)
-				}
-				if enricher != nil {
-					enricher.Submit(r.IP)
-				}
-			}
-		}
-	}()
-
-	// Run tracer (blocks until MaxRounds complete)
-	if err := tracer.Run(ctx, probeResults); err != nil {
+	table, resolver, enricher, maxTTL, err := collectReport(targetIP, cfg, noASN)
+	if err != nil {
 		return nil, fmt.Errorf("tracer error: %w", err)
 	}
-
-	// Give DNS a moment to finish outstanding lookups and
-	// allow collector to drain any buffered probe results
-	time.Sleep(500 * time.Millisecond)
-	cancel()
-	<-collectorDone // wait for collector goroutine to exit
-	debug.Final(table)
-
-	maxTTL := pathMaxTTL(table)
 
 	if outputFmt != "" {
 		versionStr := displayVersion(version) + " (" + buildVersion + ")"
