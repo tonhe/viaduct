@@ -112,9 +112,22 @@ func seedAlignHops(s *TargetSession, hops []alignHop, numPaths int) {
 			}
 			h.MarkRoundEnd()
 		}
+		// A node that answered no TTL probe in the closed rounds is first seen
+		// in the round still open (an echo reply cannot create a node), then
+		// answers the echo sent to it. Loss is over closed rounds, so the hop
+		// still reads 100% with too few echoes for a verdict.
 		for _, node := range fh.nodes {
 			if node.replies == 0 {
-				h.AddSample(net.ParseIP(node.ip), time.Duration(fh.ttl*7)*time.Millisecond, 0, hop.KindEcho)
+				ip := net.ParseIP(node.ip)
+				rtt := time.Duration(fh.ttl*7) * time.Millisecond
+				h.MarkRoundSentProbes(numPaths)
+				h.AddSample(ip, rtt, 0, hop.KindPrimary)
+				for _, pn := range h.GetNodes() {
+					if pn.GetIP().Equal(ip) {
+						pn.MarkEchoSent()
+					}
+				}
+				h.AddSample(ip, rtt, 0, hop.KindEcho)
 			}
 		}
 		for _, pn := range h.GetNodes() {
