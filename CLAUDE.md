@@ -127,4 +127,5 @@ Every step applies to every issue an agent files. An issue missing one of them i
 
 - Never print or log passwords, tokens or other secrets.
 - Update `README.md` in the same change when user-visible behaviour changes: flags, keys, columns, output formats, defaults.
+- A change that adds something user-visible (a flag, key, column, output field or config key) marks it in `README.md` with the version it first ships in: `(since vX.Y.0)`, where X.Y is the next minor release, or `(since vX.Y.Z)` when it ships in a fix release. A reader of the README on `main` can then tell what their installed release has. What v0.3.0 already had carries no marker.
 - There is no `CHANGELOG.md`. GitHub releases are the changelog.
