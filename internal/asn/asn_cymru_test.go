@@ -12,110 +12,18 @@ import (
 	"context"
 	"net"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/net/dns/dnsmessage"
+	"github.com/tonhe/viaduct/internal/dnstest"
 )
-
-// fakeDNS is a DNS server on a loopback UDP socket. It answers a TXT question
-// for a name in txt with one TXT record per string, and every other question
-// with NXDOMAIN. It records the name of every TXT question it is asked.
-type fakeDNS struct {
-	conn net.PacketConn
-	txt  map[string][]string // lower-case name with a trailing dot -> one record per string
-
-	mu    sync.Mutex
-	asked []string
-}
-
-// useFakeDNS starts a fakeDNS, makes it the only server net.DefaultResolver
-// asks, and undoes both when the test ends.
-func useFakeDNS(t *testing.T, txt map[string][]string) *fakeDNS {
-	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening for the fake DNS server: %v", err)
-	}
-	f := &fakeDNS{conn: conn, txt: txt}
-	go f.serve()
-
-	saved := net.DefaultResolver
-	net.DefaultResolver = &net.Resolver{
-		PreferGo: true,
-		// Whatever server the host is configured with, ask the fake one.
-		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "udp", conn.LocalAddr().String())
-		},
-	}
-	t.Cleanup(func() {
-		net.DefaultResolver = saved
-		conn.Close()
-	})
-	return f
-}
-
-func (f *fakeDNS) serve() {
-	buf := make([]byte, 1500)
-	for {
-		n, from, err := f.conn.ReadFrom(buf)
-		if err != nil {
-			return // closed
-		}
-		var p dnsmessage.Parser
-		hdr, err := p.Start(buf[:n])
-		if err != nil {
-			continue
-		}
-		q, err := p.Question()
-		if err != nil {
-			continue
-		}
-		name := strings.ToLower(q.Name.String())
-		resp := dnsmessage.Message{
-			Header: dnsmessage.Header{
-				ID:                 hdr.ID,
-				Response:           true,
-				RecursionDesired:   hdr.RecursionDesired,
-				RecursionAvailable: true,
-			},
-			Questions: []dnsmessage.Question{q},
-		}
-		records, known := f.txt[name]
-		if q.Type == dnsmessage.TypeTXT {
-			f.mu.Lock()
-			f.asked = append(f.asked, name)
-			f.mu.Unlock()
-		}
-		if !known || q.Type != dnsmessage.TypeTXT {
-			resp.Header.RCode = dnsmessage.RCodeNameError
-		}
-		if q.Type == dnsmessage.TypeTXT {
-			for _, r := range records {
-				resp.Answers = append(resp.Answers, dnsmessage.Resource{
-					Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET, TTL: 60},
-					Body:   &dnsmessage.TXTResource{TXT: []string{r}},
-				})
-			}
-		}
-		out, err := resp.Pack()
-		if err != nil {
-			continue
-		}
-		f.conn.WriteTo(out, from)
-	}
-}
 
 // askedCymru returns the Team Cymru names the server was asked for, in order.
 // A resolver may also try a failed name with the host's search domains
 // appended; those questions are not Team Cymru names and are left out.
-func (f *fakeDNS) askedCymru() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func askedCymru(dns *dnstest.Server) []string {
 	var names []string
-	for _, n := range f.asked {
+	for _, n := range dns.AskedTXT() {
 		if strings.HasSuffix(n, ".asn.cymru.com.") {
 			names = append(names, n)
 		}
@@ -209,7 +117,7 @@ func TestLookupCymru(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dns := useFakeDNS(t, tc.txt)
+			dns := dnstest.Start(t, dnstest.Records{TXT: tc.txt})
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
@@ -217,7 +125,7 @@ func TestLookupCymru(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("lookupCymru(%s) = %+v, want %+v", tc.ip, got, tc.want)
 			}
-			asked := dns.askedCymru()
+			asked := askedCymru(dns)
 			if strings.Join(asked, " ") != strings.Join(tc.wantAsked, " ") {
 				t.Errorf("names asked = %v, want %v", asked, tc.wantAsked)
 			}

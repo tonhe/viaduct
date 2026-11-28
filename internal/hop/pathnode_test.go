@@ -8,7 +8,7 @@ import (
 )
 
 func TestPathNodeAddSample(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(20*time.Millisecond, 1, KindPrimary)
 
@@ -27,7 +27,7 @@ func TestPathNodeAddSample(t *testing.T) {
 }
 
 func TestPathNodeFlowIDs(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(15*time.Millisecond, 2, KindPrimary)
 	pn.AddSample(12*time.Millisecond, 0, KindPrimary)
@@ -39,7 +39,7 @@ func TestPathNodeFlowIDs(t *testing.T) {
 }
 
 func TestPathNodeStDev(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(20*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(30*time.Millisecond, 0, KindPrimary)
@@ -55,7 +55,7 @@ func TestPathNodeStDev(t *testing.T) {
 // is tested in hop_test.go (TestHopRoundBasedLoss, TestHopLossPercent).
 
 func TestPathNodeStability(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 
 	for i := 0; i < 10; i++ {
 		pn.MarkSeen()
@@ -73,24 +73,24 @@ func TestPathNodeStability(t *testing.T) {
 }
 
 func TestPathNodeASN(t *testing.T) {
-	pn := &PathNode{IP: net.ParseIP("1.1.1.1")}
+	pn := &PathNode{IP: net.ParseIP("203.0.113.1")}
 	asn, org := pn.GetASN()
 	if asn != 0 || org != "" {
 		t.Fatalf("expected zero ASN, got %d %q", asn, org)
 	}
-	pn.SetASN(13335, "CLOUDFLARENET")
+	pn.SetASN(64496, "EXAMPLE-NET")
 	asn, org = pn.GetASN()
-	if asn != 13335 {
-		t.Fatalf("expected ASN 13335, got %d", asn)
+	if asn != 64496 {
+		t.Fatalf("expected ASN 64496, got %d", asn)
 	}
-	if org != "CLOUDFLARENET" {
-		t.Fatalf("expected org 'CLOUDFLARENET', got %q", org)
+	if org != "EXAMPLE-NET" {
+		t.Fatalf("expected org 'EXAMPLE-NET', got %q", org)
 	}
 }
 
 func TestPathNodeResetClearsASN(t *testing.T) {
-	pn := &PathNode{IP: net.ParseIP("1.1.1.1")}
-	pn.SetASN(13335, "CLOUDFLARENET")
+	pn := &PathNode{IP: net.ParseIP("203.0.113.1")}
+	pn.SetASN(64496, "EXAMPLE-NET")
 	pn.Reset()
 	asn, org := pn.GetASN()
 	if asn != 0 || org != "" {
@@ -99,7 +99,7 @@ func TestPathNodeResetClearsASN(t *testing.T) {
 }
 
 func TestPathNodeGeoMean(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(100*time.Millisecond, 0, KindPrimary)
 	// Geometric mean of 10 and 100 = sqrt(10*100) = ~31.6ms
@@ -111,7 +111,7 @@ func TestPathNodeGeoMean(t *testing.T) {
 }
 
 func TestPathNodeGeoMeanSubMillisecond(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// Sub-millisecond RTTs should not panic (floor at 0.001ms)
 	pn.AddSample(100*time.Microsecond, 0, KindPrimary) // 0.1ms
 	pn.AddSample(200*time.Microsecond, 0, KindPrimary) // 0.2ms
@@ -122,14 +122,14 @@ func TestPathNodeGeoMeanSubMillisecond(t *testing.T) {
 }
 
 func TestPathNodeGeoMeanNoSamples(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	if pn.GeoMean() != 0 {
 		t.Fatalf("expected 0 for no samples, got %v", pn.GeoMean())
 	}
 }
 
 func TestPathNodeJitter(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(15*time.Millisecond, 0, KindPrimary)
 	// Jitter = |15 - 10| = 5ms
@@ -140,7 +140,7 @@ func TestPathNodeJitter(t *testing.T) {
 }
 
 func TestPathNodeJitterFirstSample(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	// No previous RTT, jitter should be 0
 	if pn.Jitter() != 0 {
@@ -149,7 +149,7 @@ func TestPathNodeJitterFirstSample(t *testing.T) {
 }
 
 func TestPathNodeJitterMean(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.AddSample(20*time.Millisecond, 0, KindPrimary) // jitter: 10ms
 	pn.AddSample(15*time.Millisecond, 0, KindPrimary) // jitter: 5ms
@@ -163,7 +163,7 @@ func TestPathNodeJitterMean(t *testing.T) {
 }
 
 func TestPathNodeSparklineData(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// Round 1: one probe
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.RecordRoundAvg()
@@ -189,7 +189,7 @@ func TestPathNodeSparklineData(t *testing.T) {
 }
 
 func TestPathNodeSparklineRingOverflow(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// Fill beyond capacity (28) — one probe per round
 	for i := 0; i < 35; i++ {
 		pn.AddSample(time.Duration(i)*time.Millisecond, 0, KindPrimary)
@@ -206,7 +206,7 @@ func TestPathNodeSparklineRingOverflow(t *testing.T) {
 }
 
 func TestPathNodeSparklineLostProbe(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// Round 1: reply
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.RecordRoundAvg()
@@ -226,7 +226,7 @@ func TestPathNodeSparklineLostProbe(t *testing.T) {
 }
 
 func TestPathNodeRecordRoundAvgRecordsLossWhenNoProbes(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	// Round 1: reply received
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.RecordRoundAvg()
@@ -260,7 +260,7 @@ func driveRateLimited(pn *PathNode, n int, echoRTT time.Duration) {
 // the sparkline cell is SparkEcho carrying the echo RTT — not a drop. This is
 // what keeps a rate-limited hop's sparkline consistent with its ~0%† loss cell.
 func TestRecordRoundAvg_EchoFillsGap(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	driveRateLimited(pn, rateLimitMinEchoSamples+1, 7*time.Millisecond)
 
 	data := pn.SparklineData()
@@ -278,7 +278,7 @@ func TestRecordRoundAvg_EchoFillsGap(t *testing.T) {
 // round with no TTL reply and no echo sent is Held (reachable, no reading) — not
 // a drop, which would falsely read as packet loss between sparse echoes.
 func TestRecordRoundAvg_HeldWhenRateLimitedAndUnsampled(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	driveRateLimited(pn, rateLimitMinEchoSamples+1, 7*time.Millisecond)
 
 	// Round with neither a TTL reply nor an echo sent.
@@ -296,7 +296,7 @@ func TestRecordRoundAvg_HeldWhenRateLimitedAndUnsampled(t *testing.T) {
 // WAS sent this round and got no reply, that is a genuine drop — the Held state
 // must not mask a real loss.
 func TestRecordRoundAvg_DropWhenEchoSentButLost(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	driveRateLimited(pn, rateLimitMinEchoSamples+1, 7*time.Millisecond)
 
 	// Echo sent this round, but no echo reply and no TTL reply.
@@ -314,7 +314,7 @@ func TestRecordRoundAvg_DropWhenEchoSentButLost(t *testing.T) {
 // TestRecordRoundAvg_TTLWinsOverEcho: when both tiers reply, the direct TTL
 // measurement takes precedence over echo.
 func TestRecordRoundAvg_TTLWinsOverEcho(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.MarkEchoSent()
 	pn.AddSample(5*time.Millisecond, 0, KindEcho)
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
@@ -327,7 +327,7 @@ func TestRecordRoundAvg_TTLWinsOverEcho(t *testing.T) {
 }
 
 func TestPathNodeTrendStable(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	for i := 0; i < 10; i++ {
 		pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 		pn.RecordRoundAvg()
@@ -338,7 +338,7 @@ func TestPathNodeTrendStable(t *testing.T) {
 }
 
 func TestPathNodeTrendDegrading(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	for i := 0; i < 10; i++ {
 		rtt := time.Duration(10+i*2) * time.Millisecond
 		pn.AddSample(rtt, 0, KindPrimary)
@@ -350,7 +350,7 @@ func TestPathNodeTrendDegrading(t *testing.T) {
 }
 
 func TestPathNodeTrendImproving(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	for i := 0; i < 10; i++ {
 		rtt := time.Duration(30-i*2) * time.Millisecond
 		pn.AddSample(rtt, 0, KindPrimary)
@@ -362,7 +362,7 @@ func TestPathNodeTrendImproving(t *testing.T) {
 }
 
 func TestPathNodeTrendInsufficientData(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 	pn.RecordRoundAvg()
 	if pn.Trend() != "stable" {
@@ -371,7 +371,7 @@ func TestPathNodeTrendInsufficientData(t *testing.T) {
 }
 
 func TestPathNodeReset(t *testing.T) {
-	pn := NewPathNode(net.ParseIP("10.0.0.1"))
+	pn := NewPathNode(net.ParseIP("192.0.2.1"))
 	pn.AddSample(10*time.Millisecond, 0, KindPrimary)
 
 	pn.Reset()

@@ -16,22 +16,22 @@ func TestParseOriginResponse(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
-		{"valid single ASN", "13335 | 1.1.1.0/24 | US | arin | 2014-03-28", 13335, false},
-		{"valid multiple ASNs first wins", "13335 15169 | 1.1.1.0/24 | US | arin | 2014-03-28", 13335, false},
-		{"multi-ASN second not returned", "15169 13335 | 8.8.8.0/24 | US | arin | 2014-03-28", 15169, false},
-		{"invalid non-numeric ASN", "abc | 1.1.1.0/24 | US | arin | 2014-03-28", 0, true},
+		{"valid single ASN", "64496 | 192.0.2.0/24 | US | arin | 2014-03-28", 64496, false},
+		{"valid multiple ASNs first wins", "64496 64497 | 192.0.2.0/24 | US | arin | 2014-03-28", 64496, false},
+		{"multi-ASN second not returned", "64497 64496 | 198.51.100.0/24 | US | arin | 2014-03-28", 64497, false},
+		{"invalid non-numeric ASN", "abc | 192.0.2.0/24 | US | arin | 2014-03-28", 0, true},
 		{"empty string", "", 0, true},
-		{"missing middle fields", "13335 | | |", 13335, false},
-		{"extra whitespace around ASN", "  13335  |  1.1.1.0/24  |  US  ", 13335, false},
-		{"extra whitespace multi-ASN", "  13335  15169  |  1.1.1.0/24  |  US  ", 13335, false},
-		{"no pipe separator", "13335", 13335, false},
-		{"trailing newline", "13335 | 1.1.1.0/24\n", 13335, false},
-		{"trailing space and newline", "13335 | 1.1.1.0/24 \n", 13335, false},
+		{"missing middle fields", "64496 | | |", 64496, false},
+		{"extra whitespace around ASN", "  64496  |  192.0.2.0/24  |  US  ", 64496, false},
+		{"extra whitespace multi-ASN", "  64496  64497  |  192.0.2.0/24  |  US  ", 64496, false},
+		{"no pipe separator", "64496", 64496, false},
+		{"trailing newline", "64496 | 192.0.2.0/24\n", 64496, false},
+		{"trailing space and newline", "64496 | 192.0.2.0/24 \n", 64496, false},
 		{"only whitespace", "   ", 0, true},
-		{"pipe only", "| 1.1.1.0/24 | US", 0, true},
+		{"pipe only", "| 192.0.2.0/24 | US", 0, true},
 		// Origin6 — same format, verify v6 lookups parse identically
-		{"origin6 v6 response", "13335 | 2606:4700::/32 | US | arin | 2014-03-28", 13335, false},
-		{"origin6 multi-ASN v6", "13335 15169 | 2606:4700::/32 | US | arin | 2014-03-28", 13335, false},
+		{"origin6 v6 response", "64496 | 2001:db8::/32 | US | arin | 2014-03-28", 64496, false},
+		{"origin6 multi-ASN v6", "64496 64497 | 2001:db8::/32 | US | arin | 2014-03-28", 64496, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,15 +57,15 @@ func TestParseASNameResponse(t *testing.T) {
 		txt  string
 		want string
 	}{
-		{"valid", "13335 | US | arin | 2014-03-28 | CLOUDFLARENET", "CLOUDFLARENET"},
+		{"valid", "64496 | US | arin | 2014-03-28 | EXAMPLE-NET", "EXAMPLE-NET"},
 		{"empty string", "", ""},
-		{"unicode org name", "13335 | US | arin | 2014-03-28 | CLOUDFLARE, INC., U.S.", "CLOUDFLARE, INC., U.S."},
-		{"extra whitespace in org", "13335 | US | arin | 2014-03-28 |  CLOUDFLARENET  ", "CLOUDFLARENET"},
-		{"no pipe returns whole string trimmed", "CLOUDFLARENET", "CLOUDFLARENET"},
-		{"trailing newline in org", "13335 | US | arin | 2014-03-28 | CLOUDFLARENET\n", "CLOUDFLARENET"}, // strings.TrimSpace trims the trailing newline
-		{"org name contains pipe-like content", "13335 | US | arin | 2014-03-28 | FOO | BAR", "BAR"},
-		{"single pipe only", "13335 |", ""},
-		{"whitespace only last field", "13335 | US | arin |   ", ""},
+		{"unicode org name", "64496 | US | arin | 2014-03-28 | EXAMPLE, INC., U.S.", "EXAMPLE, INC., U.S."},
+		{"extra whitespace in org", "64496 | US | arin | 2014-03-28 |  EXAMPLE-NET  ", "EXAMPLE-NET"},
+		{"no pipe returns whole string trimmed", "EXAMPLE-NET", "EXAMPLE-NET"},
+		{"trailing newline in org", "64496 | US | arin | 2014-03-28 | EXAMPLE-NET\n", "EXAMPLE-NET"}, // strings.TrimSpace trims the trailing newline
+		{"org name contains pipe-like content", "64496 | US | arin | 2014-03-28 | FOO | BAR", "BAR"},
+		{"single pipe only", "64496 |", ""},
+		{"whitespace only last field", "64496 | US | arin |   ", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,9 +88,9 @@ func TestFormatASN(t *testing.T) {
 		org    string
 		want   string
 	}{
-		{"number and org", 13335, "CLOUDFLARENET", "AS13335 (CLOUDFLARENET)"},
-		{"number only", 13335, "", "AS13335"},
-		{"org only", 0, "CLOUDFLARENET", "CLOUDFLARENET"},
+		{"number and org", 64496, "EXAMPLE-NET", "AS64496 (EXAMPLE-NET)"},
+		{"number only", 64496, "", "AS64496"},
+		{"org only", 0, "EXAMPLE-NET", "EXAMPLE-NET"},
 		{"both zero", 0, "", ""},
 	}
 	for _, tt := range tests {
@@ -109,7 +109,7 @@ func TestFormatASNShort(t *testing.T) {
 		number int
 		want   string
 	}{
-		{"positive ASN", 13335, "AS13335"},
+		{"positive ASN", 64496, "AS64496"},
 		{"zero ASN", 0, ""},
 		{"negative ASN", -1, ""},
 		{"large ASN", 400644, "AS400644"},
@@ -215,7 +215,7 @@ func TestSubmitDedup(t *testing.T) {
 	e := New(1)
 	ip := net.ParseIP("192.0.2.1")
 	// Pre-populate cache to simulate already-resolved
-	e.cache.Store(ip.String(), Info{Number: 13335, Org: "CLOUDFLARENET"})
+	e.cache.Store(ip.String(), Info{Number: 64496, Org: "EXAMPLE-NET"})
 
 	ok := e.Submit(ip)
 	if ok {

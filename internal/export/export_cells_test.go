@@ -18,8 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/dns/dnsmessage"
-
+	"github.com/tonhe/viaduct/internal/dnstest"
 	"github.com/tonhe/viaduct/internal/hop"
 	"github.com/tonhe/viaduct/internal/resolve"
 )
@@ -524,63 +523,16 @@ func TestWriteCSV_WriterErrorOnALargeReport(t *testing.T) {
 // leaves the host.
 func resolverKnowing(t *testing.T, names map[string]string) *resolve.Resolver {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening for the fake DNS server: %v", err)
-	}
-	defer conn.Close()
-
-	ptr := map[string]string{}
+	ptr := map[string][]string{}
 	for ip, name := range names {
 		arpa, err := dnsReverse(ip)
 		if err != nil {
 			t.Fatal(err)
 		}
-		ptr[arpa] = name
+		ptr[arpa] = []string{name + "."}
 	}
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, from, err := conn.ReadFrom(buf)
-			if err != nil {
-				return // closed
-			}
-			var p dnsmessage.Parser
-			hdr, err := p.Start(buf[:n])
-			if err != nil {
-				continue
-			}
-			q, err := p.Question()
-			if err != nil {
-				continue
-			}
-			resp := dnsmessage.Message{
-				Header:    dnsmessage.Header{ID: hdr.ID, Response: true, RecursionDesired: hdr.RecursionDesired, RecursionAvailable: true},
-				Questions: []dnsmessage.Question{q},
-			}
-			if target, ok := ptr[strings.ToLower(q.Name.String())]; ok && q.Type == dnsmessage.TypePTR {
-				resp.Answers = []dnsmessage.Resource{{
-					Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET, TTL: 60},
-					Body:   &dnsmessage.PTRResource{PTR: dnsmessage.MustNewName(target + ".")},
-				}}
-			} else {
-				resp.Header.RCode = dnsmessage.RCodeNameError
-			}
-			if out, err := resp.Pack(); err == nil {
-				conn.WriteTo(out, from)
-			}
-		}
-	}()
-
-	saved := net.DefaultResolver
-	net.DefaultResolver = &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "udp", conn.LocalAddr().String())
-		},
-	}
-	defer func() { net.DefaultResolver = saved }()
+	dns := dnstest.Start(t, dnstest.Records{PTR: ptr})
+	defer dns.Close()
 
 	r := resolve.New(1)
 	ctx, cancel := context.WithCancel(context.Background())

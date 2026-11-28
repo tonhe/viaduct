@@ -8,12 +8,11 @@ import (
 	"context"
 	"errors"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/net/dns/dnsmessage"
+	"github.com/tonhe/viaduct/internal/dnstest"
 )
 
 // A hostname is sent only when the lookup succeeded and gave a name that is
@@ -199,71 +198,6 @@ func TestWorker_StoppingTheResolverStopsALookupInProgress(t *testing.T) {
 // defaultLookup, against a DNS server on the loopback interface
 // ---------------------------------------------------------------------------
 
-// usePTRServer starts a DNS server on a loopback UDP socket that answers a PTR
-// question for a name in ptr with one record per target, and anything else
-// with NXDOMAIN. It makes that server the only one net.DefaultResolver asks,
-// and undoes both when the test ends. No query leaves the host.
-func usePTRServer(t *testing.T, ptr map[string][]string) {
-	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening for the fake DNS server: %v", err)
-	}
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, from, err := conn.ReadFrom(buf)
-			if err != nil {
-				return // closed
-			}
-			var p dnsmessage.Parser
-			hdr, err := p.Start(buf[:n])
-			if err != nil {
-				continue
-			}
-			q, err := p.Question()
-			if err != nil {
-				continue
-			}
-			resp := dnsmessage.Message{
-				Header: dnsmessage.Header{
-					ID: hdr.ID, Response: true,
-					RecursionDesired: hdr.RecursionDesired, RecursionAvailable: true,
-				},
-				Questions: []dnsmessage.Question{q},
-			}
-			targets, known := ptr[strings.ToLower(q.Name.String())]
-			if !known || q.Type != dnsmessage.TypePTR {
-				resp.Header.RCode = dnsmessage.RCodeNameError
-			} else {
-				for _, target := range targets {
-					resp.Answers = append(resp.Answers, dnsmessage.Resource{
-						Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET, TTL: 60},
-						Body:   &dnsmessage.PTRResource{PTR: dnsmessage.MustNewName(target)},
-					})
-				}
-			}
-			if out, err := resp.Pack(); err == nil {
-				conn.WriteTo(out, from)
-			}
-		}
-	}()
-
-	saved := net.DefaultResolver
-	net.DefaultResolver = &net.Resolver{
-		PreferGo: true,
-		// Whatever server the host is configured with, ask the fake one.
-		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "udp", conn.LocalAddr().String())
-		},
-	}
-	t.Cleanup(func() {
-		net.DefaultResolver = saved
-		conn.Close()
-	})
-}
-
 // defaultLookup returns the first name the system resolver gives for the
 // address, as the resolver gives it, and no name with the resolver's error
 // when there is none.
@@ -273,10 +207,10 @@ func TestDefaultLookup(t *testing.T) {
 		// The 32 nibbles of 2001:db8::7, last first.
 		v6Name = "7.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."
 	)
-	usePTRServer(t, map[string][]string{
+	dnstest.Start(t, dnstest.Records{PTR: map[string][]string{
 		v4Name: {"first.example.", "second.example."},
 		v6Name: {"six.example."},
-	})
+	}})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -307,7 +241,7 @@ func TestDefaultLookup(t *testing.T) {
 // New wires the system-resolver lookup in, so a resolver built the usual way
 // resolves through it: the name comes back without its trailing dot.
 func TestNew_ResolvesThroughTheSystemResolver(t *testing.T) {
-	usePTRServer(t, map[string][]string{"9.2.0.192.in-addr.arpa.": {"nine.example."}})
+	dnstest.Start(t, dnstest.Records{PTR: map[string][]string{"9.2.0.192.in-addr.arpa.": {"nine.example."}}})
 	r := New(1)
 	results := make(chan Result, 1)
 	cancel := startResolver(t, r, results)

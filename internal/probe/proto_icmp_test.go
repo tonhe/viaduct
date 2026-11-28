@@ -1,7 +1,6 @@
 package probe
 
 import (
-	"encoding/binary"
 	"testing"
 
 	"golang.org/x/net/icmp"
@@ -152,7 +151,7 @@ func TestICMPProtocol_IdentifyResponse_IPv6(t *testing.T) {
 	inner := []byte{
 		0x60, 0, 0, 0, 0, 8, 58, 64,
 		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
-		0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0x68, 0x10, 0x80, 0xf0,
 		128, 0, 0, 0,
 		0x12, 0x34,
 		0x00, 0x05,
@@ -184,18 +183,4 @@ func TestICMPProtocol_RandomIDWhenUnset(t *testing.T) {
 	if p.sessionID < 1 || p.sessionID > 65534 {
 		t.Fatalf("sessionID = %d, want 1..65534", p.sessionID)
 	}
-}
-
-// helper to build a fake ICMP Echo Request for IdentifyResponse tests
-func buildFakeInnerICMP(id, seq int) []byte {
-	// 20-byte IP header + 8-byte ICMP header
-	buf := make([]byte, 28)
-	buf[0] = 0x45 // IPv4, IHL=5
-	buf[9] = 1    // ICMP
-	// ICMP type = 8 (Echo)
-	buf[20] = 8
-	buf[21] = 0
-	binary.BigEndian.PutUint16(buf[24:26], uint16(id))
-	binary.BigEndian.PutUint16(buf[26:28], uint16(seq))
-	return buf
 }

@@ -39,29 +39,6 @@ func buildV4InnerForProto(proto byte, srcPort, dstPort uint16) []byte {
 	return pkt
 }
 
-// buildV6InnerForProto builds a 48-byte IPv6 inner header (40 base + 8 transport).
-func buildV6InnerForProto(proto byte, srcPort, dstPort uint16) []byte {
-	pkt := make([]byte, 48)
-	pkt[0] = 0x60 // IPv6
-	pkt[6] = proto
-	// src: 2001:db8::1
-	pkt[8] = 0x20
-	pkt[9] = 0x01
-	pkt[10] = 0x0d
-	pkt[11] = 0xb8
-	pkt[23] = 0x01
-	// dst: 2001:db8::100
-	pkt[24] = 0x20
-	pkt[25] = 0x01
-	pkt[26] = 0x0d
-	pkt[27] = 0xb8
-	pkt[38] = 0x01
-	pkt[39] = 0x00
-	binary.BigEndian.PutUint16(pkt[40:42], srcPort)
-	binary.BigEndian.PutUint16(pkt[42:44], dstPort)
-	return pkt
-}
-
 // --- UDP IdentifyResponse with wrong protocol (TCP inner) ---
 
 func TestUDPIdentifyResponse_WrongProto_TCP(t *testing.T) {
@@ -887,6 +864,7 @@ func TestListenTCP_ViaFakeConn_MatchesSYNACK(t *testing.T) {
 }
 
 func TestListenTCP_ViaFakeConn_RejectsNonSYNACK(t *testing.T) {
+	t.Parallel()
 	// ACK-only response should be ignored (parseTCPResponse returns nil key).
 	ack := buildFakeTCPPacket(443, 44000, 0x10) // ACK only
 
@@ -915,6 +893,7 @@ func TestListenTCP_ViaFakeConn_RejectsNonSYNACK(t *testing.T) {
 }
 
 func TestListenTCP_ViaFakeConn_NoMatchInProbeMap(t *testing.T) {
+	t.Parallel()
 	// SYN-ACK received but no matching probe key in probeMap.
 	synack := buildFakeTCPPacket(443, 44001, 0x12) // port 44001, no entry in pm
 
