@@ -106,7 +106,10 @@ abs_path() {
 }
 
 # write_run_files NAME ROLE: the settings file that loads the guard hook and
-# the script the session's shell runs. Both live in .run/, which is ignored.
+# the session-start hook, and the script the session's shell runs. Both live
+# in .run/, which is ignored. The session-start hook tells the session its
+# role again after /clear, a compaction or a resume, when the launch prompt
+# is no longer in its context.
 write_run_files() {
   local name="$1" role="$2"
   mkdir -p "$RUN_DIR"
@@ -117,6 +120,12 @@ write_run_files() {
       {
         "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [{"type": "command", "command": "'$TEAM_DIR/hooks/guard.sh'"}]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "^(clear|compact|resume)\$",
+        "hooks": [{"type": "command", "command": "'$TEAM_DIR/hooks/session-start.sh'"}]
       }
     ]
   }

@@ -42,13 +42,15 @@ Stops this host's roles. Ask each role to update its handoff first: sessions are
 | `PROTOCOL.md` | Roles, claim rules, how to stay clear of the nightly loop |
 | `DELEGATIONS.md` | What the owner has approved in advance |
 | `hooks/guard.sh`, `hooks/guard.py` | The hook that blocks what a role must not do |
-| `tests/guard_test.sh` | Tests for the hook |
+| `hooks/session-start.sh` | The hook that tells a session its role again after `/clear`, a compaction or a resume |
+| `tests/guard_test.sh` | Tests for the guard hook |
+| `tests/start_test.sh` | Tests for the settings `start` writes and for the session-start hook |
 | `HANDOFF-<role>.md` | Each role's notes for its next session. Not committed. |
 | `.run/` | Files the launcher writes at start. Not committed. |
 
 ## How a role is identified
 
-The launcher sets `VIADUCT_ROLE` in the session's environment. The guard reads that, not the session's name. It is loaded through `claude --settings`, from a file the launcher writes into `.run/`, so no settings file in the repository mentions it. A session with no `VIADUCT_ROLE` is never checked.
+The launcher sets `VIADUCT_ROLE` in the session's environment. The guard reads that, not the session's name. The role's instructions arrive in the launch prompt, which `/clear`, an automatic compaction or a resume takes out of the session's context. The session-start hook puts them back: on those three it tells the session to read its prompt, `PROTOCOL.md`, `DELEGATIONS.md` and its handoff again. Running sessions get the hook on the next `start --restart`. It is loaded through `claude --settings`, from a file the launcher writes into `.run/`, so no settings file in the repository mentions it. A session with no `VIADUCT_ROLE` is never checked.
 
 The guard reads command text. It stops mistakes. It is not a sandbox. It does not see a request made by another program (`curl`, a script file, an MCP tool), and it cannot tell when a file is changed by something the command text does not show.
 
@@ -78,4 +80,5 @@ Keep it to bash 3.2, which is what macOS ships.
 
 ```
 .claude/team/tests/guard_test.sh
+.claude/team/tests/start_test.sh
 ```
