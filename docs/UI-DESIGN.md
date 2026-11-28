@@ -206,7 +206,7 @@ A count that does not fit its 9 cells in full has each number shortened to thous
 - A count cell is a dim `—` when no probe of that type was sent.
 - The Echo count is dim while the hop has no verdict: until it first has the 20 echo samples a rate-limit verdict needs, counted over the hop's nodes. Until then the count is still accumulating and must not look like a settled figure. Once the hop has had a verdict the count stays undimmed, also while a held verdict covers fewer than 20 samples.
 - A TTL with no reply is the hop number and `*`.
-- `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column (when there is one), ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle.
+- `#`, `IP`, `Loss%` and `% of replies` are always shown. On a terminal too narrow for the rest, columns are dropped in the order Rnd, Echo, the primary column (when there is one), ICMP-TTL. If the row is still too wide, the IP column narrows toward 15 and addresses are cut in the middle. If it is still too wide then, `Loss%` narrows to 7, the longest figure it shows (`100.0%?`). The four columns are then 40 wide, the narrowest layout there is.
 - In column view `d` does not replace the panes. The panes stay as they are and the header bar names no view.
 
 ## Multi-target
