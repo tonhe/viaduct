@@ -6,14 +6,15 @@ and the text on stderr is shown to the agent.
 
 This stops a role from doing another role's work by mistake. It reads command
 text, so it is not a security boundary: a command hidden in a script file or
-built at run time is not seen. The rules are in ../PROTOCOL.md.
+built at run time is not seen. A gh command whose body it cannot read before
+the command runs (standard input, a variable, a file the same command writes)
+is blocked. The rules are in ../PROTOCOL.md.
 
 Works on Python 3.8 and later (macOS ships 3.9).
 """
 import json
 import os
 import re
-import shlex
 import sys
 import tempfile
 
@@ -22,7 +23,12 @@ ROUTING_LABEL = re.compile(r"^(agent:ready|needs:human|risk:.+)$")
 LOOP_BRANCH = re.compile(r"^(?:.*[:/])?issue-\d+$")
 MAIN_REF = re.compile(r"^(?:.*[:/])?(main|master)$")
 TAG_REF = re.compile(r"^(?:.*:)?(?:refs/tags/.+|v\d[\w.\-]*)$")
-OWNER_DECISION = re.compile(r"^\s*owner decision", re.IGNORECASE)
+OWNER_DECISION = re.compile(r"owner[\W_]*decision", re.IGNORECASE)
+# Marks, in a command segment, the place where a command substitution was cut
+# out. A word that holds it has a value the guard cannot know.
+SUBSTITUTION = "\x01"
+BODY_HELP = (" The guard has to read a body before it is posted. Write the body to a file in an earlier step"
+             " (the Write tool), then pass that file's full path with --body-file, or -F body=@PATH for gh api.")
 
 # Files of the running team that no role edits. They change by a pull request
 # the owner merges, through a worktree, not in place.
@@ -59,10 +65,12 @@ def split_segments(cmd):
             cur.append(cmd[i + 1])
             i += 1
         elif c == "$" and cmd[i + 1:i + 2] == "(":
+            cur.append(SUBSTITUTION)
             segs.append("".join(cur))
             cur = []
             i += 1
         elif c == "`":
+            cur.append(SUBSTITUTION)
             segs.append("".join(cur))
             cur = []
         elif quote == '"':
@@ -82,11 +90,79 @@ def split_segments(cmd):
     return [s for s in (x.strip() for x in segs) if s]
 
 
+class Word(str):
+    """A shell word. dynamic is True when the shell would put something into
+    it that the command text does not show: a variable or a substitution."""
+    dynamic = False
+
+
+class Argv(list):
+    """The words of one simple command. unparsed is True when the quoting
+    could not be followed, so the words are a guess."""
+    unparsed = False
+
+
+def shell_words(segment):
+    """Split one simple command into words as a POSIX shell would, noting
+    which words hold an expansion. Raises ValueError on an open quote."""
+    words, cur, started, dynamic, quote, i = [], [], False, False, None, 0
+
+    def flush():
+        w = Word("".join(cur))
+        w.dynamic = dynamic
+        words.append(w)
+
+    while i < len(segment):
+        c = segment[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                cur.append(c)
+        elif c == "\\" and i + 1 < len(segment) and (quote is None or segment[i + 1] in '"\\$`\n'):
+            cur.append(segment[i + 1])
+            started = True
+            i += 1
+        elif quote == '"' and c == '"':
+            quote = None
+        elif quote is None and c in " \t\r\n":
+            if started:
+                flush()
+            cur, started, dynamic = [], False, False
+        elif quote is None and c in "'\"":
+            quote = c
+            started = True
+        else:
+            if c == SUBSTITUTION or (c == "$" and re.match(r"[A-Za-z_{(@*#?!$0-9-]", segment[i + 1:i + 2] or " ")):
+                dynamic = True
+            cur.append(c)
+            started = True
+        i += 1
+    if quote:
+        raise ValueError("open quote")
+    if started:
+        flush()
+    return words
+
+
 def argv_of(segment):
+    unparsed = False
     try:
-        argv = shlex.split(segment, comments=False)
+        argv = shell_words(segment)
     except ValueError:
-        argv = segment.split()
+        unparsed = True
+        argv = []
+        for text in segment.split():
+            w = Word(text)
+            w.dynamic = True
+            argv.append(w)
+    argv = _strip_wrappers(argv)
+    out = Argv(argv)
+    out.unparsed = unparsed
+    return out
+
+
+def _strip_wrappers(argv):
     # Drop leading VAR=value words and wrappers that run another command.
     while argv:
         a = argv[0]
@@ -99,6 +175,10 @@ def argv_of(segment):
         else:
             break
     return argv
+
+
+def is_dynamic(word):
+    return getattr(word, "dynamic", False) or SUBSTITUTION in word
 
 
 def commands_in(cmd, depth=0):
@@ -226,7 +306,10 @@ def gh_api_is_write(args):
             method = a.split("=", 1)[1].upper()
         elif a.startswith("-X") and len(a) > 2:
             method = a[2:].upper()
-        elif a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=", "--input=")):
+        elif a in ("--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=", "--input=")):
+            has_fields = True
+        elif a[:2] in ("-f", "-F"):
+            # -f key=value, and the joined form -fkey=value
             has_fields = True
         i += 1
     if method:
@@ -248,33 +331,191 @@ def gh_is_read(args):
     return verb in GH_READ_VERBS
 
 
-def body_values(args):
-    """Yield the text of each body an gh command would post."""
+def begins_owner_decision(text):
+    """True if the visible text starts with "Owner decision". Leading space,
+    Markdown marks, punctuation and HTML comments do not hide it."""
+    t = text[:65536]
+    while t:
+        if t.startswith("<!--"):
+            end = t.find("-->")
+            if end < 0:
+                return False
+            t = t[end + 3:]
+            continue
+        m = re.match(r"(?:[^\w<]|_)+|<(?!!--)", t)
+        if not m:
+            break
+        t = t[m.end():]
+    return OWNER_DECISION.match(t) is not None
+
+
+class Context:
+    """What a body check needs to know about the whole Bash call."""
+
+    def __init__(self, command="", cwd="", changes_dir=False):
+        self.command = command
+        self.cwd = cwd or os.getcwd()
+        self.changes_dir = changes_dir
+
+
+def read_body_file(word, path, ctx):
+    """The text of a file a gh command would post. Blocks when the guard
+    cannot be sure the text it reads is the text that will be posted."""
+    if is_dynamic(word):
+        raise Block("the path of this body file is built when the command runs (a variable or a substitution)." + BODY_HELP)
+    if path == "-":
+        raise Block("this body comes from standard input (a pipe, a redirect or a heredoc)." + BODY_HELP)
+    full = os.path.expanduser(path)
+    if not os.path.isabs(full):
+        if ctx.changes_dir:
+            raise Block("this body file has a relative path and the command changes directory." + BODY_HELP)
+        full = os.path.join(ctx.cwd, full)
+    base = os.path.basename(full)
+    if base and len(re.findall(r"(?<![\w.\-])" + re.escape(base) + r"(?![\w.\-])", ctx.command)) > 1:
+        raise Block("the body file %s is named more than once in this command, so the command may write it before posting it." % base + BODY_HELP)
+    try:
+        with open(full, "r", errors="replace") as f:
+            return f.read(1 << 20)
+    except OSError:
+        raise Block("the body file %s cannot be read before the command runs." % path + BODY_HELP)
+
+
+def json_bodies(value, every=False):
+    """Every string under a "body" key, at any depth. With every, all strings."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, str):
+                if every or k == "body":
+                    yield v
+            else:
+                for x in json_bodies(v, every):
+                    yield x
+    elif isinstance(value, list):
+        for v in value:
+            if isinstance(v, str):
+                if every:
+                    yield v
+            else:
+                for x in json_bodies(v, every):
+                    yield x
+
+
+# Inside a GraphQL document a comment body is a string literal.
+GRAPHQL_LITERAL = re.compile(r"""["'](?:\\n|[^\w"'\\]|_)*owner[\W_]*decision""", re.IGNORECASE)
+
+
+def api_bodies(args, ctx):
+    """Yield the text of every field a `gh api` write would send."""
+    graphql = any("graphql" in a.lower() for a in args[1:] if not a.startswith("-"))
+
+    def field(word, kv, typed):
+        if "=" not in kv:
+            if is_dynamic(word):
+                raise Block("a field of this gh api call is built when the command runs." + BODY_HELP)
+            return
+        key, val = kv.split("=", 1)
+        is_body = graphql or key == "body" or key.endswith("[body]") or "$" in key or SUBSTITUTION in key
+        if typed and val.startswith("@"):
+            if is_body:
+                yield read_body_file(word, val[1:], ctx)
+            return
+        if is_dynamic(word):
+            if is_body:
+                raise Block("the body field of this gh api call is built when the command runs (a variable or a substitution)." + BODY_HELP)
+            return
+        yield val
+
+    def input_file(word, path):
+        text = read_body_file(word, path, ctx)
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            raise Block("the --input file %s is not JSON the guard can read." % path + BODY_HELP)
+        for body in json_bodies(doc, every=graphql):
+            yield body
+
     i = 0
     while i < len(args):
         a = args[i]
         nxt = args[i + 1] if i + 1 < len(args) else None
-        if a in ("-b", "--body", "-t", "--title") and nxt is not None:
-            yield nxt
-        elif a.startswith("--body="):
-            yield a.split("=", 1)[1]
-        elif a in ("-F", "--body-file") and nxt is not None and "=" not in nxt:
-            yield read_start(nxt)
-        elif a.startswith("--body-file="):
-            yield read_start(a.split("=", 1)[1])
-        elif a in ("-f", "-F", "--field", "--raw-field") and nxt is not None and "=" in nxt:
-            key, val = nxt.split("=", 1)
-            if key == "body":
-                yield read_start(val[1:]) if (val.startswith("@") and a in ("-F", "--field")) else val
+        found = ()
+        if a in ("-f", "-F", "--field", "--raw-field") and nxt is not None:
+            found = field(nxt, nxt, a in ("-F", "--field"))
+            i += 1
+        elif a.startswith(("--field=", "--raw-field=")):
+            found = field(a, a.split("=", 1)[1], a.startswith("--field="))
+        elif a[:2] in ("-f", "-F") and len(a) > 2:
+            found = field(a, a[2:], a[1] == "F")
+        elif a == "--input" and nxt is not None:
+            found = input_file(nxt, nxt)
+            i += 1
+        elif a.startswith("--input="):
+            found = input_file(a, a.split("=", 1)[1])
+        for body in found:
+            if graphql and GRAPHQL_LITERAL.search(body):
+                raise Block('only the owner posts a comment that begins "Owner decision". Draft it in a file for them.')
+            yield body
         i += 1
 
 
-def read_start(path):
-    try:
-        with open(os.path.expanduser(path), "r", errors="replace") as f:
-            return f.read(200)
-    except OSError:
-        return ""
+def command_bodies(args, verb, ctx):
+    """Yield the text of every body, comment and title a gh command other
+    than `gh api` would post: --body, --body-file, --comment, --title and
+    their short forms, joined or in a cluster (-b text, -btext, -sdb text).
+    --comment and -c take text only on `close`: on `pr review` they are a
+    switch, and the word after them is not their value."""
+    long_text = ("--body", "--title") + (("--comment",) if verb == "close" else ())
+    short_text = "btF" + ("c" if verb == "close" else "")
+
+    def inline(word, text):
+        if is_dynamic(word):
+            raise Block("this body is built when the command runs (a variable or a substitution)." + BODY_HELP)
+        return text
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a == "--":
+            break
+        if a in long_text and nxt is not None:
+            yield inline(nxt, nxt)
+            i += 1
+        elif a.startswith(tuple(f + "=" for f in long_text)):
+            yield inline(a, a.split("=", 1)[1])
+        elif a == "--body-file" and nxt is not None:
+            yield read_body_file(nxt, nxt, ctx)
+            i += 1
+        elif a.startswith("--body-file="):
+            yield read_body_file(a, a.split("=", 1)[1], ctx)
+        elif re.match(r"^-[A-Za-z]", a) and not a.startswith("--"):
+            # A cluster of short flags. The first one that takes text takes
+            # the rest of the word, or the next word, as its value.
+            for j, ch in enumerate(a[1:]):
+                if ch not in short_text:
+                    continue
+                joined = a[j + 2:]
+                if joined:
+                    word, val = a, joined
+                elif nxt is not None:
+                    word, val = nxt, nxt
+                    i += 1
+                else:
+                    break
+                yield read_body_file(word, val, ctx) if ch == "F" else inline(word, val)
+                break
+        i += 1
+
+
+def check_bodies(argv, args, group, verb, ctx):
+    """Every role: only the owner writes "Owner decision". A body the guard
+    cannot read is refused, not allowed."""
+    if getattr(argv, "unparsed", False):
+        raise Block("the guard cannot follow the quoting of this gh command, most likely a substitution inside quotes." + BODY_HELP)
+    bodies = api_bodies(args, ctx) if group == "api" else command_bodies(args, verb, ctx)
+    for body in bodies:
+        if begins_owner_decision(body or ""):
+            raise Block('only the owner posts a comment that begins "Owner decision". Draft it in a file for them.')
 
 
 def label_values(args, flags):
@@ -288,7 +529,8 @@ def label_values(args, flags):
     return [x.strip() for x in out]
 
 
-def check_gh(role, argv):
+def check_gh(role, argv, ctx=None):
+    ctx = ctx or Context()
     args = argv[1:]
     # Skip gh's own global flags before the command group.
     while args and args[0].startswith("-"):
@@ -302,9 +544,7 @@ def check_gh(role, argv):
 
     # Every role: only the owner writes "Owner decision".
     if not read:
-        for body in body_values(args):
-            if OWNER_DECISION.match(body or ""):
-                raise Block('only the owner posts a comment that begins "Owner decision". Draft it in a file for them.')
+        check_bodies(argv, args, group, verb, ctx)
 
     # Every role: an alias can hide any other gh command from this check.
     if group == "alias" and verb in ("set", "import", "delete"):
@@ -411,12 +651,16 @@ def decide(role, event, team_dir):
     if role not in ROLES:
         raise Block("unknown VIADUCT_ROLE %r. Expected one of %s." % (role, ", ".join(ROLES)))
     if tool == "Bash":
-        for argv in commands_in(tin.get("command", "")):
+        command = tin.get("command", "")
+        commands = list(commands_in(command))
+        changes_dir = any(os.path.basename(argv[0]) in ("cd", "pushd", "popd") for argv in commands)
+        ctx = Context(command, event.get("cwd", ""), changes_dir)
+        for argv in commands:
             prog = os.path.basename(argv[0])
             if prog == "git":
                 check_git(role, argv)
             elif prog == "gh":
-                check_gh(role, argv)
+                check_gh(role, argv, ctx)
     elif tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
         check_file(role, tin.get("file_path") or tin.get("notebook_path"), team_dir)
 

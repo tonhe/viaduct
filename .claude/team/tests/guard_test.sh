@@ -133,6 +133,196 @@ expect block director "gh issue comment 12 --body-file $draft"
 expect block director "gh api -X POST repos/tonhe/viaduct/issues/12/comments -F body=@$draft"
 rm -f "$draft"
 
+# every role: "Owner decision" by every way a body can reach GitHub.
+# The comment on issue 234 was posted, and later edited, with the body in a
+# file that the same command wrote and with the path in a shell variable. The
+# guard read nothing and allowed it. A body the guard cannot read is blocked.
+od=$(mktemp -d)
+printf 'Owner decision: scope is the alert rules\n' >"$od/decision.md"
+printf '\n\n   \n**Owner decision:** scope is the alert rules\n' >"$od/marked.md"
+{ printf '%0600d' 0 | tr 0 '\n'; printf 'Owner decision: far down\n'; } >"$od/padded.md"
+printf 'This needs an Owner decision before work starts\n' >"$od/plain.md"
+printf '{"body":"Owner decision: go"}' >"$od/decision.json"
+printf '{"event":"COMMENT","body":"fine","comments":[{"path":"a.go","line":1,"body":"Owner decision: go"}]}' >"$od/review.json"
+printf '{"body":"Checked on macOS, all green"}' >"$od/plain.json"
+printf 'body=Owner decision: go' >"$od/notjson.txt"
+C=repos/tonhe/viaduct
+
+# expect_cwd WANT ROLE DIR COMMAND: the hook input carries the session's cwd.
+expect_cwd() {
+  local want="$1" role="$2" dir="$3" cmd="$4" event got
+  event=$(python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "cwd": sys.argv[1], "tool_input": {"command": sys.argv[2]}}))' "$dir" "$cmd")
+  VIADUCT_ROLE="$role" VIADUCT_TEAM_DIR="$TEAM_DIR" "$GUARD" >/dev/null 2>&1 <<<"$event"
+  got=$?
+  check "$want" "$got" "$role in $dir: $cmd"
+}
+
+for role in director dev tester; do
+  # inline, every spelling
+  expect block "$role" "gh pr comment 12 --body='Owner decision: go'"
+  expect block "$role" "gh pr comment 12 -b'Owner decision: go'"
+  expect block "$role" "gh pr comment 12 -b 'Owner decision: go' -R tonhe/viaduct"
+  # text in front that a reader does not see as text
+  expect block "$role" "gh pr comment 12 --body '**Owner decision:** go'"
+  expect block "$role" "gh pr comment 12 --body '## Owner decision'"
+  expect block "$role" "gh pr comment 12 --body '> Owner decision: go'"
+  expect block "$role" "gh pr comment 12 --body '<!-- note -->Owner decision: go'"
+  expect block "$role" "gh pr comment 12 --body '_Owner  decision_ go'"
+  # a file that exists, every spelling
+  expect block "$role" "gh pr comment 12 --body-file $od/decision.md"
+  expect block "$role" "gh pr comment 12 --body-file=$od/decision.md"
+  expect block "$role" "gh pr comment 12 -F $od/decision.md"
+  expect block "$role" "gh pr comment 12 -F$od/decision.md"
+  expect block "$role" "gh pr comment 12 --body-file $od/marked.md"
+  expect block "$role" "gh pr comment 12 --body-file $od/padded.md"
+  expect block "$role" "gh pr comment 12 --edit-last --body-file $od/decision.md"
+  # standard input: the guard cannot read it
+  expect block "$role" "gh pr comment 12 --body-file - < $od/decision.md"
+  expect block "$role" "cat $od/decision.md | gh pr comment 12 --body-file -"
+  expect block "$role" "gh pr comment 12 -F - <<'EOF'
+Owner decision: go
+EOF"
+  expect block "$role" "gh pr comment 12 --body-file - <<'EOF'
+Checked on macOS, all green
+EOF"
+  # a file the guard cannot read, or cannot trust
+  expect block "$role" "gh pr comment 12 --body-file $od/missing.md"
+  expect block "$role" "echo 'Owner decision: go' > $od/new.md && gh pr comment 12 --body-file $od/new.md"
+  expect block "$role" "cp $od/decision.md $od/plain.md && gh pr comment 12 --body-file $od/plain.md"
+  expect block "$role" "cd $od && gh pr comment 12 --body-file decision.md"
+  expect block "$role" "cd $od && gh pr comment 12 --body-file plain.md"
+  expect_cwd block "$role" "$od" "gh pr comment 12 --body-file decision.md"
+  expect block "$role" 'gh pr comment 12 --body-file $S/decision.md'
+  expect block "$role" 'gh pr comment 12 --body-file "$(mktemp)"'
+  # a body built when the command runs
+  expect block "$role" 'gh pr comment 12 --body "$BODY"'
+  expect block "$role" 'gh pr comment 12 --body "${BODY}"'
+  expect block "$role" 'gh pr comment 12 --body $BODY'
+  expect block "$role" 'B="Owner decision: go"; gh pr comment 12 --body "$B"'
+  expect block "$role" "gh pr comment 12 --body \"\$(cat $od/decision.md)\""
+  expect block "$role" "gh pr comment 12 --body \"\`cat $od/decision.md\`\""
+  expect block "$role" "gh pr comment 12 --body \$(cat $od/decision.md)"
+  expect block "$role" "sh -c 'gh pr comment 12 --body \"\$B\"'"
+  # other commands that carry a comment
+  expect block "$role" "gh pr comment 12 --edit-last --body 'Owner decision: go'"
+done
+
+# The remaining forms are the director's: the dev and tester roles are held
+# to fewer gh commands, so a block for them would not test this rule.
+# gh pr and gh issue commands that carry a body or a comment
+expect block director "gh issue comment 12 --edit-last --body 'Owner decision: go'"
+expect block director "gh issue comment 12 --edit-last -F $od/decision.md"
+expect block director "gh issue edit 12 --body 'Owner decision: go'"
+expect block director "gh issue edit 12 --body-file $od/decision.md"
+expect block director "gh pr edit 12 --body 'Owner decision: go'"
+expect block director "gh issue create --title t --body-file $od/decision.md"
+expect block director "gh pr review 12 --comment --body 'Owner decision: go'"
+expect block director "gh pr review 12 --approve -b 'Owner decision: go'"
+expect block director "gh pr review 12 -c -b 'Owner decision: go'"
+expect block director "gh pr review 12 -cb 'Owner decision: go'"
+expect block director "gh pr review 12 --comment --body-file $od/decision.md"
+expect block director "gh pr review 12 --request-changes --body-file $od/decision.md"
+expect block director "gh pr review 12 -a -F -"
+expect block director "gh pr close 12 --comment 'Owner decision: go'"
+expect block director "gh pr close 12 -c 'Owner decision: go'"
+expect block director "gh pr close 12 -dc 'Owner decision: go'"
+expect block director "gh pr close 12 --comment=\"\$NOTE\""
+expect block director "gh issue close 12 --comment 'Owner decision: go'"
+expect block director "gh issue close 12 -c 'Owner decision: go' --reason completed"
+expect block director "gh issue close 12 -c \"\$(cat $od/decision.md)\""
+expect block director "gh pr merge 12 -R tonhe/viaduct --squash --delete-branch --body 'Owner decision: go'"
+expect block director "gh pr merge 12 --squash --body-file $od/decision.md"
+expect block director "gh pr merge 12 -sdb 'Owner decision: go'"
+expect block director "gh pr merge 12 --squash -F -"
+expect block director "gh pr merge 12 --squash --body \"\$MSG\""
+
+# gh api: each endpoint that creates or edits a comment, a review or a review comment
+for call in \
+  "-X POST $C/issues/12/comments" \
+  "$C/issues/12/comments" \
+  "-X PATCH $C/issues/comments/7230155611" \
+  "--method PATCH $C/issues/comments/7230155611" \
+  "-X POST $C/pulls/12/reviews" \
+  "-X PUT $C/pulls/12/reviews/99" \
+  "-X PUT $C/pulls/12/reviews/99/dismissals" \
+  "-X POST $C/pulls/12/comments" \
+  "-X POST $C/pulls/12/comments/5/replies" \
+  "-X PATCH $C/pulls/comments/5" \
+  "-X PATCH $C/issues/12" \
+  "-X PATCH $C/pulls/12"; do
+  expect block director "gh api $call -f body='Owner decision: go'"
+  expect block director "gh api $call -fbody='Owner decision: go'"
+  expect block director "gh api $call --raw-field body='Owner decision: go'"
+  expect block director "gh api $call --raw-field=body='Owner decision: go'"
+  expect block director "gh api $call -F body='Owner decision: go'"
+  expect block director "gh api $call -Fbody='Owner decision: go'"
+  expect block director "gh api $call --field body='Owner decision: go'"
+  expect block director "gh api $call --field=body='Owner decision: go'"
+  expect block director "gh api $call -f body='**Owner decision**: go'"
+  expect block director "gh api $call -F body=@$od/decision.md"
+  expect block director "gh api $call -Fbody=@$od/decision.md"
+  expect block director "gh api $call --field=body=@$od/decision.md"
+  expect block director "gh api $call -F body=@$od/missing.md"
+  expect block director "gh api $call -F body=@-"
+  expect block director "gh api $call -F body=@- < $od/decision.md"
+  expect block director "gh api $call -F body=@\$S/decision.md"
+  expect block director "gh api $call -f body=\"\$BODY\""
+  expect block director "gh api $call -f body=\"\$(cat $od/decision.md)\""
+  expect block director "gh api $call -f \"\$FIELD\""
+  expect block director "gh api $call --input $od/decision.json"
+  expect block director "gh api $call --input=$od/decision.json"
+  expect block director "gh api $call --input $od/review.json"
+  expect block director "gh api $call --input $od/notjson.txt"
+  expect block director "gh api $call --input $od/missing.json"
+  expect block director "gh api $call --input -"
+  expect block director "gh api $call --input - < $od/decision.json"
+  expect block director "jq -n '{body: \"x\"}' | gh api $call --input -"
+  expect block director "gh api $call --input \"\$F\""
+done
+expect block director "gh api -X POST $C/pulls/12/reviews -f event=COMMENT -f 'comments[][path]=a.go' -f 'comments[][body]=Owner decision: go'"
+expect block director "gh api -X POST $C/pulls/12/reviews -f event=COMMENT -f 'comments[][body]='\"\$B\""
+
+# The two commands that put the comment on issue 234, in the form they had.
+expect block director "S=$od && cat > \$S/od-234.md <<'EOF'
+Owner decision: approved, for the change in #242 and nothing wider.
+
+**Question 1, which row is the destination.**
+EOF
+gh api -X POST $C/issues/234/comments -F body=@\$S/od-234.md --jq .html_url"
+expect block director "S=$od && { printf '%s\n\n' 'Owner decision: approved, for the change in #242 and nothing wider.'; tail -n +3 \$S/od-234.md; } > \$S/od-234-v2.md && head -5 \$S/od-234-v2.md && gh api -X PATCH $C/issues/comments/7230155611 -F body=@\$S/od-234-v2.md --jq '.html_url, .body[0:260]'"
+# The same with a literal path: the file is written by the command that posts it.
+expect block director "cat > $od/od-234.md <<'EOF'
+Checked, all green
+EOF
+gh api -X POST $C/issues/234/comments -F body=@$od/od-234.md"
+
+# GraphQL (the director's only: the dev role is blocked from the endpoint)
+expect block director "gh api graphql -f query='mutation { addComment(input: {subjectId: \"I_1\", body: \"Owner decision: go\"}) { clientMutationId } }'"
+expect block director "gh api graphql -f query='mutation(\$b: String!) { addComment(input: {subjectId: \"I_1\", body: \$b}) { clientMutationId } }' -f b='Owner decision: go'"
+expect block director "gh api graphql -f query='mutation(\$b: String!) { addComment(input: {subjectId: \"I_1\", body: \$b}) { clientMutationId } }' -f b=\"\$B\""
+expect block director "gh api graphql -F query=@$od/missing.graphql"
+
+# What still works: a body the guard can read and that is not an Owner decision.
+for role in director dev tester; do
+  expect allow "$role" "gh pr comment 12 --body 'Checked on macOS, all green'"
+  expect allow "$role" "gh pr comment 12 --body 'costs \$5, see \`make test-all\`'"
+  expect allow "$role" "gh pr comment 12 --body-file $od/plain.md"
+  expect allow "$role" "gh pr comment 12 -F $od/plain.md"
+  expect_cwd allow "$role" "$od" "gh pr comment 12 --body-file plain.md"
+done
+expect allow director "gh issue comment 12 --body 'The owner decision is still needed'"
+expect allow director "gh issue close 12 --reason duplicate --comment 'Duplicate of #11'"
+expect allow director "gh pr review 12 --approve --body 'Read the diff and the checks'"
+expect allow director "gh api -X POST $C/issues/12/comments -F body=@$od/plain.md"
+expect allow director "gh api -X PATCH $C/issues/comments/5 --input $od/plain.json"
+expect allow director "gh api -X POST $C/issues/12/comments -f body='Checked, all green'"
+expect allow director "gh api -X POST $C/issues/12/dependencies/blocked_by -F issue_id=\$(gh api $C/issues/11 --jq .id)"
+expect allow director "gh api -X POST $C/issues/12/dependencies/blocked_by -F issue_id=\"\$ID\""
+expect allow director "gh api $C/issues/234/comments --jq '.[] | select(.body | test(\"Owner decision\"))'"
+expect allow dev "gh pr create -R tonhe/viaduct --base main --head fix/a --title 'fix: a' --body-file $od/plain.md"
+expect allow dev "gh api -X PATCH $C/pulls/12 -F body=@$od/plain.md"
+rm -rf "$od"
+
 # every role: releases
 for role in director dev tester; do
   expect block "$role" "git tag -a v0.3.1 -m v0.3.1"
