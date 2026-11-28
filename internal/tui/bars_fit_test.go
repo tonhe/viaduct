@@ -117,7 +117,7 @@ func TestBars_UnchangedWhenTheyFit(t *testing.T) {
 		t.Errorf("header = %q, want %q", got, wantHeader)
 	}
 	status := strings.TrimRight(lines[len(lines)-1], " ")
-	for _, want := range []string{"Tracing... 12 hops    Elapsed: ", "    DNS: ", "    6 flows", "    j/k:scroll p:pause r:reset [d] ", " q:quit"} {
+	for _, want := range []string{"Tracing... 12 hops    Elapsed: ", "    DNS: ", "    6 flows", "    j/k:scroll e:export p:pause r:reset [d] ", " q:quit"} {
 		if !strings.Contains(status, want) {
 			t.Errorf("status bar %q is missing %q", status, want)
 		}
