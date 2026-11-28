@@ -587,21 +587,62 @@ def command_bodies(args, group, verb, ctx):
         i += 1
 
 
-# The owner's "approved", quoted: inside double quotes, straight or curly, or
-# on a Markdown blockquote line. "not approved" and "disapproved" do not count.
-QUOTED_APPROVED = re.compile(
-    r"""(?:"[^"\n]*|\u201c[^\u201d\n]*|^[ \t]*>[^\n]*)(?<![\w-])(?<!not )approved\b""",
-    re.IGNORECASE | re.MULTILINE)
+# The owner's "approved", quoted: a whole quotation, opened and closed with
+# double quotes (straight or curly), or a Markdown blockquote line, that holds
+# the word and no negation.
+QUOTATION = re.compile(r'"[^"\n]*"|“[^”\n]*”|^[ \t]*>[^\n]*', re.MULTILINE)
+APPROVED = re.compile(r"(?<![\w-])approved(?![\w-])", re.IGNORECASE)
+NEGATION = re.compile(r"\b(?:not|never|no|nor|without|unless|until)\b|n['’]t\b", re.IGNORECASE)
 
 
 def quotes_approved(text):
-    return QUOTED_APPROVED.search(text) is not None
+    for m in QUOTATION.finditer(text):
+        span = m.group(0)
+        if APPROVED.search(span) and not NEGATION.search(span):
+            return True
+    return False
+
+
+NEW_ISSUE_COMMENT = re.compile(r"^/?repos/[^/\s]+/[^/\s]+/issues/\d+/comments/?$")
+
+
+def creates_comment(args, group, verb):
+    """True for the commands that add a new comment to an issue or a pull
+    request and do nothing else: `gh issue comment` and `gh pr comment`
+    without --edit-last, and a POST to .../issues/N/comments written with the
+    endpoint right after `api` (only -X POST may come before it). An edit of an existing comment, a review, a
+    close or merge message and a description are not this."""
+    if group in ("issue", "pr") and verb == "comment":
+        return not any(a.startswith(("--edit-last", "--delete-last", "--create-if-none")) for a in args)
+    if group != "api":
+        return False
+    # Every method the command names must be POST, and the endpoint must be
+    # the first word after `api` once the method flags are set aside. Any
+    # other flag in front of it could be taking a word as its value.
+    methods, rest, i = [], [], 1
+    while i < len(args):
+        a = args[i]
+        if a in ("-X", "--method") and i + 1 < len(args):
+            methods.append(args[i + 1])
+            i += 1
+        elif a.startswith("--method="):
+            methods.append(a.split("=", 1)[1])
+        elif a.startswith("-X") and len(a) > 2:
+            methods.append(a[2:])
+        else:
+            rest.append(a)
+        i += 1
+    if any(m.upper() != "POST" for m in methods):
+        return False
+    return bool(rest) and NEW_ISSUE_COMMENT.match(rest[0]) is not None
 
 
 def check_bodies(role, argv, args, group, verb, ctx):
     """An "Owner decision" comment is the owner's. The one exception is the
-    director, after the owner says "approved" in chat: it may post one whose
-    body quotes that word (rule 3 of the owner's rules in DELEGATIONS.md).
+    director, after the owner says "approved" in chat: it may add a new
+    comment whose body quotes that word (rule 3 of the owner's rules in
+    DELEGATIONS.md). It may not turn an existing comment into one, and it may
+    not put one in a review, a close or merge message, or a description.
     The guard can check that the quote is there. It cannot check that the
     owner said it. A body the guard cannot read is refused for every role."""
     if getattr(argv, "unparsed", False):
@@ -612,6 +653,8 @@ def check_bodies(role, argv, args, group, verb, ctx):
             continue
         if role != "director":
             raise Block('only the owner posts a comment that begins "Owner decision". Draft it in a file for them.')
+        if not creates_comment(args, group, verb):
+            raise Block('the director posts an "Owner decision" only as a new comment: gh issue comment or gh pr comment without --edit-last, or gh api -X POST repos/OWNER/REPO/issues/N/comments. Editing a comment into one, and any other command, is the owner\'s.')
         if not quotes_approved(body):
             raise Block('the director posts a comment that begins "Owner decision" only after the owner says "approved" in chat, and the comment quotes the owner\'s words: put them in double quotes, with the word approved in them. Otherwise draft it in a file for the owner.')
 
