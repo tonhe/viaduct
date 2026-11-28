@@ -587,15 +587,33 @@ def command_bodies(args, group, verb, ctx):
         i += 1
 
 
-def check_bodies(argv, args, group, verb, ctx):
-    """Every role: only the owner writes "Owner decision". A body the guard
-    cannot read is refused, not allowed."""
+# The owner's "approved", quoted: inside double quotes, straight or curly, or
+# on a Markdown blockquote line. "not approved" and "disapproved" do not count.
+QUOTED_APPROVED = re.compile(
+    r"""(?:"[^"\n]*|\u201c[^\u201d\n]*|^[ \t]*>[^\n]*)(?<![\w-])(?<!not )approved\b""",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def quotes_approved(text):
+    return QUOTED_APPROVED.search(text) is not None
+
+
+def check_bodies(role, argv, args, group, verb, ctx):
+    """An "Owner decision" comment is the owner's. The one exception is the
+    director, after the owner says "approved" in chat: it may post one whose
+    body quotes that word (rule 3 of the owner's rules in DELEGATIONS.md).
+    The guard can check that the quote is there. It cannot check that the
+    owner said it. A body the guard cannot read is refused for every role."""
     if getattr(argv, "unparsed", False):
         raise Block("the guard cannot follow the quoting of this gh command, most likely a substitution inside quotes." + BODY_HELP)
     bodies = api_bodies(args, ctx) if group == "api" else command_bodies(args, group, verb, ctx)
     for body in bodies:
-        if begins_owner_decision(body or ""):
+        if not begins_owner_decision(body or ""):
+            continue
+        if role != "director":
             raise Block('only the owner posts a comment that begins "Owner decision". Draft it in a file for them.')
+        if not quotes_approved(body):
+            raise Block('the director posts a comment that begins "Owner decision" only after the owner says "approved" in chat, and the comment quotes the owner\'s words: put them in double quotes, with the word approved in them. Otherwise draft it in a file for the owner.')
 
 
 def label_values(args, flags):
@@ -622,9 +640,9 @@ def check_gh(role, argv, ctx=None):
     rest = args[2:]
     read = gh_is_read(args)
 
-    # Every role: only the owner writes "Owner decision".
+    # Only the owner writes "Owner decision", and the director for the owner.
     if not read:
-        check_bodies(argv, args, group, verb, ctx)
+        check_bodies(role, argv, args, group, verb, ctx)
 
     # Every role: an alias can hide any other gh command from this check.
     if group == "alias" and verb in ("set", "import", "delete"):

@@ -387,6 +387,49 @@ expect allow director "gh api graphql -f query='query { repository(owner: \"tonh
 expect allow director "gh api graphql -f query='mutation { addComment(input: {subjectId: \"I_1\", body: \"Checked, all green\"}) { clientMutationId } }'"
 rm -rf "$od"
 
+# The director, and only the director, may post an Owner decision comment
+# when its body quotes the owner's "approved" (rule 3 of the owner's rules).
+ok=$(mktemp -d)
+printf 'Owner decision: approved, for the change in #242 and nothing wider.\n\nPosted by the director for the owner. The owner said in chat on 2026-11-28: "#234: approved."\n' >"$ok/quoted.md"
+printf 'Owner decision: approved, for the change in #242 and nothing wider.\n\nThe owner said in chat on 2026-11-28:\n\n> #234: approved.\n' >"$ok/blockquote.md"
+printf 'Owner decision: approved, for the change in #242.\n\nThe owner said: \342\200\234#234: approved.\342\200\235\n' >"$ok/curly.md"
+printf 'Owner decision: approved, for the change in #242 and nothing wider.\n' >"$ok/unquoted.md"
+printf 'Owner decision: scope is the alert rules. The owner said: "go ahead".\n' >"$ok/otherword.md"
+printf 'Owner decision: the owner has "not approved" this.\n' >"$ok/negated.md"
+python3 -c 'import json,sys; json.dump({"body": open(sys.argv[1]).read()}, open(sys.argv[2], "w"))' "$ok/quoted.md" "$ok/quoted.json"
+python3 -c 'import json,sys; json.dump({"body": open(sys.argv[1]).read()}, open(sys.argv[2], "w"))' "$ok/unquoted.md" "$ok/unquoted.json"
+
+expect allow director "gh issue comment 234 -R tonhe/viaduct --body-file $ok/quoted.md"
+expect allow director "gh issue comment 234 --body-file $ok/blockquote.md"
+expect allow director "gh issue comment 234 --body-file $ok/curly.md"
+expect allow director "gh pr comment 12 -F $ok/quoted.md"
+expect allow director "gh api -X POST $C/issues/234/comments -F body=@$ok/quoted.md"
+expect allow director "gh api -X PATCH $C/issues/comments/7230155611 -F body=@$ok/quoted.md"
+expect allow director "gh api -X POST $C/issues/234/comments --input $ok/quoted.json"
+expect allow director "gh issue comment 234 --body 'Owner decision: approved for #242. The owner said in chat: \"#234: approved.\"'"
+# the quote must be there, and must hold the word
+expect block director "gh issue comment 234 --body-file $ok/unquoted.md"
+expect block director "gh issue comment 234 --body-file $ok/otherword.md"
+expect block director "gh issue comment 234 --body-file $ok/negated.md"
+expect block director "gh api -X POST $C/issues/234/comments --input $ok/unquoted.json"
+expect block director "gh issue comment 234 --body 'Owner decision: approved, for the change in #242'"
+expect block director "gh issue comment 234 --body 'Owner decision: \"disapproved\"'"
+# a body the guard cannot read is still refused, quote or not
+expect block director "gh issue comment 234 --body-file - < $ok/quoted.md"
+expect block director "cp $ok/unquoted.md $ok/quoted.md; gh issue comment 234 --body-file $ok/quoted.md"
+expect block director "gh issue comment 234 --body \"\$(cat $ok/quoted.md)\""
+expect block director "gh api graphql -f query='mutation { addComment(input: {subjectId: \"I_1\", body: \"Owner decision: the owner said \\\"approved\\\"\"}) { clientMutationId } }'"
+# every other role stays blocked, with the same body
+for role in dev tester; do
+  expect block "$role" "gh pr comment 12 --body-file $ok/quoted.md"
+  expect block "$role" "gh pr comment 12 -F $ok/blockquote.md"
+  expect block "$role" "gh pr comment 12 --body 'Owner decision: approved for #242. The owner said in chat: \"#234: approved.\"'"
+done
+expect block dev "gh api -X POST $C/issues/234/comments -F body=@$ok/quoted.md"
+expect block dev "gh api -X POST $C/issues/234/comments --input $ok/quoted.json"
+expect block dev "gh issue comment 234 --body-file $ok/quoted.md"
+rm -rf "$ok"
+
 # every role: releases
 for role in director dev tester; do
   expect block "$role" "git tag -a v0.3.1 -m v0.3.1"
