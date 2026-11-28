@@ -140,6 +140,41 @@ func TestStatusBar_HopCountAndQuitAlwaysShown(t *testing.T) {
 	}
 }
 
+// Probe Detail notes the echo cadence only when the echo budget spreads the
+// path's nodes over more than one round (viaduct#141).
+func TestStatusBar_EchoCadenceNote(t *testing.T) {
+	cases := []struct {
+		name   string
+		budget int
+		want   string // "" for no note
+	}{
+		{"every round, default budget", 0, ""},
+		{"every round, budget equals nodes", 25, ""},
+		{"two rounds", 24, "echo every 2 rounds"},
+		{"seven rounds", 4, "echo every 7 rounds"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := multiTargetModel(400, 40, 1, 25)
+			m.viewMode = ViewProbeDetail
+			m.sessions[0].probeCfg.EchoBudget = tc.budget
+			status := statusBar(m)
+			if strings.Contains(status, "cadence") || strings.Contains(status, "pairs/budget") {
+				t.Errorf("status bar still carries the formula note: %q", status)
+			}
+			if tc.want == "" {
+				if strings.Contains(status, "echo every") {
+					t.Errorf("status bar = %q, want no echo note when every node is echoed each round", status)
+				}
+				return
+			}
+			if !strings.Contains(status, tc.want) {
+				t.Errorf("status bar = %q, want it to contain %q", status, tc.want)
+			}
+		})
+	}
+}
+
 // The whole drop order, read off one status bar holding every kind of
 // segment as the terminal narrows a column at a time.
 func TestStatusBar_DropOrder(t *testing.T) {
@@ -148,12 +183,14 @@ func TestStatusBar_DropOrder(t *testing.T) {
 	m.autoScroll = false
 	m.scrollOffset = 2
 	m.sessions[0].notice = "no IPv6 route to 2001:db8::1; using IPv4"
+	// 25 echo targets at 4 a round: the cadence note is shown.
+	m.sessions[0].probeCfg.EchoBudget = 4
 	m.width = 400
 	full := statusBar(m)
 
 	// First to go at the top, last at the bottom.
 	order := []string{
-		"echo cadence",
+		"echo every 7 rounds",
 		"DNS: ",
 		"Elapsed: ",
 		"r:reset",
