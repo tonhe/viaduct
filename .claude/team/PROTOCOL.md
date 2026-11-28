@@ -6,7 +6,7 @@ How the local viaduct agent team works. It applies only to sessions started by `
 
 | Role | Session | Does | Does not |
 |---|---|---|---|
-| director | `viaduct-director` | merges PRs, sets labels and milestones, triages, writes its handoff, drafts Owner decisions for the owner, deletes merged branches, closes duplicate issues | write code or history; post a comment that begins "Owner decision" |
+| director | `viaduct-director` | merges PRs, sets labels and milestones, triages, writes its handoff, drafts Owner decisions for the owner, deletes merged branches, closes duplicate issues | write code or history; post a comment that begins "Owner decision" before the owner says "approved" in chat (rule 3 of the owner's rules in DELEGATIONS.md) |
 | dev | `viaduct-dev` | writes code in its own worktree, pushes branches, opens PRs, claims issues | merge; change routing labels (`agent:ready`, `needs:human`, `risk:*`); set milestones |
 | tester | `viaduct-tester` | live runs under the passwordless test sudo rules, posts live-check results as PR comments | any git write; any other `gh` write |
 
@@ -37,7 +37,7 @@ Discard a run when the host slept or stalled during it, and say so.
 
 ## Merging (director)
 
-Merge only what `DELEGATIONS.md` allows. Use `gh pr merge N -R tonhe/viaduct --squash --delete-branch`. Deleting the merged branch is delegated (D6 in DELEGATIONS.md). Read the pull request, its checks and its live-check comments yourself before merging. A dev or tester saying it is ready is not enough.
+Merge only what `DELEGATIONS.md` allows. Use `gh pr merge N -R tonhe/viaduct --squash --delete-branch`. Deleting the merged branch is delegated (D6 in DELEGATIONS.md). Read the pull request, its checks and its live-check comments yourself before merging. A dev or tester saying it is ready is not enough. At most 10 merges per session, then stop and send the owner the summary (rule 6 of the owner's rules in DELEGATIONS.md).
 
 ## Staying out of the nightly loop's way
 
