@@ -491,12 +491,16 @@ func TestWriteJSON_WriterError(t *testing.T) {
 
 // The CSV writers hand back the error of a writer that fails while a report
 // larger than their buffer is being written, whether it fails at once or after
-// the first full buffer.
-//
-// A report smaller than the buffer is not covered here: for it the CSV writers
-// return nil from a failing writer today, and so do the DOT writers for any
-// report. That is viaduct#284, and needs a change to the writers.
+// the first full buffer. A report smaller than the buffer reaches the writer
+// only when the CSV writer flushes, and the error comes back from there too.
 func TestWriteCSV_WriterErrorOnALargeReport(t *testing.T) {
+	small := cellReport()
+	if err := WriteCSV(&failAfter{}, small); !errors.Is(err, errDiskFull) {
+		t.Errorf("WriteCSV of a small report to a failing writer: error = %v, want %v", err, errDiskFull)
+	}
+	if err := WriteCSVMulti(&failAfter{}, MultiReport{Targets: []Report{small}}); !errors.Is(err, errDiskFull) {
+		t.Errorf("WriteCSVMulti of a small report to a failing writer: error = %v, want %v", err, errDiskFull)
+	}
 	for _, limit := range []int{0, 5000} {
 		if err := WriteCSV(&failAfter{limit: limit}, bigReport()); !errors.Is(err, errDiskFull) {
 			t.Errorf("WriteCSV to a writer that fails after %d bytes: error = %v, want %v", limit, err, errDiskFull)
