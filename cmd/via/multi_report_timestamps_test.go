@@ -2,18 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata"
 )
 
 // In multi-target JSON every timestamp is UTC: the envelope's, a traced
 // target's and a failed target's (viaduct#108 item 9). They used to be UTC
 // for the envelope and local time for each target.
 func TestRunMultiReport_JSONTimestampsAreAllUTC(t *testing.T) {
-	saved := time.Local
-	time.Local = time.FixedZone("test", -(7*3600 + 30*60))
-	t.Cleanup(func() { time.Local = saved })
+	if !inNonUTCZone(t) {
+		return
+	}
 
 	installStubTracer(t, buildV4Results(), nil)
 	out := captureStdout(t, func() { runMultiReport(mixedSpecs(), "icmp", true, "json") })
@@ -47,4 +51,28 @@ func TestRunMultiReport_JSONTimestampsAreAllUTC(t *testing.T) {
 	if !sawFailed {
 		t.Error("fixture: no failed target in the output")
 	}
+}
+
+// inNonUTCZone runs the calling test again in a child process whose time zone
+// is not UTC, and reports whether this process is that child. The parent
+// returns false after the child has passed or failed. The zone is set through
+// the TZ variable of a new process because time.Local is process-wide: a test
+// that assigns to it races with every goroutine that reads the clock.
+// Windows takes its zone from the system and ignores TZ, so there the child
+// runs in the host's zone.
+func inNonUTCZone(t *testing.T) bool {
+	t.Helper()
+	const marker = "VIA_TEST_ZONE_CHILD"
+	if os.Getenv(marker) != "" {
+		if _, offset := time.Now().Zone(); offset == 0 && runtime.GOOS != "windows" {
+			t.Fatal("fixture: the child process is in UTC, want a zone with an offset")
+		}
+		return true
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "TZ=Asia/Kolkata", marker+"=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the test failed in a non-UTC zone: %v\n%s", err, out)
+	}
+	return false
 }
