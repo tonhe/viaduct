@@ -276,7 +276,7 @@ func TestProbeDetail_ShowsStartErrorAlertAndExportStatus(t *testing.T) {
 }
 
 func TestProbeDetail_RowsFitTheTerminal(t *testing.T) {
-	for _, w := range []int{60, 80, 120} {
+	for _, w := range []int{40, 60, 80, 120} {
 		m := pdModel(w, 30)
 		m.sessions[0].target = "a-rather-long-hostname.subdomain.example.net"
 		m.sessions[0].targetIP = net.ParseIP("2001:db8:1234:5678:9abc:def0:1234:5678")
@@ -342,5 +342,29 @@ func TestProbeDetail_DoesNotReplaceColumnView(t *testing.T) {
 	}
 	if strings.Contains(out, "% of replies") {
 		t.Errorf("Probe Detail table is shown in column view:\n%s", out)
+	}
+}
+
+// The four columns that are always shown fit the 40-column minimum layout:
+// once the address is at its minimum, the loss column gives up its spare
+// cell, and only then.
+func TestComputePDLayout_FitsTheMinimumWidth(t *testing.T) {
+	for _, hasPrimary := range []bool{true, false} {
+		l := computePDLayout(40, 39, hasPrimary)
+		if l.width() != 40 || l.ipw != minIPColWidth || l.lossw != minWidthLossCell {
+			t.Errorf("at 40 columns (primary=%v): width %d, %+v", hasPrimary, l.width(), l)
+		}
+		if l := computePDLayout(41, 39, hasPrimary); l.width() != 41 || l.lossw != pdWidthLoss {
+			t.Errorf("at 41 columns (primary=%v) the loss column keeps its width: width %d, %+v", hasPrimary, l.width(), l)
+		}
+	}
+	if l := computePDLayout(0, 39, true); l.lossw != pdWidthLoss {
+		t.Errorf("unknown terminal width: %+v", l)
+	}
+	// The narrowed cell still holds the longest loss figure.
+	for _, kind := range []hop.LossKind{hop.LossMeasured, hop.LossRateLimited, hop.LossProvisional} {
+		if s := hop.FormatLoss(100, kind); len([]rune(s)) > minWidthLossCell {
+			t.Errorf("%q is wider than the narrowed loss cell (%d)", s, minWidthLossCell)
+		}
 	}
 }
